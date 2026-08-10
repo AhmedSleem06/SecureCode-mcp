@@ -1,5 +1,5 @@
 {
-  "name": "@usesecurecode/mcp",
+  "name": "@securecode-ai/mcp",
   "version": "0.1.0",
   "description": "Standalone SecureCode MCP server — scan, map, fix, and attack tools for AI coding assistants. Works without the VS Code extension.",
   "main": "dist/index.js",
@@ -11,8 +11,13 @@
     "start": "node dist/index.js serve",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm test"
   },
+  "files": [
+    "dist/",
+    "resources/tree-sitter/"
+  ],
   "keywords": [
     "mcp",
     "security",
@@ -25,6 +30,17 @@
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AhmedSleem06/SecureCode-mcp.git"
+  },
+  "homepage": "https://usesecurecode.tech",
+  "bugs": {
+    "url": "https://github.com/AhmedSleem06/SecureCode-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "web-tree-sitter": "0.26.11"

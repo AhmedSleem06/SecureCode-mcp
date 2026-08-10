@@ -5,7 +5,7 @@ Standalone MCP (Model Context Protocol) server for SecureCode AI. Provides secur
 ## Install
 
 ```bash
-npm install -g @usesecurecode/mcp
+npm install -g @securecode-ai/mcp
 ```
 
 ## Authenticate
