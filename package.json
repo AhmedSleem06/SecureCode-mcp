@@ -1,0 +1,35 @@
+{
+  "name": "@usesecurecode/mcp",
+  "version": "0.1.0",
+  "description": "Standalone SecureCode MCP server — scan, map, fix, and attack tools for AI coding assistants. Works without the VS Code extension.",
+  "main": "dist/index.js",
+  "bin": {
+    "securecode-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p ./",
+    "start": "node dist/index.js serve",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "mcp",
+    "security",
+    "scanner",
+    "vulnerability",
+    "ai",
+    "code-analysis",
+    "securecode"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.2",
+    "vitest": "^2.1.0"
+  }
+}
