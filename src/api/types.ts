@@ -8,6 +8,42 @@ export interface ScanRequest {
         relatedFiles?: Array<{ path: string; content: string; role: string }>;
         endpointContext?: unknown;
     };
+    /** Phase B/C/E: AST-derived sink findings + taint flows + guard evals. */
+    deterministicFacts?: {
+        sinks?: Array<{
+            line: number;
+            endLine: number;
+            sink: string;
+            canonicalType: string;
+            severity: string;
+            callExpression: string;
+            arguments: Array<{ kind: string; value?: string; interpolated?: boolean }>;
+            enclosingFunction?: string | null;
+            isInsideTryCatch: boolean;
+        }>;
+        taint?: Array<{
+            source: string;
+            sourceLine: number;
+            sink: string;
+            sinkLine: number;
+            canonicalType: string;
+            propagationPath: Array<{
+                line: number;
+                variable: string;
+                operation: string;
+                description: string;
+            }>;
+            isTainted: boolean;
+        }>;
+        guards?: Array<{
+            guardName: string;
+            guardType: string;
+            attackType: string;
+            effective: boolean;
+            reason: string;
+            bypassExample?: string;
+        }>;
+    };
 }
 
 export interface ScanFinding {
