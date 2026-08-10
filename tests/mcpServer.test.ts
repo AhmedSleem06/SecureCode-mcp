@@ -188,7 +188,7 @@ describe('SecureCode MCP — protocol conformance', () => {
         expect(res.protocolVersion).toBe('2025-03-26');
         expect(res.capabilities).toBeDefined();
         expect(res.serverInfo.name).toBe('securecode-mcp');
-        expect(res.serverInfo.version).toBe('0.1.0');
+        expect(res.serverInfo.version).toBe('0.2.0');
     });
 
     it('notifications/initialized is accepted with no response', async () => {

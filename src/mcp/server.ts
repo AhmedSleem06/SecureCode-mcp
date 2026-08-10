@@ -8,7 +8,7 @@ import { toolAttack } from '../tools/attack';
 
 const PROTOCOL_VERSION = '2025-03-26';
 const SERVER_NAME = 'securecode-mcp';
-const SERVER_VERSION = '0.1.0';
+const SERVER_VERSION = '0.2.0';
 
 let initialized = false;
 
@@ -22,6 +22,16 @@ function result(id: number | string | null, value: unknown): void {
 
 function error(id: number | string | null, code: number, message: string, data?: unknown): void {
     send({ jsonrpc: '2.0', id, error: { code, message, data } });
+}
+
+/** Send a progress notification so the MCP client knows the server is still working. */
+function sendProgress(progressToken: string | number | undefined, progress: number, total: number, message: string): void {
+    if (progressToken === undefined) return;
+    send({
+        jsonrpc: '2.0',
+        method: 'notifications/progress',
+        params: { progressToken, progress, total, message },
+    });
 }
 
 const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<unknown>> = {
@@ -81,9 +91,10 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
                 return { jsonrpc: '2.0', id, result: { tools: TOOLS } };
             }
             case 'tools/call': {
-                const params = (req.params || {}) as { name?: string; arguments?: any };
+                const params = (req.params || {}) as { name?: string; arguments?: any; _meta?: { progressToken?: string | number } };
                 const name = params.name;
                 const args = params.arguments || {};
+                const progressToken = params._meta?.progressToken;
                 const handler = name ? TOOL_HANDLERS[name] : undefined;
                 if (!handler) {
                     return { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${name}` } };
@@ -95,6 +106,11 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
                 const invalid = validateArgs(toolDef, args);
                 if (invalid) {
                     return { jsonrpc: '2.0', id, error: { code: -32602, message: invalid } };
+                }
+                // Pass progress callback to the handler via args
+                if (progressToken !== undefined) {
+                    args._progress = (progress: number, total: number, message: string) =>
+                        sendProgress(progressToken, progress, total, message);
                 }
                 const result_data = await handler(ctx, args);
                 return {

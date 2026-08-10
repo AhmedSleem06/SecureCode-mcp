@@ -6,9 +6,21 @@ import { buildProjectMap } from '../project-map/mapBuilder';
 
 export async function toolMap(ctx: ServerContext, args: any): Promise<unknown> {
     const action = (args.action as string) || 'endpoints';
+    const progressFn = args._progress as ((progress: number, total: number, message: string) => void) | undefined;
 
     if (action === 'build') {
-        const result = await buildProjectMap({ workspaceRoot: ctx.workspaceRoot });
+        let lastProgress = 0;
+        const result = await buildProjectMap({
+            workspaceRoot: ctx.workspaceRoot,
+            onProgress: (processed, total, file) => {
+                // Send progress at most every 5% or every 25 files
+                const pct = Math.floor((processed / total) * 100);
+                if (pct >= lastProgress + 5 || processed - lastProgress >= 25 || processed === total) {
+                    lastProgress = pct;
+                    progressFn?.(processed, total, `Mapping ${file} (${processed}/${total})`);
+                }
+            },
+        });
         writeCache(ctx.workspaceRoot, result.map);
         return {
             built: true,

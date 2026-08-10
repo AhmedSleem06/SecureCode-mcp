@@ -17,8 +17,40 @@ const SUPPORTED_EXTENSIONS = new Set([
     '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py',
 ]);
 
-const MAX_FILES = 2000;
+const MAX_FILES = 500;
 const MAX_FILE_SIZE = 1024 * 1024;
+
+/** Read .securecodeignore and return a set of glob patterns to skip. */
+function readSecurecodeIgnore(root: string): Set<string> {
+    const patterns = new Set<string>();
+    try {
+        const ignorePath = path.join(root, '.securecodeignore');
+        if (fs.existsSync(ignorePath)) {
+            const content = fs.readFileSync(ignorePath, 'utf8');
+            for (const line of content.split('\n')) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith('#')) continue;
+                patterns.add(trimmed);
+            }
+        }
+    } catch { /* best effort */ }
+    return patterns;
+}
+
+/** Check if a relative path matches any ignore pattern (simple glob). */
+function isIgnored(relPath: string, patterns: Set<string>): boolean {
+    for (const pattern of patterns) {
+        // Directory pattern: "dir/" matches anything under dir/
+        if (pattern.endsWith('/')) {
+            if (relPath.startsWith(pattern) || relPath.startsWith(pattern.replace(/\/$/, '/'))) return true;
+        }
+        // Exact match
+        if (relPath === pattern) return true;
+        // Prefix match for bare directory names
+        if (!pattern.includes('.') && relPath.startsWith(pattern + '/')) return true;
+    }
+    return false;
+}
 
 export interface BuildOptions {
     workspaceRoot: string;
@@ -34,7 +66,7 @@ export interface BuildResult {
     durationMs: number;
 }
 
-function discoverFiles(root: string): string[] {
+function discoverFiles(root: string, ignorePatterns: Set<string>): string[] {
     const results: string[] = [];
     const stack: string[] = [root];
     let count = 0;
@@ -59,8 +91,11 @@ function discoverFiles(root: string): string[] {
             } else if (entry.isFile()) {
                 const ext = path.extname(entry.name).toLowerCase();
                 if (SUPPORTED_EXTENSIONS.has(ext)) {
-                    results.push(fullPath);
-                    count++;
+                    const relPath = path.relative(root, fullPath).replace(/\\/g, '/');
+                    if (!isIgnored(relPath, ignorePatterns)) {
+                        results.push(fullPath);
+                        count++;
+                    }
                 }
             }
         }
@@ -78,7 +113,8 @@ export async function buildProjectMap(opts: BuildOptions): Promise<BuildResult> 
     const root = path.resolve(opts.workspaceRoot);
     const maxFiles = opts.maxFiles ?? MAX_FILES;
 
-    const files = discoverFiles(root);
+    const ignorePatterns = readSecurecodeIgnore(root);
+    const files = discoverFiles(root, ignorePatterns);
     const total = Math.min(files.length, maxFiles);
 
     const fileExtractions: FileExtraction[] = [];
