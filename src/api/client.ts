@@ -123,4 +123,57 @@ export class ApiClient {
             req.end();
         });
     }
+
+    /**
+     * POST without an Authorization header — for login/OTP before a token exists.
+     */
+    static async postJsonNoAuth(baseUrl: string, path: string, body: unknown, timeoutMs = 30_000): Promise<any> {
+        const url = `${baseUrl.replace(/\/$/, '')}${path}`;
+        const payload = JSON.stringify(body);
+        const parsed = new URL(url);
+        const lib = parsed.protocol === 'https:' ? https : http;
+
+        return new Promise<any>((resolve, reject) => {
+            const req = lib.request(
+                {
+                    hostname: parsed.hostname,
+                    port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+                    path: parsed.pathname + parsed.search,
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Content-Length': Buffer.byteLength(payload),
+                    },
+                },
+                (res) => {
+                    let raw = '';
+                    res.on('data', (chunk: Buffer) => { raw += chunk.toString('utf8'); });
+                    res.on('end', () => {
+                        let data: any;
+                        try { data = raw ? JSON.parse(raw) : {}; } catch { data = { raw }; }
+                        const status = res.statusCode ?? 0;
+                        if (status >= 200 && status < 300) {
+                            resolve(data);
+                        } else {
+                            reject(new ApiClientError(
+                                status,
+                                data.code,
+                                data.error || data.message || `HTTP ${status}`,
+                                data.remaining,
+                            ));
+                        }
+                    });
+                },
+            );
+            req.on('error', (err) => {
+                reject(new ApiClientError(0, undefined, `Network error: ${err.message}`, undefined));
+            });
+            req.setTimeout(timeoutMs, () => {
+                req.destroy();
+                reject(new ApiClientError(0, undefined, `Request timed out after ${timeoutMs}ms`, undefined));
+            });
+            req.write(payload);
+            req.end();
+        });
+    }
 }

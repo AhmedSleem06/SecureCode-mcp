@@ -1,6 +1,6 @@
 {
   "name": "@securecode-ai/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone SecureCode MCP server — scan, map, fix, and attack tools for AI coding assistants. Works without the VS Code extension.",
   "main": "dist/index.js",
   "bin": {

@@ -14,7 +14,9 @@ npm install -g @securecode-ai/mcp
 securecode-mcp login
 ```
 
-Or set the `SECURECODE_API_TOKEN` environment variable.
+Enter your email, receive a 6-digit verification code, and paste it back. Your JWT is stored in the OS keychain (Windows Credential Manager, macOS Keychain, or Linux Secret Service). If the keychain is unavailable, it falls back to `~/.securecode/credentials.json` (mode 0600).
+
+Alternatively, set the `SECURECODE_API_TOKEN` environment variable.
 
 ## MCP client configuration
 
@@ -50,14 +52,14 @@ claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/y
 
 ```bash
 securecode-mcp serve [--workspace <path>]    Start the MCP stdio server
-securecode-mcp login [--api-url <url>]      Store your API token
+securecode-mcp login [--api-url <url>]      Authenticate via email + OTP
 securecode-mcp status                       Show auth status
 securecode-mcp logout                       Remove credentials
 ```
 
 ## Security
 
-- No API token in MCP client configuration — credentials are stored in `~/.securecode/credentials.json` (mode 0600) or the `SECURECODE_API_TOKEN` env var.
+- Credentials stored in OS keychain (Windows Credential Manager, macOS Keychain, Linux Secret Service) with file fallback.
 - File reads are confined to the `--workspace` root.
 - Fixes are returned for review and never auto-applied.
 - No telemetry.
