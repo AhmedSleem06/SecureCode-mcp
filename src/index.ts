@@ -78,14 +78,21 @@ async function cmdLogin(args: string[]): Promise<void> {
         process.exit(1);
     }
 
-    CredentialStore.save({
+    const result = CredentialStore.save({
         apiToken: token.trim(),
         apiUrl,
         storedAt: new Date().toISOString(),
     });
 
     console.log('');
-    console.log('Credentials saved to ~/.securecode/credentials.json');
+    if (result.method === 'keychain') {
+        console.log('Credentials saved to OS keychain.');
+    } else {
+        console.log(`Credentials saved to ~/.securecode/credentials.json (mode 0600).`);
+        if (result.warning) {
+            console.log(`Warning: ${result.warning}`);
+        }
+    }
     console.log('You can now run: securecode-mcp serve --workspace /path/to/project');
 }
 
@@ -99,7 +106,7 @@ function cmdStatus(): void {
     console.log('Authenticated');
     console.log(`  API URL: ${creds.apiUrl}`);
     console.log(`  Token: ${creds.apiToken.substring(0, 8)}...${creds.apiToken.slice(-4)}`);
-    console.log(`  Stored: ${creds.storedAt}`);
+    console.log(`  Storage: ${creds.storedAt}`);
 }
 
 function cmdLogout(): void {
