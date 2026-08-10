@@ -1,36 +1,36 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { ProjectMap } from '../api/types';
 import type { ServerContext } from '../mcp/types';
+import { readCache, writeCache, cacheStatus } from '../project-map/cache';
+import { buildProjectMap } from '../project-map/mapBuilder';
 
 export async function toolMap(ctx: ServerContext, args: any): Promise<unknown> {
     const action = (args.action as string) || 'endpoints';
-    const mapPath = path.join(ctx.workspaceRoot, '.securecode', 'project-map.json');
 
-    if (!fs.existsSync(mapPath)) {
+    if (action === 'build') {
+        const result = await buildProjectMap({ workspaceRoot: ctx.workspaceRoot });
+        writeCache(ctx.workspaceRoot, result.map);
         return {
-            endpoints: [],
-            note: 'No Project Map cache found. Run "securecode-mcp map --build" or open the workspace in VS Code with the SecureCode extension and run "SecureCode: Rebuild Project Map".',
-        };
-    }
-
-    let map: ProjectMap;
-    try {
-        map = JSON.parse(fs.readFileSync(mapPath, 'utf8')) as ProjectMap;
-    } catch {
-        return {
-            endpoints: [],
-            error: 'Project Map cache is corrupted. Rebuild the map.',
+            built: true,
+            endpoints: (result.map.endpoints || []).length,
+            filesProcessed: result.filesProcessed,
+            filesSkipped: result.filesSkipped,
+            errors: result.errors,
+            durationMs: result.durationMs,
+            builtAt: result.map.builtAt,
         };
     }
 
     if (action === 'status') {
-        return {
-            builtAt: map.builtAt,
-            version: map.version,
-            endpointCount: (map.endpoints || []).length,
-            fileCount: map.files ? Object.keys(map.files).length : 0,
-        };
+        return cacheStatus(ctx.workspaceRoot);
+    }
+
+    // Default: return endpoints (read from cache, or build if no cache)
+    let map = readCache(ctx.workspaceRoot);
+    if (!map) {
+        const result = await buildProjectMap({ workspaceRoot: ctx.workspaceRoot });
+        writeCache(ctx.workspaceRoot, result.map);
+        map = result.map;
     }
 
     return {
@@ -42,8 +42,6 @@ export async function toolMap(ctx: ServerContext, args: any): Promise<unknown> {
             line: e.line,
             authScheme: e.authScheme,
             dataLayer: e.dataLayer,
-            middleware: e.middleware,
-            params: e.params,
             confidence: e.confidence,
         })),
         builtAt: map.builtAt,

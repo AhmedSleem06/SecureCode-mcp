@@ -26,14 +26,14 @@ export const TOOLS: ToolDef[] = [
     {
         name: 'securecode.map',
         description:
-            'Get the Project Map for the workspace — extracted endpoints, middleware, auth scheme, and ORM. Read-only: no approval needed. Returns the endpoint list. If no cached map exists, returns an empty list with instructions.',
+            'Get or build the Project Map for the workspace — extracted endpoints, middleware, auth scheme, and ORM. Read-only: no approval needed. Actions: "endpoints" (default, returns the endpoint list), "status" (map metadata), "build" (rebuild the map from source).',
         inputSchema: {
             type: 'object',
             properties: {
                 action: {
                     type: 'string',
-                    enum: ['status', 'endpoints'],
-                    description: 'What to return: "status" for map metadata, "endpoints" for the endpoint list (default).',
+                    enum: ['status', 'endpoints', 'build'],
+                    description: 'What to do: "status" for map metadata, "endpoints" for the endpoint list (default), "build" to rebuild the map from source.',
                 },
             },
         },
