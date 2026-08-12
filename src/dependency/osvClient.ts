@@ -100,6 +100,16 @@ export async function queryOsvBatch(
         }
         if (!resp || !Array.isArray(resp.results)) continue;
 
+        // Positional alignment guard: OSV querybatch contract guarantees
+        // results.length === queries.length, with null entries for no-match.
+        // If the response is shorter, the positional mapping would silently
+        // misattribute advisory IDs across packages. Skip the batch rather
+        // than risk cross-package ID leakage.
+        if (resp.results.length !== keyForIndex.length) {
+            console.warn(`[OSV] batch result length mismatch: ${resp.results.length} vs ${keyForIndex.length} queries — skipping batch to prevent ID misattribution`);
+            continue;
+        }
+
         for (let j = 0; j < resp.results.length; j++) {
             const key = keyForIndex[j];
             if (!key) continue;

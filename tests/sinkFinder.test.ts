@@ -156,6 +156,67 @@ spawn(cmd);`;
         expect(sqlSinks.length).toBe(0);
     });
 
+    // ── SQL raw (knex.raw / sequelize.raw) ──────────────────────────────
+
+    it('detects knex.raw with template interpolation', async () => {
+        const code = 'const r = knex.raw(`SELECT * FROM users WHERE id = ${userId}`);';
+        const sinks = await findSinks(code, 'javascript');
+        const sqlSinks = sinks.filter(s => s.sink === 'sql-raw');
+        expect(sqlSinks.length).toBe(1);
+        expect(sqlSinks[0].canonicalType).toBe('sql_injection');
+    });
+
+    it('does NOT flag knex.raw with literal string', async () => {
+        const code = `const r = knex.raw("SELECT * FROM users WHERE id = ?");`;
+        const sinks = await findSinks(code, 'javascript');
+        const sqlSinks = sinks.filter(s => s.sink === 'sql-raw');
+        expect(sqlSinks.length).toBe(0);
+    });
+
+    // ── NoSQL injection ─────────────────────────────────────────────────
+
+    it('detects mongoose.where with non-literal argument', async () => {
+        const code = 'Model.where(`name = ${userInput}`);';
+        const sinks = await findSinks(code, 'javascript');
+        const nosqlSinks = sinks.filter(s => s.sink === 'nosql-where-method');
+        expect(nosqlSinks.length).toBe(1);
+        expect(nosqlSinks[0].canonicalType).toBe('nosql_injection');
+    });
+
+    it('does NOT flag mongoose.where with literal string', async () => {
+        const code = `Model.where("name = 'safe'");`;
+        const sinks = await findSinks(code, 'javascript');
+        const nosqlSinks = sinks.filter(s => s.sink === 'nosql-where-method');
+        expect(nosqlSinks.length).toBe(0);
+    });
+
+    // ── JS insecure deserialization ─────────────────────────────────────
+
+    it('detects unserialize() call (RCE-class)', async () => {
+        const code = `const obj = unserialize(req.body.data);`;
+        const sinks = await findSinks(code, 'javascript');
+        const deserSinks = sinks.filter(s => s.sink === 'js-unserialize');
+        expect(deserSinks.length).toBe(1);
+        expect(deserSinks[0].canonicalType).toBe('insecure_deserialization');
+    });
+
+    // ── LDAP injection ─────────────────────────────────────────────────
+
+    it('detects ldapjs client.search with non-literal filter', async () => {
+        const code = 'client.search(`ou=users,${filter}`);';
+        const sinks = await findSinks(code, 'javascript');
+        const ldapSinks = sinks.filter(s => s.sink === 'ldap-search');
+        expect(ldapSinks.length).toBe(1);
+        expect(ldapSinks[0].canonicalType).toBe('ldap_injection');
+    });
+
+    it('does NOT flag ldapjs client.search with literal string', async () => {
+        const code = `client.search("ou=users,dc=example,dc=com");`;
+        const sinks = await findSinks(code, 'javascript');
+        const ldapSinks = sinks.filter(s => s.sink === 'ldap-search');
+        expect(ldapSinks.length).toBe(0);
+    });
+
     // ── XSS ──────────────────────────────────────────────────────────────
 
     it('detects dangerouslySetInnerHTML in TSX', async () => {
@@ -353,5 +414,91 @@ const y = x * 3;
 console.log(y);`;
         const sinks = await findSinks(code, 'javascript');
         expect(sinks).toEqual([]);
+    });
+
+    // ── SSRF (source-aware: only flags when URL is user-controlled) ─────
+
+    it('detects fetch() with user-controlled URL', async () => {
+        const code = `fetch(req.query.url);`;
+        const sinks = await findSinks(code, 'javascript');
+        const ssrfSinks = sinks.filter(s => s.sink === 'ssrf-fetch');
+        expect(ssrfSinks.length).toBe(1);
+        expect(ssrfSinks[0].canonicalType).toBe('ssrf');
+    });
+
+    it('does NOT flag fetch() with internal constant URL', async () => {
+        const code = `fetch(API_BASE_URL);`;
+        const sinks = await findSinks(code, 'javascript');
+        const ssrfSinks = sinks.filter(s => s.sink === 'ssrf-fetch');
+        expect(ssrfSinks.length).toBe(0);
+    });
+
+    it('does NOT flag fetch() with literal URL', async () => {
+        const code = `fetch("https://api.example.com/data");`;
+        const sinks = await findSinks(code, 'javascript');
+        const ssrfSinks = sinks.filter(s => s.sink === 'ssrf-fetch');
+        expect(ssrfSinks.length).toBe(0);
+    });
+
+    it('detects axios.get with user-controlled URL', async () => {
+        const code = `axios.get(req.body.endpoint);`;
+        const sinks = await findSinks(code, 'javascript');
+        const ssrfSinks = sinks.filter(s => s.sink === 'ssrf-axios');
+        expect(ssrfSinks.length).toBe(1);
+    });
+
+    it('does NOT flag axios.get with constant URL', async () => {
+        const code = `axios.get(API_ENDPOINT);`;
+        const sinks = await findSinks(code, 'javascript');
+        const ssrfSinks = sinks.filter(s => s.sink === 'ssrf-axios');
+        expect(ssrfSinks.length).toBe(0);
+    });
+
+    // ── Header injection (source-aware) ────────────────────────────────
+
+    it('detects res.setHeader with user-controlled value', async () => {
+        const code = `res.setHeader("X-Custom", req.query.header);`;
+        const sinks = await findSinks(code, 'javascript');
+        const headerSinks = sinks.filter(s => s.sink === 'header-set');
+        expect(headerSinks.length).toBe(1);
+        expect(headerSinks[0].canonicalType).toBe('header_injection');
+    });
+
+    it('does NOT flag res.setHeader with literal value', async () => {
+        const code = `res.setHeader("Content-Type", "application/json");`;
+        const sinks = await findSinks(code, 'javascript');
+        const headerSinks = sinks.filter(s => s.sink === 'header-set');
+        expect(headerSinks.length).toBe(0);
+    });
+
+    // ── SSTI (source-aware) ────────────────────────────────────────────
+
+    it('detects ejs.render with user-controlled template', async () => {
+        const code = `ejs.render(req.body.template);`;
+        const sinks = await findSinks(code, 'javascript');
+        const sstiSinks = sinks.filter(s => s.sink === 'ssti-ejs');
+        expect(sstiSinks.length).toBe(1);
+        expect(sstiSinks[0].canonicalType).toBe('ssti');
+    });
+
+    it('does NOT flag ejs.render with literal template', async () => {
+        const code = `ejs.render("<h1>Hello <%= name %></h1>");`;
+        const sinks = await findSinks(code, 'javascript');
+        const sstiSinks = sinks.filter(s => s.sink === 'ssti-ejs');
+        expect(sstiSinks.length).toBe(0);
+    });
+
+    it('detects handlebars.compile with user-controlled template', async () => {
+        const code = `handlebars.compile(req.body.tpl);`;
+        const sinks = await findSinks(code, 'javascript');
+        const sstiSinks = sinks.filter(s => s.sink === 'ssti-handlebars');
+        expect(sstiSinks.length).toBe(1);
+    });
+
+    it('does NOT flag handlebars.compile with literal template', async () => {
+        const code = `handlebars.compile("Hello {{name}}");`;
+        const sinks = await findSinks(code, 'javascript');
+        const sstiSinks = sinks.filter(s => s.sink === 'ssti-handlebars');
+        expect(sstiSinks.length).toBe(0);
     });
 });

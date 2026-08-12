@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { toolScanDependencies } from '../src/tools/scanDependencies';
 
-// ── Mock fetch for OSV + GHSA + NVD ────────────────────────────────────
+    // ── Mock fetch for OSV + GHSA + NVD ────────────────────────────────────
 
 function mockFetch(url: string | URL, init?: any): Promise<Response> {
     const u = typeof url === 'string' ? url : url.toString();
@@ -21,13 +21,24 @@ function mockFetch(url: string | URL, init?: any): Promise<Response> {
                         summary: 'Command Injection in lodash',
                         affected: [{
                             package: { ecosystem: 'npm', name: 'lodash' },
-                            ranges: [{
-                                type: 'SEMVER',
-                                events: [{ introduced: '0' }, { fixed: '4.17.21' }],
-                            }],
+                            ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '4.17.21' }] }],
                         }],
                         severity: [{ type: 'CVSS_V3', score: '7.2' }],
                         references: [{ url: 'https://github.com/advisories/GHSA-35jh-r3h4-6jhm' }],
+                    }],
+                };
+            }
+            if (q?.package?.name === 'axios' && q?.version === '0.21.0') {
+                return {
+                    vulns: [{
+                        id: 'GHSA-wf5e-gw64-5v3h',
+                        summary: 'SSRF in axios',
+                        affected: [{
+                            package: { ecosystem: 'npm', name: 'axios' },
+                            ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '0.21.1' }] }],
+                        }],
+                        severity: [{ type: 'CVSS_V3', score: '6.1' }],
+                        references: [{ url: 'https://github.com/advisories/GHSA-wf5e-gw64-5v3h' }],
                     }],
                 };
             }
@@ -58,6 +69,25 @@ function mockFetch(url: string | URL, init?: any): Promise<Response> {
                             patched_version_range: '>= 4.17.21',
                         }],
                         references: [{ url: 'https://github.com/advisories/GHSA-35jh-r3h4-6jhm' }],
+                    },
+                ]),
+            } as Response);
+        }
+        if (pkg === 'axios') {
+            return Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve([
+                    {
+                        ghsa_id: 'GHSA-wf5e-gw64-5v3h',
+                        summary: 'SSRF in axios',
+                        cve_id: 'CVE-2021-3749',
+                        cvss: { score: 6.1 },
+                        vulnerabilities: [{
+                            package: { ecosystem: 'npm', name: 'axios' },
+                            vulnerable_version_range: '< 0.21.1',
+                            patched_version_range: '>= 0.21.1',
+                        }],
+                        references: [{ url: 'https://github.com/advisories/GHSA-wf5e-gw64-5v3h' }],
                     },
                 ]),
             } as Response);
@@ -210,13 +240,43 @@ describe('securecode.scan-dependencies — full pipeline', () => {
         // The rolled-up finding should mention the worst CVE only once.
         const lodashFinding = result.findings.find((f: any) => f.dependency?.name === 'lodash');
         if (lodashFinding) {
-            // The check_id should contain the vuln id exactly once
             expect(lodashFinding.check_id).toContain('GHSA-35jh-r3h4-6jhm');
-            // The message should not list the same advisory id twice
             const matches = lodashFinding.message.match(/GHSA-35jh-r3h4-6jhm/g);
             if (matches) {
                 expect(matches.length).toBe(1);
             }
         }
+    });
+
+    it('multi-package: IDs do not leak across packages', async () => {
+        // Three packages: lodash (vuln GHSA-35jh...), axios (vuln GHSA-wf5e...), clean pkg
+        fs.writeFileSync(path.join(workspace, 'package.json'), '{"name":"test","version":"1.0.0"}');
+        fs.writeFileSync(path.join(workspace, 'package-lock.json'), JSON.stringify({
+            name: 'test',
+            version: '1.0.0',
+            lockfileVersion: 3,
+            packages: {
+                '': { name: 'test', version: '1.0.0' },
+                'node_modules/lodash': { version: '4.17.4' },
+                'node_modules/axios': { version: '0.21.0' },
+                'node_modules/express': { version: '4.18.0' },
+            },
+        }));
+
+        const result = await toolScanDependencies(
+            { apiUrl: '', apiToken: '', workspaceRoot: workspace },
+            {},
+        ) as any;
+
+        expect(result.findings.length).toBe(2);
+        const lodashFinding = result.findings.find((f: any) => f.dependency?.name === 'lodash');
+        const axiosFinding = result.findings.find((f: any) => f.dependency?.name === 'axios');
+        expect(lodashFinding).toBeDefined();
+        expect(axiosFinding).toBeDefined();
+        // Each package must have its OWN advisory ID, not the other's
+        expect(lodashFinding.check_id).toContain('GHSA-35jh-r3h4-6jhm');
+        expect(lodashFinding.check_id).not.toContain('GHSA-wf5e-gw64-5v3h');
+        expect(axiosFinding.check_id).toContain('GHSA-wf5e-gw64-5v3h');
+        expect(axiosFinding.check_id).not.toContain('GHSA-35jh-r3h4-6jhm');
     });
 });

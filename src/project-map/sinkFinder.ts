@@ -16,6 +16,7 @@ import {
     walk, callParts, baseIdentifier, firstAncestor, isIdentifier, isStringLiteral,
 } from './astHelpers';
 import { SINK_REGISTRY, SinkLanguage, SinkDefinition, SinkMatcher } from './sinkRegistry';
+import { matchTaintSource } from './taintSources';
 
 // ── Output types ────────────────────────────────────────────────────────────
 
@@ -107,6 +108,46 @@ function isNonLiteral(arg: ArgInfo): boolean {
     if (arg.kind === 'literal') return false;
     if (arg.kind === 'template' && !arg.interpolated) return false;
     return true;
+}
+
+/**
+ * Check if an argument node's source text contains a user-input taint source.
+ * Used by `requireUserSource` to filter sinks that only matter when the
+ * argument is attacker-controlled (SSRF, header injection, SSTI).
+ *
+ * This is a local text check, not full taint propagation — it catches direct
+ * references like `req.query.url` and `req.body.template` but not indirect
+ * flows like `const url = req.query.url; fetch(url)`. The taint tracker
+ * (Phase C) handles indirect flows separately.
+ */
+function argHasUserSource(
+    argNodes: TreeSitterNode[],
+    source: string,
+    language: SinkLanguage,
+): boolean {
+    for (const node of argNodes) {
+        const text = source.slice(node.startIndex, node.endIndex);
+        // Direct source: req.body, req.query, etc. — also catches template
+        // interpolation `...${req.query.url}...` and concatenation "..." + req.query.url
+        if (matchTaintSource(text, language)) return true;
+        // For template literals, check each interpolation expression
+        if (node.type === 'template_string' || node.type === 'template_literal') {
+            for (const child of walk(node)) {
+                if (child.type === 'template_substitution' || child.type === 'template_expr') {
+                    const exprText = source.slice(child.startIndex, child.endIndex);
+                    if (matchTaintSource(exprText, language)) return true;
+                }
+            }
+        }
+        // For binary expressions (concatenation), check both sides
+        if (node.type === 'binary_expression' || node.type === 'binary_operator_expression') {
+            for (const child of node.namedChildren) {
+                const childText = source.slice(child.startIndex, child.endIndex);
+                if (matchTaintSource(childText, language)) return true;
+            }
+        }
+    }
+    return false;
 }
 
 // ── Enclosing function + try/catch ──────────────────────────────────────────
@@ -274,6 +315,7 @@ export async function findSinks(
                 // injection vector). Checking all args would false-positive
                 // on parameterized queries.
                 if (def.requireNonLiteralArg && !(args.length > 0 && isNonLiteral(args[0]))) continue;
+                if (def.requireUserSource && !argHasUserSource(info.args, source, language)) continue;
                 const key = `${info.line + 1}:${def.canonicalType}`;
                 if (seen.has(key)) continue;
                 seen.add(key);

@@ -54,6 +54,14 @@ export interface SinkDefinition {
      * `db.query("SELECT * FROM users")`.
      */
     requireNonLiteralArg?: boolean;
+    /**
+     * Only report when at least one argument traces to a user-input source
+     * (req.body, req.query, req.params, req.headers, req.cookies, etc.).
+     * Use for sinks where the vulnerability requires attacker-controlled input:
+     * `fetch(req.query.url)` → flagged, `fetch(API_BASE_URL)` → NOT flagged.
+     * Checks the argument's source text against TAINT_SOURCES patterns.
+     */
+    requireUserSource?: boolean;
     description: string;
 }
 
@@ -198,6 +206,28 @@ export const SINK_REGISTRY: SinkDefinition[] = [
         requireNonLiteralArg: true,
         description: 'db.exec/execute with non-literal argument — potential SQL injection',
     },
+    {
+        id: 'sql-raw',
+        canonicalType: 'sql_injection',
+        severity: 'Critical',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: 'raw', receiver: '*' }],
+        requireNonLiteralArg: true,
+        description: 'knex.raw / sequelize.raw with non-literal argument — SQL injection',
+    },
+
+    // ── NoSQL injection (JS/TS/TSX) ────────────────────────────────────────
+    // $where as object property is caught by the regex sink floor (it's an
+    // object key, not a method call, so the AST call-matcher can't see it).
+    {
+        id: 'nosql-where-method',
+        canonicalType: 'nosql_injection',
+        severity: 'Critical',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: 'where', receiver: '*' }],
+        requireNonLiteralArg: true,
+        description: 'mongoose.where with non-literal argument — NoSQL injection',
+    },
 
     // ── SQL injection (Python) ─────────────────────────────────────────────
     {
@@ -317,5 +347,113 @@ export const SINK_REGISTRY: SinkDefinition[] = [
         languages: ['python'],
         matchers: [{ kind: 'call', method: 'load', receiver: 'yaml' }],
         description: 'yaml.load without SafeLoader — insecure deserialization',
+    },
+
+    // ── Insecure deserialization (JS/TS/TSX) ────────────────────────────────
+    {
+        id: 'js-unserialize',
+        canonicalType: 'insecure_deserialization',
+        severity: 'Critical',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: 'unserialize' }],
+        description: 'unserialize() — RCE via node-serialize / php-serialize',
+    },
+
+    // ── LDAP injection (JS/TS/TSX) ──────────────────────────────────────────
+    {
+        id: 'ldap-search',
+        canonicalType: 'ldap_injection',
+        severity: 'High',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: 'search', receiver: '*' }],
+        requireNonLiteralArg: true,
+        description: 'ldapjs client.search with non-literal filter — LDAP injection',
+    },
+
+    // ── SSRF (JS/TS/TSX) ────────────────────────────────────────────────────
+    {
+        id: 'ssrf-fetch',
+        canonicalType: 'ssrf',
+        severity: 'High',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: 'fetch' }],
+        requireUserSource: true,
+        description: 'fetch() with user-controlled URL — Server-Side Request Forgery',
+    },
+    {
+        id: 'ssrf-axios',
+        canonicalType: 'ssrf',
+        severity: 'High',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [
+            { kind: 'call', method: 'get', receiver: 'axios' },
+            { kind: 'call', method: 'post', receiver: 'axios' },
+            { kind: 'call', method: 'put', receiver: 'axios' },
+            { kind: 'call', method: 'request', receiver: 'axios' },
+        ],
+        requireUserSource: true,
+        description: 'axios with user-controlled URL — Server-Side Request Forgery',
+    },
+    {
+        id: 'ssrf-http',
+        canonicalType: 'ssrf',
+        severity: 'High',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [
+            { kind: 'call', method: 'get', receiver: 'http' },
+            { kind: 'call', method: 'request', receiver: 'http' },
+            { kind: 'call', method: 'get', receiver: 'https' },
+            { kind: 'call', method: 'request', receiver: 'https' },
+        ],
+        requireUserSource: true,
+        description: 'http/https.get with user-controlled URL — Server-Side Request Forgery',
+    },
+
+    // ── Header injection (JS/TS/TSX) ────────────────────────────────────────
+    {
+        id: 'header-set',
+        canonicalType: 'header_injection',
+        severity: 'Medium',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [
+            { kind: 'call', method: 'setHeader', receiver: 'res' },
+            { kind: 'call', method: 'setHeader', receiver: 'response' },
+            { kind: 'call', method: 'append', receiver: 'res' },
+            { kind: 'call', method: 'append', receiver: 'response' },
+        ],
+        requireUserSource: true,
+        description: 'res.setHeader/append with user-controlled value — header injection',
+    },
+
+    // ── SSTI (JS/TS/TSX) ────────────────────────────────────────────────────
+    {
+        id: 'ssti-ejs',
+        canonicalType: 'ssti',
+        severity: 'High',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: 'render', receiver: 'ejs' }],
+        requireUserSource: true,
+        description: 'ejs.render with user-controlled template — Server-Side Template Injection',
+    },
+    {
+        id: 'ssti-pug',
+        canonicalType: 'ssti',
+        severity: 'High',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [
+            { kind: 'call', method: 'render', receiver: 'pug' },
+            { kind: 'call', method: 'renderFile', receiver: 'pug' },
+        ],
+        requireUserSource: true,
+        description: 'pug.render with user-controlled template — Server-Side Template Injection',
+    },
+    {
+        id: 'ssti-handlebars',
+        canonicalType: 'ssti',
+        severity: 'High',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: 'compile', receiver: 'handlebars' }],
+        requireUserSource: true,
+        description: 'handlebars.compile with user-controlled template — SSTI',
     },
 ];
