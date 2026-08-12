@@ -34,6 +34,10 @@ export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> 
     // Runs locally via tree-sitter and attaches deterministic facts to the
     // scan request. The MCP has no related-files infrastructure, so the
     // guard evaluator only evaluates guards found in the scanned file itself.
+    //
+    // Taint runs first so its results can feed the sink finder's
+    // requireUserSource gate — this catches indirect flows like
+    // `const url = req.query.url; fetch(url)` that a local text check misses.
     let deterministicFacts: {
         sinks?: Awaited<ReturnType<typeof findSinks>>;
         taint?: Awaited<ReturnType<typeof trackTaint>>;
@@ -43,10 +47,8 @@ export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> 
         const grammar = grammarForFile(filePath);
         if (grammar !== 'unknown') {
             try {
-                const [sinks, taint] = await Promise.all([
-                    findSinks(code, grammar),
-                    trackTaint(code, grammar),
-                ]);
+                const taint = await trackTaint(code, grammar);
+                const sinks = await findSinks(code, grammar, taint);
 
                 // Phase E: evaluate guards from the scanned file itself against
                 // the attack types found by the sink finder + taint tracker.

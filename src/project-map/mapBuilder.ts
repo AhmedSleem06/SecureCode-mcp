@@ -6,12 +6,7 @@ import { detectDynamicPatterns } from './layer2';
 import { aggregateConfidence } from './confidence';
 import type { ProjectMap, FileExtraction, EndpointRecord } from './types';
 import { PROJECT_MAP_SCHEMA_VERSION } from './types';
-
-const SKIP_DIRS = new Set([
-    'node_modules', '.git', 'dist', 'build', '.next', '.nuxt', '.output',
-    'coverage', '.cache', '.turbo', '.parcel-cache', '__pycache__',
-    '.venv', 'venv', 'env', '.env', '.securecode', '.vscode', '.idea',
-]);
+import { readSecurecodeIgnore, isIgnored, SKIP_DIRS } from '../utils/ignore';
 
 const SUPPORTED_EXTENSIONS = new Set([
     '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py',
@@ -19,38 +14,6 @@ const SUPPORTED_EXTENSIONS = new Set([
 
 const MAX_FILES = 500;
 const MAX_FILE_SIZE = 1024 * 1024;
-
-/** Read .securecodeignore and return a set of glob patterns to skip. */
-function readSecurecodeIgnore(root: string): Set<string> {
-    const patterns = new Set<string>();
-    try {
-        const ignorePath = path.join(root, '.securecodeignore');
-        if (fs.existsSync(ignorePath)) {
-            const content = fs.readFileSync(ignorePath, 'utf8');
-            for (const line of content.split('\n')) {
-                const trimmed = line.trim();
-                if (!trimmed || trimmed.startsWith('#')) continue;
-                patterns.add(trimmed);
-            }
-        }
-    } catch { /* best effort */ }
-    return patterns;
-}
-
-/** Check if a relative path matches any ignore pattern (simple glob). */
-function isIgnored(relPath: string, patterns: Set<string>): boolean {
-    for (const pattern of patterns) {
-        // Directory pattern: "dir/" matches anything under dir/
-        if (pattern.endsWith('/')) {
-            if (relPath.startsWith(pattern) || relPath.startsWith(pattern.replace(/\/$/, '/'))) return true;
-        }
-        // Exact match
-        if (relPath === pattern) return true;
-        // Prefix match for bare directory names
-        if (!pattern.includes('.') && relPath.startsWith(pattern + '/')) return true;
-    }
-    return false;
-}
 
 export interface BuildOptions {
     workspaceRoot: string;

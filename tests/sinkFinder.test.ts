@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { findSinks } from '../src/project-map/sinkFinder';
+import { trackTaint } from '../src/project-map/taintTracker';
 
 describe('AST Sink Finder', () => {
 
@@ -500,5 +501,48 @@ console.log(y);`;
         const sinks = await findSinks(code, 'javascript');
         const sstiSinks = sinks.filter(s => s.sink === 'ssti-handlebars');
         expect(sstiSinks.length).toBe(0);
+    });
+
+    // ── Taint-aware source gate (indirect flows) ────────────────────────
+    // When taint flows are passed to findSinks, requireUserSource sinks
+    // use the taint index instead of the local text check. This catches
+    // indirect flows the local check misses.
+
+    it('taint gate: detects fetch with indirect user source', async () => {
+        const code = `const url = req.query.url;
+fetch(url);`;
+        const taint = await trackTaint(code, 'javascript');
+        const sinks = await findSinks(code, 'javascript', taint);
+        const ssrfSinks = sinks.filter(s => s.sink === 'ssrf-fetch');
+        expect(ssrfSinks.length).toBe(1);
+    });
+
+    it('local gate (no taint): MISSES fetch with indirect user source', async () => {
+        // Without taint flows, the local argHasUserSource only checks the
+        // arg text "url" — it cannot trace it back to req.query. This test
+        // documents the known limitation that the taint gate fixes.
+        const code = `const url = req.query.url;
+fetch(url);`;
+        const sinks = await findSinks(code, 'javascript');
+        const ssrfSinks = sinks.filter(s => s.sink === 'ssrf-fetch');
+        expect(ssrfSinks.length).toBe(0);
+    });
+
+    it('taint gate: does NOT flag fetch with internal variable', async () => {
+        const code = `const url = API_BASE_URL;
+fetch(url);`;
+        const taint = await trackTaint(code, 'javascript');
+        const sinks = await findSinks(code, 'javascript', taint);
+        const ssrfSinks = sinks.filter(s => s.sink === 'ssrf-fetch');
+        expect(ssrfSinks.length).toBe(0);
+    });
+
+    it('taint gate: detects SSRF through concatenation', async () => {
+        const code = `const target = req.query.host;
+fetch("https://" + target);`;
+        const taint = await trackTaint(code, 'javascript');
+        const sinks = await findSinks(code, 'javascript', taint);
+        const ssrfSinks = sinks.filter(s => s.sink === 'ssrf-fetch');
+        expect(ssrfSinks.length).toBe(1);
     });
 });

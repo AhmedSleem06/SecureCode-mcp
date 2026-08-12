@@ -128,4 +128,27 @@ export const TOOLS: ToolDef[] = [
             properties: {},
         },
     },
+    {
+        name: 'securecode.scan-batch',
+        description:
+            'Scan multiple files for vulnerabilities in one call. Discovers scannable files from a directory or explicit file list. Each file runs the full scan pipeline (Scout → Juror → Phase3). Read-only: no approval needed. Stops early on credit exhaustion or maxFiles cap. Use for scanning a folder or a set of files at once.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                directory: {
+                    type: 'string',
+                    description: 'Workspace-relative folder to scan recursively (mutually exclusive with filePaths).',
+                },
+                filePaths: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Explicit workspace-relative paths to scan (mutually exclusive with directory).',
+                },
+                maxFiles: {
+                    type: 'number',
+                    description: 'Cap on files scanned (default 200).',
+                },
+            },
+        },
+    },
 ];

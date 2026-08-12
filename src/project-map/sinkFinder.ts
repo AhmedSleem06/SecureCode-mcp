@@ -17,6 +17,7 @@ import {
 } from './astHelpers';
 import { SINK_REGISTRY, SinkLanguage, SinkDefinition, SinkMatcher } from './sinkRegistry';
 import { matchTaintSource } from './taintSources';
+import type { TaintResult } from './taintTracker';
 
 // ── Output types ────────────────────────────────────────────────────────────
 
@@ -282,10 +283,24 @@ function defForLanguage(def: SinkDefinition, lang: SinkLanguage): boolean {
 export async function findSinks(
     source: string,
     language: SinkLanguage,
+    taintFlows?: TaintResult[],
 ): Promise<SinkFinding[]> {
     const parsed = await parseSource(source, language);
     if (!parsed) return [];
     const { root } = parsed;
+
+    // Build a taint index for requireUserSource sinks. When taint flows are
+    // provided, the gate uses them instead of the local argHasUserSource()
+    // check — this catches indirect flows like:
+    //   const url = req.query.url; fetch(url);
+    // that the local text check misses. Keyed on `${sinkLine}:${sinkId}`
+    // which is the same join key both phases produce from callParts().line.
+    const taintByKey = new Set<string>();
+    if (taintFlows) {
+        for (const t of taintFlows) {
+            taintByKey.add(`${t.sinkLine}:${t.sink}`);
+        }
+    }
 
     const findings: SinkFinding[] = [];
     // Dedup key: `${line}:${canonicalType}` — same as the regex sink floor.
@@ -315,7 +330,17 @@ export async function findSinks(
                 // injection vector). Checking all args would false-positive
                 // on parameterized queries.
                 if (def.requireNonLiteralArg && !(args.length > 0 && isNonLiteral(args[0]))) continue;
-                if (def.requireUserSource && !argHasUserSource(info.args, source, language)) continue;
+                if (def.requireUserSource) {
+                    const taintKey = `${info.line + 1}:${def.id}`;
+                    if (taintByKey.size > 0) {
+                        // Taint flows provided — use authoritative taint check
+                        // (catches indirect flows the local text check misses).
+                        if (!taintByKey.has(taintKey)) continue;
+                    } else {
+                        // No taint flows — fall back to local text check.
+                        if (!argHasUserSource(info.args, source, language)) continue;
+                    }
+                }
                 const key = `${info.line + 1}:${def.canonicalType}`;
                 if (seen.has(key)) continue;
                 seen.add(key);
