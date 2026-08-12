@@ -22,10 +22,23 @@ import { grammarForFile } from '../project-map/parserLoader';
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
 const DEFAULT_MAX_FILES = 200;
 
+/** Test file patterns — skipped by default to avoid wasting credits on non-production code. */
+const TEST_FILE_PATTERNS = [
+    /\.test\.(ts|js|tsx|jsx|mjs|cjs)$/i,
+    /\.spec\.(ts|js|tsx|jsx|mjs|cjs)$/i,
+    /__tests__\//i,
+    /\.e2e\.test\.(ts|js)$/i,
+];
+
+function isTestFile(relPath: string): boolean {
+    return TEST_FILE_PATTERNS.some(re => re.test(relPath));
+}
+
 interface ScanBatchArgs {
     directory?: string;
     filePaths?: string[];
     maxFiles?: number;
+    includeTests?: boolean;
     _progress?: (progress: number, total: number, message: string) => void;
 }
 
@@ -40,7 +53,7 @@ interface FileResult {
 
 interface SkippedFile {
     path: string;
-    reason: 'ignored' | 'unsupported' | 'secret' | 'too_large' | 'empty' | 'error';
+    reason: 'ignored' | 'unsupported' | 'secret' | 'too_large' | 'empty' | 'error' | 'test_file';
 }
 
 /** Discover scannable files under a directory, respecting .securecodeignore and secret files. */
@@ -49,6 +62,7 @@ function discoverFiles(
     dir: string,
     ignorePatterns: Set<string>,
     maxFiles: number,
+    includeTests: boolean,
 ): { files: string[]; skipped: SkippedFile[] } {
     const files: string[] = [];
     const skipped: SkippedFile[] = [];
@@ -81,6 +95,10 @@ function discoverFiles(
                 }
                 if (isSecretFileName(fullPath)) {
                     skipped.push({ path: relPath, reason: 'secret' });
+                    continue;
+                }
+                if (!includeTests && isTestFile(relPath)) {
+                    skipped.push({ path: relPath, reason: 'test_file' });
                     continue;
                 }
                 const lang = inferLanguage(fullPath);
@@ -160,6 +178,7 @@ export async function toolScanBatch(ctx: ServerContext, args: any): Promise<unkn
     const opts = args as ScanBatchArgs;
     const progressFn = opts._progress;
     const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
+    const includeTests = opts.includeTests ?? false;
 
     // Determine the file list.
     let files: string[] = [];
@@ -178,6 +197,10 @@ export async function toolScanBatch(ctx: ServerContext, args: any): Promise<unkn
                 skipped.push({ path: relPath, reason: 'secret' });
                 continue;
             }
+            if (!includeTests && isTestFile(relPath)) {
+                skipped.push({ path: relPath, reason: 'test_file' });
+                continue;
+            }
             if (!inferLanguage(absPath)) {
                 skipped.push({ path: relPath, reason: 'unsupported' });
                 continue;
@@ -187,7 +210,7 @@ export async function toolScanBatch(ctx: ServerContext, args: any): Promise<unkn
     } else if (opts.directory) {
         const dirAbs = path.resolve(ctx.workspaceRoot, opts.directory);
         const ignorePatterns = readSecurecodeIgnore(ctx.workspaceRoot);
-        const result = discoverFiles(ctx.workspaceRoot, dirAbs, ignorePatterns, maxFiles);
+        const result = discoverFiles(ctx.workspaceRoot, dirAbs, ignorePatterns, maxFiles, includeTests);
         files = result.files;
         skipped = result.skipped;
     } else {

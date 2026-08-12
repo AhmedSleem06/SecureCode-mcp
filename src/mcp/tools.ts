@@ -148,6 +148,10 @@ export const TOOLS: ToolDef[] = [
                     type: 'number',
                     description: 'Cap on files scanned (default 200).',
                 },
+                includeTests: {
+                    type: 'boolean',
+                    description: 'Include test files (.test.ts, .spec.js, __tests__/). Default: false — test files are skipped to save credits.',
+                },
             },
         },
     },

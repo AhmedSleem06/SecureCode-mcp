@@ -179,4 +179,36 @@ describe('securecode.scan-batch', () => {
             expect(hugeSkip.reason).toBe('too_large');
         }
     });
+
+    it('skips test files by default', async () => {
+        fs.writeFileSync(path.join(workspace, 'code.ts'), 'const x = 1;');
+        fs.writeFileSync(path.join(workspace, 'code.test.ts'), 'const y = 2;');
+        fs.writeFileSync(path.join(workspace, 'code.spec.ts'), 'const z = 3;');
+
+        const result = await toolScanBatch(
+            { apiUrl: '', apiToken: '', workspaceRoot: workspace },
+            { directory: '.' },
+        ) as any;
+
+        expect(result.scanned).toBe(1);
+        const testSkip = result.skipped.find((s: any) => s.path === 'code.test.ts');
+        const specSkip = result.skipped.find((s: any) => s.path === 'code.spec.ts');
+        expect(testSkip).toBeDefined();
+        expect(testSkip.reason).toBe('test_file');
+        expect(specSkip).toBeDefined();
+        expect(specSkip.reason).toBe('test_file');
+    });
+
+    it('includes test files when includeTests is true', async () => {
+        fs.writeFileSync(path.join(workspace, 'code.ts'), 'const x = 1;');
+        fs.writeFileSync(path.join(workspace, 'code.test.ts'), 'const y = 2;');
+
+        const result = await toolScanBatch(
+            { apiUrl: '', apiToken: '', workspaceRoot: workspace },
+            { directory: '.', includeTests: true },
+        ) as any;
+
+        expect(result.scanned).toBe(2);
+        expect(result.skipped.find((s: any) => s.reason === 'test_file')).toBeUndefined();
+    });
 });
