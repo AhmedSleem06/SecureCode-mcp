@@ -113,6 +113,14 @@ class McpClient {
 function makeWorkspace(): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'securecode-mcp-test-'));
     fs.writeFileSync(path.join(dir, 'vuln.js'), 'const id = req.query.id;\ndb.query("SELECT * FROM users WHERE id = " + id);\n');
+    // Write a minimal package-lock.json with 0 dependencies so the
+    // scan-dependencies tool has a lockfile to find but makes no OSV calls.
+    fs.writeFileSync(path.join(dir, 'package-lock.json'), JSON.stringify({
+        name: 'test-project',
+        version: '1.0.0',
+        lockfileVersion: 3,
+        packages: { '': { name: 'test-project', version: '1.0.0' } },
+    }));
     return dir;
 }
 
@@ -210,8 +218,9 @@ describe('SecureCode MCP — protocol conformance', () => {
             'securecode.map',
             'securecode.fix',
             'securecode.attack',
+            'securecode.scan-dependencies',
         ]));
-        expect(names.length).toBe(4);
+        expect(names.length).toBe(5);
     });
 
     it('every tool carries a valid JSON Schema', async () => {
@@ -266,6 +275,22 @@ describe('SecureCode MCP — protocol conformance', () => {
         const res = await client.callTool('securecode.map', {});
         const payload = JSON.parse(res.content[0].text);
         expect(payload.endpoints).toEqual([]);
+    });
+
+    it('securecode.scan-dependencies returns valid structure for empty lockfile', async () => {
+        const res = await client.callTool('securecode.scan-dependencies', {});
+        const payload = JSON.parse(res.content[0].text);
+        expect(payload).toHaveProperty('findings');
+        expect(payload).toHaveProperty('packageCount');
+        expect(payload).toHaveProperty('unresolvedCount');
+        expect(payload).toHaveProperty('lockfiles');
+        expect(payload).toHaveProperty('ghsaSkipped');
+        expect(Array.isArray(payload.findings)).toBe(true);
+        expect(Array.isArray(payload.lockfiles)).toBe(true);
+        // The fixture lockfile has 0 packages → 0 findings
+        expect(payload.findings.length).toBe(0);
+        expect(payload.packageCount).toBe(0);
+        expect(payload.lockfiles.length).toBe(1);
     });
 
     it('an unknown method returns -32601 Method not found', async () => {

@@ -119,4 +119,13 @@ export const TOOLS: ToolDef[] = [
             },
         },
     },
+    {
+        name: 'securecode.scan-dependencies',
+        description:
+            'Scan local lockfiles for known vulnerabilities using OSV.dev + GitHub Advisory + NVD. Read-only: no approval needed. Runs entirely locally — only package name+version leave the machine. Supports package-lock.json, yarn.lock, pnpm-lock.yaml, Pipfile.lock, requirements.txt. Returns findings with severity, installed version, fix version, and license info.',
+        inputSchema: {
+            type: 'object',
+            properties: {},
+        },
+    },
 ];

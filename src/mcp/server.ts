@@ -5,6 +5,7 @@ import { toolScan } from '../tools/scan';
 import { toolMap } from '../tools/map';
 import { toolFix } from '../tools/fix';
 import { toolAttack } from '../tools/attack';
+import { toolScanDependencies } from '../tools/scanDependencies';
 
 const PROTOCOL_VERSION = '2025-03-26';
 const SERVER_NAME = 'securecode-mcp';
@@ -39,6 +40,7 @@ const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<u
     'securecode.map': toolMap,
     'securecode.fix': toolFix,
     'securecode.attack': toolAttack,
+    'securecode.scan-dependencies': toolScanDependencies,
 };
 
 function validateArgs(tool: ToolDef, args: any): string | null {
