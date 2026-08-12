@@ -21,6 +21,7 @@ import { grammarForFile } from '../project-map/parserLoader';
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
 const DEFAULT_MAX_FILES = 200;
+const INTER_FILE_DELAY_MS = 3000; // 3s cooldown between scans to prevent API queue buildup
 
 /** Test file patterns — skipped by default to avoid wasting credits on non-production code. */
 const TEST_FILE_PATTERNS = [
@@ -315,6 +316,13 @@ export async function toolScanBatch(ctx: ServerContext, args: any): Promise<unkn
                 findings: [],
                 error: err.message || String(err),
             });
+        }
+
+        // Rate limit: wait between files to prevent API queue buildup.
+        // The API processes scans sequentially and a backlog causes 503s
+        // for subsequent requests. 3s cooldown lets the API drain.
+        if (i < total - 1 && !stoppedEarly) {
+            await new Promise(resolve => setTimeout(resolve, INTER_FILE_DELAY_MS));
         }
     }
 

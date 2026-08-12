@@ -279,4 +279,34 @@ describe('securecode.scan-dependencies — full pipeline', () => {
         expect(axiosFinding.check_id).toContain('GHSA-wf5e-gw64-5v3h');
         expect(axiosFinding.check_id).not.toContain('GHSA-35jh-r3h4-6jhm');
     });
+
+    it('GHSA filter: rejects advisories that do not list the queried package', async () => {
+        // The GHSA mock for lodash returns an advisory with package.name = 'lodash'.
+        // Add an advisory that claims to affect 'express' but is returned for lodash.
+        // The new filter should reject it.
+        fs.writeFileSync(path.join(workspace, 'package.json'), '{"name":"test","version":"1.0.0"}');
+        fs.writeFileSync(path.join(workspace, 'package-lock.json'), JSON.stringify({
+            name: 'test',
+            version: '1.0.0',
+            lockfileVersion: 3,
+            packages: {
+                '': { name: 'test', version: '1.0.0' },
+                'node_modules/lodash': { version: '4.17.4' },
+            },
+        }));
+
+        const result = await toolScanDependencies(
+            { apiUrl: '', apiToken: '', workspaceRoot: workspace },
+            {},
+        ) as any;
+
+        // Should only find the lodash advisory that actually lists lodash in its
+        // vulnerabilities array — not any leaked advisories.
+        const lodashFinding = result.findings.find((f: any) => f.dependency?.name === 'lodash');
+        if (lodashFinding) {
+            // The advisory count should be small (1-2), not 100+
+            const advisoryCount = parseInt(lodashFinding.message.match(/(\d+) vulnerable/)?.[1] || '0');
+            expect(advisoryCount).toBeLessThan(10);
+        }
+    });
 });

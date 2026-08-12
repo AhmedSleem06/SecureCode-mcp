@@ -218,6 +218,16 @@ export async function queryGhsaViaCli(
         const list: Vulnerability[] = [];
         for (const adv of advisories) {
             if (!adv?.ghsa_id) continue;
+            // Verify this advisory actually affects THIS package.
+            // The affected_package query filter is not always precise —
+            // the API may return advisories for other packages in the same
+            // ecosystem. Filter by checking the vulnerabilities array for
+            // an entry whose package.name matches.
+            const vulns = Array.isArray(adv.vulnerabilities) ? adv.vulnerabilities : [];
+            const affectsThisPackage = vulns.some(
+                (v: any) => v?.package?.name?.toLowerCase() === p.name.toLowerCase()
+            );
+            if (!affectsThisPackage) continue;
             // Real CVSS score from the API (not approximated).
             let cvssScore: number | undefined;
             if (typeof adv.cvss?.score === 'number') {
@@ -227,7 +237,6 @@ export async function queryGhsaViaCli(
             }
             // Parse affected + fixed versions from the vulnerabilities array.
             const affected: AffectedRange[] = [];
-            const vulns = Array.isArray(adv.vulnerabilities) ? adv.vulnerabilities : [];
             for (const v of vulns) {
                 const rawRange = typeof v?.vulnerable_version_range === 'string'
                     ? v.vulnerable_version_range : '';
