@@ -28,6 +28,11 @@ const TEST_FILE_PATTERNS = [
     /\.spec\.(ts|js|tsx|jsx|mjs|cjs)$/i,
     /__tests__\//i,
     /\.e2e\.test\.(ts|js)$/i,
+    /\.test-support\.(ts|js|tsx|jsx)$/i,
+    /\.e2e\.test-support\.(ts|js)$/i,
+    /\/test\//i,
+    /\/tests\//i,
+    /\/testing\//i,
 ];
 
 function isTestFile(relPath: string): boolean {

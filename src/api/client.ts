@@ -2,7 +2,7 @@ import * as http from 'http';
 import * as https from 'https';
 import type { ApiError } from './types';
 
-const DEFAULT_TIMEOUT_MS = 300_000;
+const DEFAULT_TIMEOUT_MS = 1_200_000; // 20 min — consensus mode with Kimi retries can take very long
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 export class ApiClientError extends Error {
