@@ -51,7 +51,7 @@ export async function runAttack(
             scanDepth: 'auto',
         });
 
-        const findings = (scanResp.scanType === 'advanced' && scanResp.finalFindings)
+        const findings = ((scanResp.scanType === 'advanced' || scanResp.scanType === 'fast') && scanResp.finalFindings)
             ? scanResp.finalFindings
             : (scanResp.findings || []);
 

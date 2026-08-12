@@ -71,7 +71,7 @@ export interface FinalFinding {
 }
 
 export interface ScanResponse {
-    scanType: 'basic' | 'advanced';
+    scanType: 'basic' | 'advanced' | 'fast';
     scanTypeMessage?: string | null;
     scanId?: string;
     findings?: ScanFinding[];

@@ -161,7 +161,7 @@ async function runDeterministicAnalysis(
 /** Map a scan response to the per-file findings shape (same as toolScan). */
 function mapFindings(data: ScanResponse): any[] {
     const findings: (FinalFinding | ScanFinding)[] =
-        data.scanType === 'advanced' && data.finalFindings
+        (data.scanType === 'advanced' || data.scanType === 'fast') && data.finalFindings
             ? data.finalFindings
             : data.findings || [];
     return findings.map((f: any) => ({

@@ -82,12 +82,12 @@ export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> 
         code,
         language,
         ...(filePath ? { filePath } : {}),
-        scanDepth: 'auto',
+        scanDepth: (args.scanDepth as 'fast' | 'deep' | 'auto') || 'auto',
         ...(deterministicFacts && { deterministicFacts }),
     });
 
     const findings: (FinalFinding | ScanFinding)[] =
-        data.scanType === 'advanced' && data.finalFindings
+        (data.scanType === 'advanced' || data.scanType === 'fast') && data.finalFindings
             ? data.finalFindings
             : data.findings || [];
 

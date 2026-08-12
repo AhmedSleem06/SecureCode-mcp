@@ -20,6 +20,11 @@ export const TOOLS: ToolDef[] = [
                     type: 'string',
                     description: 'Language id (javascript, typescript, python, php). Inferred from filePath if omitted.',
                 },
+                scanDepth: {
+                    type: 'string',
+                    enum: ['fast', 'deep', 'auto'],
+                    description: 'Scan depth: "fast" = deterministic-only (sink floor + secret scan, <5s, no AI), "deep" = full AI pipeline (Scout + Juror + consensus), "auto" = deep with standard reasoning effort. Default: auto.',
+                },
             },
         },
     },
