@@ -2,7 +2,7 @@ import * as http from 'http';
 import * as https from 'https';
 import type { ApiError } from './types';
 
-const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 export class ApiClientError extends Error {
