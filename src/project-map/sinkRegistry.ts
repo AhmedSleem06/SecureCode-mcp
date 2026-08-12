@@ -177,6 +177,27 @@ export const SINK_REGISTRY: SinkDefinition[] = [
         requireNonLiteralArg: true,
         description: 'db.query with non-literal argument — potential SQL injection',
     },
+    {
+        id: 'sql-prepare',
+        canonicalType: 'sql_injection',
+        severity: 'Critical',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: 'prepare', receiver: '*' }],
+        requireNonLiteralArg: true,
+        description: 'db.prepare with non-literal argument — potential SQL injection (node:sqlite, better-sqlite3)',
+    },
+    {
+        id: 'sql-exec',
+        canonicalType: 'sql_injection',
+        severity: 'Critical',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [
+            { kind: 'call', method: 'exec', receiver: '*' },
+            { kind: 'call', method: 'execute', receiver: '*' },
+        ],
+        requireNonLiteralArg: true,
+        description: 'db.exec/execute with non-literal argument — potential SQL injection',
+    },
 
     // ── SQL injection (Python) ─────────────────────────────────────────────
     {

@@ -117,6 +117,45 @@ spawn(cmd);`;
         expect(sqlSinks.length).toBe(0);
     });
 
+    it('detects db.prepare with template interpolation', async () => {
+        const code = 'db.prepare(`SELECT ${projection} FROM ${table} LIMIT 0`);';
+        const sinks = await findSinks(code, 'javascript');
+        const sqlSinks = sinks.filter(s => s.sink === 'sql-prepare');
+        expect(sqlSinks.length).toBe(1);
+        expect(sqlSinks[0].canonicalType).toBe('sql_injection');
+        expect(sqlSinks[0].arguments[0].kind).toBe('template');
+    });
+
+    it('does NOT flag db.prepare with literal string', async () => {
+        const code = `db.prepare("SELECT * FROM users WHERE id = ?");`;
+        const sinks = await findSinks(code, 'javascript');
+        const sqlSinks = sinks.filter(s => s.sink === 'sql-prepare');
+        expect(sqlSinks.length).toBe(0);
+    });
+
+    it('detects db.exec with template interpolation', async () => {
+        const code = 'db.exec(`INSERT INTO ${table} VALUES (${value})`);';
+        const sinks = await findSinks(code, 'javascript');
+        const sqlSinks = sinks.filter(s => s.sink === 'sql-exec');
+        expect(sqlSinks.length).toBe(1);
+        expect(sqlSinks[0].canonicalType).toBe('sql_injection');
+    });
+
+    it('detects db.execute with non-literal argument', async () => {
+        const code = 'db.execute(query);';
+        const sinks = await findSinks(code, 'javascript');
+        const sqlSinks = sinks.filter(s => s.sink === 'sql-exec');
+        expect(sqlSinks.length).toBe(1);
+        expect(sqlSinks[0].canonicalType).toBe('sql_injection');
+    });
+
+    it('does NOT flag db.execute with literal string', async () => {
+        const code = `db.execute("SELECT * FROM users");`;
+        const sinks = await findSinks(code, 'javascript');
+        const sqlSinks = sinks.filter(s => s.sink === 'sql-exec');
+        expect(sqlSinks.length).toBe(0);
+    });
+
     // ── XSS ──────────────────────────────────────────────────────────────
 
     it('detects dangerouslySetInnerHTML in TSX', async () => {
