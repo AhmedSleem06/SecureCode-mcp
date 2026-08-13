@@ -151,3 +151,22 @@ export interface ProjectMap {
     builtAt?: string;
     version?: number;
 }
+
+export interface SandboxProveResponse {
+    proven: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'NOT_REPRODUCIBLE';
+    canReproduce: boolean;
+    skipReason?: string;
+    rationale?: string;
+    degraded: boolean;
+    sandbox?: {
+        verdict: string;
+        rule: string;
+        reason: string;
+        serverBooted: boolean;
+        port: number;
+        elapsedMs: number;
+        baselineStatus?: number;
+        exploitStatus?: number;
+    };
+    scanCredits?: number;
+}
