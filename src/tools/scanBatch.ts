@@ -8,6 +8,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import { ApiClient } from '../api/client';
 import type { ScanResponse, FinalFinding, ScanFinding } from '../api/types';
 import type { ServerContext } from '../mcp/types';
@@ -18,6 +19,8 @@ import { trackTaint } from '../project-map/taintTracker';
 import { evaluateGuards } from '../project-map/guardEvaluator';
 import type { AttackType } from '../project-map/guardPatterns';
 import { grammarForFile } from '../project-map/parserLoader';
+import { buildProjectMap } from '../project-map/mapBuilder';
+import { readCache, writeCache } from '../project-map/cache';
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
 const DEFAULT_MAX_FILES = 200;
@@ -239,6 +242,29 @@ export async function toolScanBatch(ctx: ServerContext, args: any): Promise<unkn
     }
 
     const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
+
+    // Build and upload the project map so the API can extract cross-file
+    // context (endpointContext + relatedFiles) for each file in the batch.
+    // Best-effort: if map building or upload fails, scans proceed without it.
+    let workspaceId: string | undefined;
+    try {
+        progressFn?.(0, files.length, 'Building project map...');
+        let map = readCache(ctx.workspaceRoot);
+        if (!map) {
+            const result = await buildProjectMap({ workspaceRoot: ctx.workspaceRoot });
+            writeCache(ctx.workspaceRoot, result.map);
+            map = result.map;
+        }
+        workspaceId = createHash('sha256')
+            .update(ctx.workspaceRoot + ':' + (map.builtAt || Date.now()))
+            .digest('hex')
+            .substring(0, 16);
+        await client.postJson('/map', { workspaceId, map });
+        progressFn?.(0, files.length, `Project map uploaded (${(map.endpoints || []).length} endpoints)`);
+    } catch {
+        // Best-effort: map upload is optional
+    }
+
     const results: FileResult[] = [];
     let totalFindings = 0;
     const bySeverity = { critical: 0, high: 0, medium: 0, low: 0 };
@@ -282,6 +308,7 @@ export async function toolScanBatch(ctx: ServerContext, args: any): Promise<unkn
                 filePath,
                 scanDepth: 'auto',
                 ...(deterministicFacts && { deterministicFacts }),
+                ...(workspaceId && { workspaceId }),
             });
 
             const findings = mapFindings(data);
