@@ -160,4 +160,27 @@ export const TOOLS: ToolDef[] = [
             },
         },
     },
+    {
+        name: 'securecode.scan-secrets',
+        description:
+            'Scan files for hardcoded secrets and PII — API keys, JWTs, private keys, database URLs, credentials, emails, credit cards. Runs entirely locally (no AI, no API calls, no credits). Scans a directory or explicit file list. Respects .securecodeignore. Use for CI/secret-audit workflows.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                directory: {
+                    type: 'string',
+                    description: 'Workspace-relative folder to scan recursively (mutually exclusive with filePaths).',
+                },
+                filePaths: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Explicit workspace-relative paths to scan (mutually exclusive with directory).',
+                },
+                maxFiles: {
+                    type: 'number',
+                    description: 'Cap on files scanned (default 200).',
+                },
+            },
+        },
+    },
 ];

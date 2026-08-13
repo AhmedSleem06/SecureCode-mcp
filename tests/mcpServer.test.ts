@@ -220,8 +220,9 @@ describe('SecureCode MCP — protocol conformance', () => {
             'securecode.attack',
             'securecode.scan-dependencies',
             'securecode.scan-batch',
+            'securecode.scan-secrets',
         ]));
-        expect(names.length).toBe(6);
+        expect(names.length).toBe(7);
     });
 
     it('every tool carries a valid JSON Schema', async () => {
