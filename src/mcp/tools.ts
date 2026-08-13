@@ -183,4 +183,26 @@ export const TOOLS: ToolDef[] = [
             },
         },
     },
+    {
+        name: 'securecode.agent-scan',
+        description:
+            'Agent-mode scan: an AI investigator that reads files, traces data flows, checks guards, and compares endpoint policies to find vulnerabilities. Slower but deeper than a deep scan. The agent replaces the Scout phase and its findings are verified by the Juror. Uses 5 scan credits. Best for complex access-control and cross-file vulnerabilities.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                code: {
+                    type: 'string',
+                    description: 'Source code to scan (if filePath is omitted).',
+                },
+                filePath: {
+                    type: 'string',
+                    description: 'Workspace-relative path to the file to scan (reads from disk within the workspace root).',
+                },
+                language: {
+                    type: 'string',
+                    description: 'Language id (javascript, typescript, python, php). Inferred from filePath if omitted.',
+                },
+            },
+        },
+    },
 ];

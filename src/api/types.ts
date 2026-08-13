@@ -2,7 +2,7 @@ export interface ScanRequest {
     code: string;
     language: string;
     filePath?: string;
-    scanDepth?: 'auto' | 'deep';
+    scanDepth?: 'auto' | 'deep' | 'agent';
     workspaceHints?: {
         frameworkHint?: string;
         relatedFiles?: Array<{ path: string; content: string; role: string }>;
