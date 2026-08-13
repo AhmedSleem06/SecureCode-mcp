@@ -98,7 +98,30 @@ export async function runAgentScan(
                 },
             };
 
-            const stepResp = await client.postJson<AgentStepResponse>('/agent/scan/step', stepReq);
+            let stepResp: AgentScanStepResponse;
+            try {
+                stepResp = await client.postJson<AgentStepResponse>('/agent/scan/step', stepReq);
+            } catch (stepErr: any) {
+                // The API rejected the action (malformed, missing field, etc).
+                // Decrement the step count and let the agent retry with the
+                // same transcript. The LLM will see the same state and
+                // hopefully try a different, valid action.
+                const errMsg = stepErr?.message || String(stepErr);
+                console.warn(`[Agent Scan Loop] Step ${stepsTaken + 1} error: ${errMsg}`);
+                stepsTaken++;
+                budget.stepsRemaining--;
+                if (budget.stepsRemaining <= 0) {
+                    return {
+                        status: 'capped',
+                        findings: [],
+                        transcript,
+                        stepsUsed: stepsTaken,
+                        costSpentUsd,
+                        summary: 'Step budget exhausted after repeated API errors.',
+                    };
+                }
+                continue;
+            }
             costSpentUsd += stepResp.costUsd || 0;
 
             // Null next = done (cost capped or steps exhausted)
