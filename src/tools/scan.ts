@@ -9,6 +9,7 @@ import { trackTaint } from '../project-map/taintTracker';
 import { evaluateGuards } from '../project-map/guardEvaluator';
 import type { AttackType } from '../project-map/guardPatterns';
 import { grammarForFile } from '../project-map/parserLoader';
+import { getEndpointContextForFile, getRelatedFilesForFile } from '../project-map/mapContext';
 
 export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> {
     const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
@@ -30,10 +31,35 @@ export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> 
         throw Object.assign(new Error('Provide language or filePath with a known extension.'), { code: -32602 });
     }
 
+    // ── Cross-file context: endpointContext + relatedFiles ──────────────
+    // The extension sends these from its Project Map; the MCP now does the
+    // same so the API's Scout and Juror can see the middleware, call-graph
+    // callees, and imports the scanned file depends on. Best-effort: if
+    // the map can't be built or the file isn't in it, both are omitted and
+    // the scan proceeds without cross-file context.
+    let endpointContext: any[] | undefined;
+    let relatedFiles: any[] | undefined;
+    if (filePath && ctx.workspaceRoot) {
+        try {
+            const absPath = path.isAbsolute(filePath)
+                ? filePath
+                : path.join(ctx.workspaceRoot, filePath);
+            const [eps, rels] = await Promise.all([
+                getEndpointContextForFile(absPath, ctx.workspaceRoot),
+                getRelatedFilesForFile(absPath, ctx.workspaceRoot),
+            ]);
+            if (eps.length > 0) endpointContext = eps;
+            if (rels.length > 0) relatedFiles = rels;
+        } catch {
+            // Best-effort: map building or file resolution may fail.
+        }
+    }
+
     // Phase B/C/E: AST-based sink finder + taint tracker + guard evaluator.
     // Runs locally via tree-sitter and attaches deterministic facts to the
-    // scan request. The MCP has no related-files infrastructure, so the
-    // guard evaluator only evaluates guards found in the scanned file itself.
+    // scan request. When relatedFiles are available, the guard evaluator
+    // sees ALL files (scanned file + related files) so it can detect guards
+    // in middleware that protect the scanned sink.
     //
     // Taint runs first so its results can feed the sink finder's
     // requireUserSource gate — this catches indirect flows like
@@ -50,15 +76,23 @@ export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> 
                 const taint = await trackTaint(code, grammar);
                 const sinks = await findSinks(code, grammar, taint);
 
-                // Phase E: evaluate guards from the scanned file itself against
-                // the attack types found by the sink finder + taint tracker.
+                // Phase E: evaluate guards from the scanned file AND related
+                // files. When relatedFiles are available, the guard evaluator
+                // can see middleware defined in other modules — the biggest
+                // source of false positives is a guard in a different file.
                 let guards: Awaited<ReturnType<typeof evaluateGuards>> | undefined;
                 const attackTypes = new Set<AttackType>();
                 for (const s of sinks) attackTypes.add(s.canonicalType as AttackType);
                 for (const t of taint) attackTypes.add(t.canonicalType as AttackType);
                 if (attackTypes.size > 0) {
+                    const guardSources = [{ source: code, name: filePath }];
+                    if (relatedFiles) {
+                        for (const rf of relatedFiles) {
+                            guardSources.push({ source: rf.content, name: rf.filePath });
+                        }
+                    }
                     guards = await evaluateGuards(
-                        [{ source: code, name: filePath }],
+                        guardSources,
                         [...attackTypes],
                         grammar,
                     );
@@ -84,6 +118,8 @@ export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> 
         ...(filePath ? { filePath } : {}),
         scanDepth: (args.scanDepth as 'fast' | 'deep' | 'auto') || 'auto',
         ...(deterministicFacts && { deterministicFacts }),
+        ...(endpointContext && { endpointContext }),
+        ...(relatedFiles && { workspaceHints: { relatedFiles } }),
     });
 
     const findings: (FinalFinding | ScanFinding)[] =
