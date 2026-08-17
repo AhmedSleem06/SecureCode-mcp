@@ -18,6 +18,9 @@ const SERVER_NAME = 'securecode-mcp';
 const SERVER_VERSION = '0.2.0';
 
 let initialized = false;
+let clientSupportsRoots = false;
+let nextRequestId = 100;
+const pendingRootsRequests = new Set<number>();
 
 function send(msg: JsonRpcResponse | { jsonrpc: '2.0'; method: string; params?: unknown }): void {
     process.stdout.write(JSON.stringify(msg) + '\n');
@@ -134,10 +137,11 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
             case 'initialize': {
                 initialized = true;
                 const params = (req.params || {}) as any;
+                clientSupportsRoots = !!(params?.capabilities?.roots);
                 const resolved = resolveWorkspaceFromInit(params, ctx.workspaceRoot);
                 if (resolved !== ctx.workspaceRoot) {
                     ctx.workspaceRoot = resolved;
-                    process.stderr.write(`[securecode-mcp] workspace set to ${resolved} (from client)\n`);
+                    process.stderr.write(`[securecode-mcp] workspace set to ${resolved} (from init)\n`);
                 }
                 return {
                     jsonrpc: '2.0', id,
@@ -149,6 +153,12 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
                 };
             }
             case 'notifications/initialized': {
+                if (clientSupportsRoots) {
+                    const reqId = nextRequestId++;
+                    pendingRootsRequests.add(reqId);
+                    send({ jsonrpc: '2.0', id: reqId, method: 'roots/list' });
+                    process.stderr.write(`[securecode-mcp] sent roots/list request (id=${reqId})\n`);
+                }
                 return { jsonrpc: '2.0', id: null };
             }
             case 'tools/list': {
@@ -197,6 +207,36 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
     }
 }
 
+/** Parse a file:// URI to a filesystem path. */
+function uriToPath(uri: string): string | null {
+    if (!uri.startsWith('file://')) return null;
+    let p = uri.replace(/^file:\/\/\/?/, '');
+    if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+    p = decodeURIComponent(p);
+    p = path.resolve(p);
+    return fs.existsSync(p) ? p : null;
+}
+
+/** Handle the client's response to our roots/list request. */
+function handleRootsResponse(ctx: ServerContext, response: any): void {
+    try {
+        const roots = response.result?.roots;
+        if (!Array.isArray(roots) || roots.length === 0) return;
+        for (const root of roots) {
+            const uri = root?.uri ?? root;
+            if (typeof uri !== 'string') continue;
+            const p = uriToPath(uri);
+            if (p) {
+                ctx.workspaceRoot = p;
+                process.stderr.write(`[securecode-mcp] workspace set to ${p} (from roots/list)\n`);
+                return;
+            }
+        }
+    } catch (err) {
+        process.stderr.write(`[securecode-mcp] roots/list response error: ${err}\n`);
+    }
+}
+
 export function startServer(ctx: ServerContext): void {
     const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
@@ -212,21 +252,31 @@ export function startServer(ctx: ServerContext): void {
             return;
         }
 
-        if (
-            parsed === null ||
-            typeof parsed !== 'object' ||
-            Array.isArray(parsed) ||
-            typeof (parsed as JsonRpcRequest).method !== 'string'
-        ) {
-            const maybeId =
-                parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-                    ? (parsed as JsonRpcRequest).id ?? null
-                    : null;
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            error(null, -32600, 'Invalid Request');
+            return;
+        }
+
+        // Check if this is a RESPONSE to a server-initiated request (e.g. roots/list).
+        // Responses have `id` + `result` or `error` but no `method`.
+        // This check runs BEFORE the method validation so responses aren't rejected.
+        const maybeResponse = parsed as any;
+        if (maybeResponse.id !== undefined && maybeResponse.id !== null && typeof maybeResponse.method !== 'string') {
+            if (pendingRootsRequests.has(maybeResponse.id)) {
+                pendingRootsRequests.delete(maybeResponse.id);
+                handleRootsResponse(ctx, maybeResponse);
+            }
+            return;
+        }
+
+        if (typeof (parsed as JsonRpcRequest).method !== 'string') {
+            const maybeId = (parsed as JsonRpcRequest).id ?? null;
             error(maybeId, -32600, 'Invalid Request');
             return;
         }
 
         const req = parsed as JsonRpcRequest;
+
         handleRequest(ctx, req).then((res) => {
             if (req.id !== undefined && req.id !== null) {
                 send(res);
