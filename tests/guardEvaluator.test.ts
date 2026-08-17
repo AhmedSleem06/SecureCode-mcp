@@ -60,14 +60,14 @@ describe('Guard Effectiveness Evaluator', () => {
 
     // ── Auth: JWT ──────────────────────────────────────────────────────────
 
-    it('jwt.verify with algorithm pinning is effective against access control', async () => {
+    it('jwt.verify with algorithm pinning is NOT effective against access control (auth != authorization)', async () => {
         const guard = `function requireAuth(req, res, next) {
   const token = req.headers.authorization;
   jwt.verify(token, SECRET, { algorithms: ['HS256'] });
   next();
 }`;
         const result = await evaluateGuard(guard, 'requireAuth', 'broken_access_control', 'javascript');
-        expect(result.effective).toBe(true);
+        expect(result.effective).toBe(false);
         expect(result.guardType).toBe('auth-jwt-verify');
     });
 
@@ -85,25 +85,25 @@ describe('Guard Effectiveness Evaluator', () => {
 
     // ── Auth: session ──────────────────────────────────────────────────────
 
-    it('session check is effective against access control', async () => {
+    it('session check is NOT effective against access control (auth != authorization)', async () => {
         const guard = `function requireLogin(req, res, next) {
   if (!req.session.user) return res.status(401).send();
   next();
 }`;
         const result = await evaluateGuard(guard, 'requireLogin', 'broken_access_control', 'javascript');
-        expect(result.effective).toBe(true);
+        expect(result.effective).toBe(false);
         expect(result.guardType).toBe('auth-session');
     });
 
     // ── Auth: API key ─────────────────────────────────────────────────────
 
-    it('API key check is effective against access control', async () => {
+    it('API key check is NOT effective against access control (auth != authorization)', async () => {
         const guard = `function requireApiKey(req, res, next) {
   if (!req.headers['x-api-key']) return res.status(401).send();
   next();
 }`;
         const result = await evaluateGuard(guard, 'requireApiKey', 'broken_access_control', 'javascript');
-        expect(result.effective).toBe(true);
+        expect(result.effective).toBe(false);
         expect(result.guardType).toBe('auth-api-key');
     });
 

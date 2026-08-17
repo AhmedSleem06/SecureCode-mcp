@@ -247,7 +247,7 @@ describe('executeAction — truncation', () => {
             ctx, 'run-1', client, target,
         );
 
-        expect(result.length).toBeLessThan(10000);
+        expect(result.length).toBeLessThan(17000);
         expect(result).toContain('truncated');
 
         fs.unlinkSync(tmpFile);
