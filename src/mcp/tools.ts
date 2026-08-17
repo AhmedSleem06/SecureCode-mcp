@@ -18,7 +18,7 @@ export const TOOLS: ToolDef[] = [
                 },
                 language: {
                     type: 'string',
-                    description: 'Language id (javascript, typescript, python, php). Inferred from filePath if omitted.',
+                    description: 'Language id (javascript, typescript, python). Inferred from filePath if omitted.',
                 },
                 scanDepth: {
                     type: 'string',
@@ -60,7 +60,7 @@ export const TOOLS: ToolDef[] = [
                 },
                 language: {
                     type: 'string',
-                    description: 'Language id (javascript, typescript, python, php).',
+                    description: 'Language id (javascript, typescript, python).',
                 },
                 vulnerabilityType: {
                     type: 'string',
@@ -200,9 +200,90 @@ export const TOOLS: ToolDef[] = [
                 },
                 language: {
                     type: 'string',
-                    description: 'Language id (javascript, typescript, python, php). Inferred from filePath if omitted.',
+                    description: 'Language id (javascript, typescript, python). Inferred from filePath if omitted.',
                 },
             },
+        },
+    },
+    {
+        name: 'securecode.record-false-positive',
+        description:
+            'Dismiss a vulnerability finding as a false positive. The agent learns from this and will not report similar patterns in future scans of this workspace. Stored per-workspace in .securecode/agent-memory.json. Use when the user marks a finding as "not a vulnerability".',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                filePath: {
+                    type: 'string',
+                    description: 'Workspace-relative path to the file where the finding was reported.',
+                },
+                findingType: {
+                    type: 'string',
+                    description: 'The vulnerability type of the finding (e.g. sql_injection, broken_access_control, missing_rate_limiting, information_disclosure, user_enumeration).',
+                },
+                line: {
+                    type: 'number',
+                    description: 'Line number of the finding.',
+                },
+                evidence: {
+                    type: 'string',
+                    description: 'The evidence string from the finding (code snippet or description).',
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Why this is a false positive (user\'s explanation).',
+                },
+                pattern: {
+                    type: 'string',
+                    description: 'Optional short pattern description. If omitted, derived from evidence.',
+                },
+                codeSnippet: {
+                    type: 'string',
+                    description: 'Optional code snippet for context.',
+                },
+            },
+            required: ['filePath', 'findingType', 'line', 'evidence', 'reason'],
+        },
+    },
+    {
+        name: 'securecode.get-agent-memory',
+        description:
+            'View the agent\'s learned memory for this workspace — false positives and known facts. Read-only. Use to review what the agent has learned before running a scan.',
+        inputSchema: {
+            type: 'object',
+            properties: {},
+        },
+    },
+    {
+        name: 'securecode.clear-agent-memory',
+        description:
+            'Clear the agent\'s learned memory for this workspace. If "id" is provided, removes only that false positive. Otherwise clears all memory (false positives + known facts). Stored in .securecode/agent-memory.json.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Optional: ID of a specific false positive to remove. If omitted, clears ALL memory.',
+                },
+            },
+        },
+    },
+    {
+        name: 'securecode.add-known-fact',
+        description:
+            'Add a fact about the project the agent should know in future scans (e.g. "Project uses requireMembership for auth"). Helps the agent investigate faster by not re-discovering known structural facts.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                fact: {
+                    type: 'string',
+                    description: 'The fact to store (e.g. "Project uses requireMembership for membership auth, isProjectOwner for ownership").',
+                },
+                source: {
+                    type: 'string',
+                    description: 'Where this fact was discovered (e.g. "src/lib/authz.ts:12").',
+                },
+            },
+            required: ['fact', 'source'],
         },
     },
 ];

@@ -177,6 +177,33 @@ export const SINK_REGISTRY: SinkDefinition[] = [
         description: 'Prisma $queryRaw with interpolation — SQL injection',
     },
     {
+        id: 'executeRaw',
+        canonicalType: 'sql_injection',
+        severity: 'Critical',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: '$executeRaw', receiver: '*' }],
+        requireNonLiteralArg: true,
+        description: 'Prisma $executeRaw with interpolation — SQL injection',
+    },
+    {
+        id: 'queryRawUnsafe',
+        canonicalType: 'sql_injection',
+        severity: 'Critical',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: '$queryRawUnsafe', receiver: '*' }],
+        requireNonLiteralArg: true,
+        description: 'Prisma $queryRawUnsafe with interpolation — SQL injection',
+    },
+    {
+        id: 'executeRawUnsafe',
+        canonicalType: 'sql_injection',
+        severity: 'Critical',
+        languages: ['javascript', 'typescript', 'tsx'],
+        matchers: [{ kind: 'call', method: '$executeRawUnsafe', receiver: '*' }],
+        requireNonLiteralArg: true,
+        description: 'Prisma $executeRawUnsafe with interpolation — SQL injection',
+    },
+    {
         id: 'sql-concat',
         canonicalType: 'sql_injection',
         severity: 'Critical',
@@ -423,6 +450,150 @@ export const SINK_REGISTRY: SinkDefinition[] = [
         ],
         requireUserSource: true,
         description: 'res.setHeader/append with user-controlled value — header injection',
+    },
+
+    // ── SSTI (Python) ────────────────────────────────────────────────────────
+    {
+        id: 'py-render-template-string',
+        canonicalType: 'ssti',
+        severity: 'High',
+        languages: ['python'],
+        matchers: [{ kind: 'call', method: 'render_template_string' }],
+        requireNonLiteralArg: true,
+        description: 'Flask render_template_string with user-controlled template — SSTI',
+    },
+    {
+        id: 'py-jinja2-template',
+        canonicalType: 'ssti',
+        severity: 'High',
+        languages: ['python'],
+        matchers: [{ kind: 'call', method: 'Template' }],
+        requireNonLiteralArg: true,
+        description: 'Jinja2 Template() with user-controlled string — SSTI',
+    },
+
+    // ── SSRF (Python) ───────────────────────────────────────────────────────
+    {
+        id: 'py-ssrf-requests',
+        canonicalType: 'ssrf',
+        severity: 'High',
+        languages: ['python'],
+        matchers: [
+            { kind: 'call', method: 'get', receiver: 'requests' },
+            { kind: 'call', method: 'post', receiver: 'requests' },
+            { kind: 'call', method: 'put', receiver: 'requests' },
+            { kind: 'call', method: 'head', receiver: 'requests' },
+            { kind: 'call', method: 'delete', receiver: 'requests' },
+            { kind: 'call', method: 'request', receiver: 'requests' },
+        ],
+        requireUserSource: true,
+        description: 'requests.get/post with user-controlled URL — Server-Side Request Forgery',
+    },
+    {
+        id: 'py-ssrf-urllib',
+        canonicalType: 'ssrf',
+        severity: 'High',
+        languages: ['python'],
+        matchers: [
+            { kind: 'call', method: 'urlopen', receiver: 'urllib.request' },
+            { kind: 'call', method: 'urlopen', receiver: 'urllib' },
+        ],
+        requireUserSource: true,
+        description: 'urllib.request.urlopen with user-controlled URL — SSRF',
+    },
+    {
+        id: 'py-ssrf-httpx',
+        canonicalType: 'ssrf',
+        severity: 'High',
+        languages: ['python'],
+        matchers: [
+            { kind: 'call', method: 'get', receiver: 'httpx' },
+            { kind: 'call', method: 'post', receiver: 'httpx' },
+        ],
+        requireUserSource: true,
+        description: 'httpx.get/post with user-controlled URL — SSRF',
+    },
+
+    // ── Open redirect (Python) ──────────────────────────────────────────────
+    {
+        id: 'py-redirect-flask',
+        canonicalType: 'open_redirect',
+        severity: 'Medium',
+        languages: ['python'],
+        matchers: [{ kind: 'call', method: 'redirect' }],
+        requireUserSource: true,
+        description: 'flask.redirect with user-controlled URL — open redirect',
+    },
+    {
+        id: 'py-redirect-django',
+        canonicalType: 'open_redirect',
+        severity: 'Medium',
+        languages: ['python'],
+        matchers: [
+            { kind: 'call', method: 'HttpResponseRedirect' },
+            { kind: 'call', method: 'RedirectResponse' },
+        ],
+        requireUserSource: true,
+        description: 'Django/FastAPI redirect with user-controlled URL — open redirect',
+    },
+
+    // ── Weak crypto (Python) ────────────────────────────────────────────────
+    {
+        id: 'py-md5',
+        canonicalType: 'weak_crypto',
+        severity: 'Medium',
+        languages: ['python'],
+        matchers: [{ kind: 'call', method: 'md5', receiver: 'hashlib' }],
+        description: 'hashlib.md5 — weak hashing algorithm, use SHA-256+',
+    },
+    {
+        id: 'py-sha1',
+        canonicalType: 'weak_crypto',
+        severity: 'Medium',
+        languages: ['python'],
+        matchers: [{ kind: 'call', method: 'sha1', receiver: 'hashlib' }],
+        description: 'hashlib.sha1 — weak hashing algorithm, use SHA-256+',
+    },
+    {
+        id: 'py-random-token',
+        canonicalType: 'weak_crypto',
+        severity: 'High',
+        languages: ['python'],
+        matchers: [
+            { kind: 'call', method: 'random', receiver: 'random' },
+            { kind: 'call', method: 'randint', receiver: 'random' },
+            { kind: 'call', method: 'choice', receiver: 'random' },
+        ],
+        requireNonLiteralArg: true,
+        description: 'random module for security-sensitive token generation — use secrets module',
+    },
+
+    // ── Header injection (Python) ────────────────────────────────────────────
+    {
+        id: 'py-header-set',
+        canonicalType: 'header_injection',
+        severity: 'Medium',
+        languages: ['python'],
+        matchers: [
+            { kind: 'call', method: '__setitem__', receiver: 'response' },
+            { kind: 'call', method: '__setitem__', receiver: 'self' },
+        ],
+        requireUserSource: true,
+        description: 'Response header set with user-controlled value — header injection',
+    },
+
+    // ── LDAP injection (Python) ─────────────────────────────────────────────
+    {
+        id: 'py-ldap-search',
+        canonicalType: 'ldap_injection',
+        severity: 'High',
+        languages: ['python'],
+        matchers: [
+            { kind: 'call', method: 'search_s', receiver: '*' },
+            { kind: 'call', method: 'search', receiver: '*' },
+        ],
+        requireNonLiteralArg: true,
+        description: 'LDAP search with non-literal filter — LDAP injection',
     },
 
     // ── SSTI (JS/TS/TSX) ────────────────────────────────────────────────────

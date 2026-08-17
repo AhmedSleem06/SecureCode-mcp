@@ -122,16 +122,16 @@ export const GUARD_EFFECTIVENESS: Record<GuardType, Partial<Record<AttackType, b
         ssrf: false,
     },
     'auth-jwt-verify': {
-        broken_access_control: true,  // verified JWT = authenticated
+        broken_access_control: false,  // JWT verifies identity, NOT authorization to a specific resource
     },
     'auth-jwt-verify-noalg': {
         broken_access_control: false,  // algorithm confusion bypass
     },
     'auth-session': {
-        broken_access_control: true,
+        broken_access_control: false,  // Session checks identity, NOT resource-level authorization
     },
     'auth-api-key': {
-        broken_access_control: true,
+        broken_access_control: false,  // API key checks identity, NOT resource-level authorization
     },
     'auth-none': {
         broken_access_control: false,
@@ -172,8 +172,17 @@ export const GUARD_BYPASS_EXAMPLES: Partial<Record<GuardType, Partial<Record<Att
     'sanitizer-numeric': {
         insecure_deserialization: "parseInt doesn't validate serialized objects",
     },
+    'auth-jwt-verify': {
+        broken_access_control: "JWT verifies identity (authentication) but does not check if the user is authorized to access or modify this specific resource. IDOR, privilege escalation, and missing ownership checks are not prevented.",
+    },
     'auth-jwt-verify-noalg': {
         broken_access_control: "Algorithm confusion: sign with HS256 using the public RSA key as the secret",
+    },
+    'auth-session': {
+        broken_access_control: "Session check verifies identity (authentication) but does not check if the user is authorized to access or modify this specific resource. Any authenticated user could access or modify other users' resources (IDOR).",
+    },
+    'auth-api-key': {
+        broken_access_control: "API key verifies identity but does not check resource-level authorization",
     },
     'allowlist-dynamic': {
         sql_injection: "User-controlled allowlist key: attacker sets key to their payload",
@@ -212,9 +221,11 @@ export const GUARD_EFFECTIVE_REASONS: Partial<Record<GuardType, Partial<Record<A
         xss: 'Literal allowlist rejects any value not in the set',
     },
     'auth-jwt-verify': {
-        broken_access_control: 'jwt.verify with algorithm pinning rejects forged tokens',
+        // JWT auth is no longer marked as effective for broken_access_control
+        // because it only proves identity, not resource authorization.
     },
     'auth-session': {
-        broken_access_control: 'Session check rejects unauthenticated requests',
+        // Session auth is no longer marked as effective for broken_access_control
+        // because it only proves identity, not resource authorization.
     },
 };

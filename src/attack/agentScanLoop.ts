@@ -58,9 +58,22 @@ export async function runAgentScan(
     let costSpentUsd = 0;
 
     try {
-        const startResp = await client.postJson<AgentScanStartResponse>('/agent/scan/start', {});
+        const startResp = await client.postJson<AgentScanStartResponse>('/agent/scan/start', {}, options.signal);
 
         const transcript: AgentScanTranscriptStep[] = [];
+        const readFiles = new Set<string>();
+        // Track read count per file path (case-insensitive) to prevent
+        // the agent re-reading the same file dozens of times with different
+        // line ranges, which wastes the entire step budget on one file.
+        const readFileCounts = new Map<string, number>();
+        const MAX_READS_PER_FILE = 5;
+        // Track non-read tool calls to prevent the agent from looping on the
+        // same search_code/trace_flow call repeatedly. Keyed by (type + args).
+        const toolCallCounts = new Map<string, number>();
+        const MAX_SAME_TOOL_CALL = 2;
+
+        let consecutiveErrors = 0;
+        let consecutiveBlockedReads = 0;
 
         while (true) {
             // Wall clock check
@@ -100,29 +113,70 @@ export async function runAgentScan(
 
             let stepResp: AgentScanStepResponse;
             try {
-                stepResp = await client.postJson<AgentStepResponse>('/agent/scan/step', stepReq);
+                stepResp = await client.postJson<AgentStepResponse>('/agent/scan/step', stepReq, options.signal);
             } catch (stepErr: any) {
-                // The API rejected the action (malformed, missing field, etc).
-                // Decrement the step count and let the agent retry with the
-                // same transcript. The LLM will see the same state and
-                // hopefully try a different, valid action.
                 const errMsg = stepErr?.message || String(stepErr);
+                const apiCode = (stepErr as any)?.apiCode || '';
+
+                // Detect API server restart — the run was lost. Don't waste
+                // 3 retry steps on a dead run; return immediately.
+                if (apiCode === 'AGENT_RUN_NOT_FOUND' || /AGENT_RUN_NOT_FOUND|Invalid or expired agent run/i.test(errMsg)) {
+                    console.warn(`[Agent Scan Loop] Agent run expired (API server restarted?). Stopping scan.`);
+                    return {
+                        status: 'spawn_failed',
+                        findings: [],
+                        transcript,
+                        stepsUsed: stepsTaken,
+                        costSpentUsd,
+                        error: 'API server restarted mid-scan — the run was lost. Please retry the scan.',
+                    };
+                }
+
+                // Detect abort — the user cancelled. Don't treat as error.
+                if (options.signal?.aborted || /aborted/i.test(errMsg)) {
+                    return {
+                        status: 'cancelled',
+                        findings: [],
+                        transcript,
+                        stepsUsed: stepsTaken,
+                        costSpentUsd,
+                        summary: 'Cancelled by user.',
+                    };
+                }
+
+                // The API rejected the action (malformed, missing field, etc).
+                // Add the error to the transcript so the LLM sees it on the
+                // next step and can correct itself. Then retry — don't waste
+                // the step silently.
                 console.warn(`[Agent Scan Loop] Step ${stepsTaken + 1} error: ${errMsg}`);
+                consecutiveErrors++;
                 stepsTaken++;
                 budget.stepsRemaining--;
-                if (budget.stepsRemaining <= 0) {
+
+                // Push the error into the transcript so the LLM sees it
+                transcript.push({
+                    action: {
+                        type: 'read_file',
+                        path: '__ERROR__',
+                        rationale: 'Previous action was invalid',
+                    } as any,
+                    observation: `ERROR: Your previous action was rejected: ${errMsg}. Please try a DIFFERENT action with ALL required fields. Set unused fields to null.`,
+                });
+
+                if (consecutiveErrors >= 3 || budget.stepsRemaining <= 0) {
                     return {
                         status: 'capped',
                         findings: [],
                         transcript,
                         stepsUsed: stepsTaken,
                         costSpentUsd,
-                        summary: 'Step budget exhausted after repeated API errors.',
+                        summary: `Step budget exhausted after ${consecutiveErrors} consecutive API errors. Last error: ${errMsg}`,
                     };
                 }
                 continue;
             }
             costSpentUsd += stepResp.costUsd || 0;
+            consecutiveErrors = 0;
 
             // Null next = done (cost capped or steps exhausted)
             if (!stepResp.next) {
@@ -164,7 +218,79 @@ export async function runAgentScan(
             }
 
             // Execute the action locally
-            const observation = await executeAction(action, ctx, startResp.runId, client, target);
+            let observation: string;
+            let wasBlocked = false;
+
+            if (action.type === 'read_file') {
+                const normalizedPath = action.path.replace(/\\/g, '/').toLowerCase();
+                // Track by (path, startLine, endLine) — allow re-reading with different ranges
+                const rangeKey = `${normalizedPath}:${action.startLine || 0}:${action.endLine || 0}`;
+                if (readFiles.has(rangeKey)) {
+                    observation = `File "${action.path}" (lines ${action.startLine || 'all'}-${action.endLine || 'all'}) was already read. The content is in the transcript above. Use a DIFFERENT line range or a different tool.`;
+                    wasBlocked = true;
+                } else {
+                    // Per-file read cap: prevent the agent from re-reading the
+                    // same file with slightly different line ranges dozens of
+                    // times (observed 28 re-reads on one file). After 3 reads
+                    // of any range, force the agent to use a different tool.
+                    const count = (readFileCounts.get(normalizedPath) || 0) + 1;
+                    if (count > MAX_READS_PER_FILE) {
+                        observation = `BLOCKED: You have already read "${action.path}" ${MAX_READS_PER_FILE} times. Further read_file calls on this file will also be blocked. You MUST use a different tool (search_code, trace_flow, check_guard, check_policy, list_imports, or finish) to proceed.`;
+                        wasBlocked = true;
+                    } else {
+                        readFileCounts.set(normalizedPath, count);
+                        readFiles.add(rangeKey);
+                        observation = await executeAction(action, ctx, startResp.runId, client, target);
+                    }
+                }
+            } else {
+                // Dedup non-read tools: prevent the agent from calling the
+                // same search_code("foo") or trace_flow("bar.ts") repeatedly.
+                // Build a key from the action type + its primary argument.
+                let toolKey = '';
+                if (action.type === 'search_code') {
+                    toolKey = `search_code:${(action as any).pattern || ''}:${(action as any).glob || ''}`;
+                } else if (action.type === 'trace_flow' || action.type === 'trace_flow_cross_file') {
+                    toolKey = `${action.type}:${(action as any).filePath || ''}`;
+                } else if (action.type === 'check_guard') {
+                    toolKey = `check_guard:${(action as any).guardName || ''}:${(action as any).attackType || ''}`;
+                } else if (action.type === 'check_policy') {
+                    toolKey = `check_policy:${(action as any).filePath || ''}`;
+                }
+
+                if (toolKey) {
+                    const count = (toolCallCounts.get(toolKey) || 0) + 1;
+                    toolCallCounts.set(toolKey, count);
+                    if (count > MAX_SAME_TOOL_CALL) {
+                        observation = `You have already called this exact tool with the same arguments ${MAX_SAME_TOOL_CALL} times. The result is in the transcript above. Use a DIFFERENT tool, different arguments, or call finish to report your findings.`;
+                        wasBlocked = true;
+                    } else {
+                        observation = await executeAction(action, ctx, startResp.runId, client, target);
+                    }
+                } else {
+                    observation = await executeAction(action, ctx, startResp.runId, client, target);
+                }
+            }
+
+            // Track consecutive blocked reads — if the agent keeps requesting
+            // read_file on blocked files, force-finish to stop wasting steps.
+            if (wasBlocked) {
+                consecutiveBlockedReads++;
+                if (consecutiveBlockedReads >= 5) {
+                    console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — force-finishing to stop wasting steps.`);
+                    transcript.push({ action, observation });
+                    return {
+                        status: 'completed',
+                        findings: [],
+                        transcript,
+                        stepsUsed: stepsTaken,
+                        costSpentUsd,
+                        summary: `Investigation cut short — agent was stuck re-reading files. No findings reported.`,
+                    };
+                }
+            } else {
+                consecutiveBlockedReads = 0;
+            }
 
             transcript.push({ action, observation });
         }
@@ -185,8 +311,12 @@ function describeAction(action: AgentScanAction): string {
         case 'read_file': return `read_file(${action.path})`;
         case 'search_code': return `search_code("${action.pattern}")`;
         case 'trace_flow': return `trace_flow(${action.filePath})`;
+        case 'trace_flow_cross_file': return `trace_flow_cross_file(${action.filePath})`;
         case 'check_guard': return `check_guard(${action.guardName})`;
         case 'check_policy': return `check_policy(${action.filePath})`;
+        case 'get_endpoints': return `get_endpoints(${(action as any).glob || 'all'})`;
+        case 'list_imports': return `list_imports(${action.filePath})`;
+        case 'list_files': return `list_files(${(action as any).path || 'root'})`;
         case 'finish': return 'finish';
     }
 }

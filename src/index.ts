@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import * as path from 'path';
+import * as fs from 'fs';
 import { CredentialStore } from './auth/credentialStore';
 import { startServer } from './mcp/server';
 import type { ServerContext } from './mcp/types';
@@ -14,7 +15,14 @@ Usage:
   securecode-mcp login [--api-url <url>]        Authenticate via email + OTP
   securecode-mcp status                        Show current auth status
   securecode-mcp logout                        Remove stored credentials
+  securecode-mcp scan <filePath> [--json]      Scan a single file for vulnerabilities
+  securecode-mcp doctor                        Verify setup (credentials, API, scan)
   securecode-mcp --help                        Show this help
+
+Scan options:
+  --json                    Output results as JSON (for CI/automation)
+  --depth <fast|deep|agent>  Scan depth (default: agent). "fast" = no AI, "deep" = full pipeline
+  --workspace <path>        Workspace root (default: current directory)
 
 Environment:
   SECURECODE_API_TOKEN    API token (alternative to login)
@@ -174,6 +182,208 @@ function cmdLogout(): void {
     }
 }
 
+async function cmdScan(args: string[]): Promise<void> {
+    let filePath = '';
+    let jsonOutput = false;
+    let depth = 'agent';
+    let workspace = process.cwd();
+
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--json') {
+            jsonOutput = true;
+        } else if (args[i] === '--depth' && i + 1 < args.length) {
+            depth = args[++i];
+        } else if (args[i] === '--workspace' && i + 1 < args.length) {
+            workspace = path.resolve(args[++i]);
+        } else if (!args[i].startsWith('-')) {
+            filePath = args[i];
+        }
+    }
+
+    if (!filePath) {
+        console.error('Usage: securecode-mcp scan <filePath> [--json] [--depth <fast|deep|agent>]');
+        process.exit(1);
+    }
+
+    const absPath = path.resolve(filePath);
+    if (!fs.existsSync(absPath)) {
+        console.error(`Error: File not found: ${filePath}`);
+        process.exit(1);
+    }
+
+    const creds = CredentialStore.getOrThrow();
+
+    const ctx: ServerContext = {
+        apiUrl: creds.apiUrl,
+        apiToken: creds.apiToken,
+        workspaceRoot: workspace,
+    };
+
+    // Read the file
+    const { readFileFromWorkspace } = require('./utils/files');
+    let fileResult;
+    try {
+        fileResult = readFileFromWorkspace(workspace, filePath);
+    } catch (e: any) {
+        console.error(`Error: ${e.message}`);
+        process.exit(1);
+    }
+
+    if (!jsonOutput) {
+        console.log(`Scanning: ${filePath}`);
+        console.log(`Language: ${fileResult.language}`);
+        console.log(`Depth: ${depth}`);
+        console.log('');
+    }
+
+    try {
+        if (depth === 'agent') {
+            const { toolAgentScan } = require('./tools/agentScan');
+            const result = await toolAgentScan(ctx, {
+                filePath,
+                _noCache: true,
+                _progress: (_p: number, _t: number, msg: string) => {
+                    if (!jsonOutput) process.stderr.write(`  ${msg}\r`);
+                },
+            });
+
+            if (jsonOutput) {
+                console.log(JSON.stringify(result, null, 2));
+            } else {
+                const findings = (result as any).agentFindings || [];
+                console.log(`Status: ${(result as any).status}`);
+                console.log(`Summary: ${(result as any).summary || 'Scan complete'}`);
+                console.log(`Findings: ${findings.length}`);
+                console.log(`Steps: ${(result as any).stepsUsed || 0}`);
+                console.log(`Cost: $${((result as any).costSpentUsd || 0).toFixed(4)}`);
+                console.log('');
+                findings.forEach((f: any, i: number) => {
+                    const proven = f.proven ? ` [${f.proven}]` : '';
+                    console.log(`  [${i + 1}] ${f.type} L${f.line} (${f.severity}, confidence ${f.confidence})${proven}`);
+                    console.log(`      ${f.evidence?.slice(0, 100)}...`);
+                    if (f.proven === 'PROVEN') console.log(`      PROVEN: ${f.provenReason?.slice(0, 100)}`);
+                    console.log('');
+                });
+            }
+            process.exit(findingsCount(result));
+        } else {
+            const { toolScan } = require('./tools/scan');
+            const result = await toolScan(ctx, {
+                filePath,
+                scanDepth: depth === 'fast' ? 'fast' : 'deep',
+            });
+            const scanFindings = (result as any).findings || [];
+            if (jsonOutput) {
+                console.log(JSON.stringify(result, null, 2));
+            } else {
+                console.log(`Findings: ${scanFindings.length}`);
+                scanFindings.forEach((f: any, i: number) => {
+                    console.log(`  [${i + 1}] ${f.type} L${f.line} (${f.severity}) — ${f.message?.slice(0, 80)}`);
+                });
+            }
+            process.exit(scanFindings.length > 0 ? 1 : 0);
+        }
+    } catch (e: any) {
+        console.error(`Error: ${e.message}`);
+        process.exit(2);
+    }
+}
+
+function findingsCount(result: any): number {
+    return (result.agentFindings || []).length > 0 ? 1 : 0;
+}
+
+async function cmdDoctor(): Promise<void> {
+    const creds = CredentialStore.get();
+    let allOk = true;
+
+    console.log('SecureCode Setup Verification');
+    console.log('═══════════════════════════════════════════════════');
+    console.log('');
+
+    // 1. Check credentials
+    if (!creds) {
+        console.log('✗ Credentials: Not authenticated. Run: securecode-mcp login');
+        allOk = false;
+    } else {
+        console.log(`✓ Credentials: Authenticated (token: ${creds.apiToken.substring(0, 8)}...${creds.apiToken.slice(-4)})`);
+        console.log(`  API URL: ${creds.apiUrl}`);
+    }
+    console.log('');
+
+    // 2. Ping /health
+    if (creds) {
+        try {
+            const { ApiClient } = require('./api/client');
+            const client = new ApiClient({ baseUrl: creds.apiUrl, token: creds.apiToken });
+            // Use a simple GET to /health via fetch
+            const response = await fetch(`${creds.apiUrl}/health`);
+            if (response.ok) {
+                const body = await response.json() as any;
+                console.log(`✓ API reachable: ${creds.apiUrl}/health → ${body.status || 'ok'}`);
+            } else {
+                console.log(`✗ API reachable: HTTP ${response.status}`);
+                allOk = false;
+            }
+        } catch (e: any) {
+            console.log(`✗ API reachable: ${e.message}`);
+            allOk = false;
+        }
+    } else {
+        console.log('⚠ API reachable: Skipped (no credentials)');
+    }
+    console.log('');
+
+    // 3. Check workspace
+    const workspace = process.cwd();
+    const securecodeDir = path.join(workspace, '.securecode');
+    if (fs.existsSync(securecodeDir)) {
+        console.log(`✓ Workspace: ${workspace} (.securecode/ directory exists)`);
+        const memFile = path.join(securecodeDir, 'agent-memory.json');
+        if (fs.existsSync(memFile)) {
+            try {
+                const mem = JSON.parse(fs.readFileSync(memFile, 'utf8'));
+                console.log(`  Agent memory: ${mem.falsePositives?.length || 0} false positive(s), ${mem.knownFacts?.length || 0} known fact(s)`);
+            } catch {
+                console.log('  Agent memory: (corrupt file — will be recreated)');
+            }
+        } else {
+            console.log('  Agent memory: (none yet — created on first dismiss/scan)');
+        }
+    } else {
+        console.log(`✓ Workspace: ${workspace} (.securecode/ will be created on first scan)`);
+    }
+    console.log('');
+
+    // 4. Check tree-sitter
+    try {
+        const { parseSource } = require('./project-map/parserLoader');
+        const parsed = await parseSource('const x = 1;', 'javascript');
+        console.log(`✓ Tree-sitter: ${parsed ? 'working' : 'failed to parse'}`);
+        if (!parsed) allOk = false;
+    } catch (e: any) {
+        console.log(`✗ Tree-sitter: ${e.message}`);
+        allOk = false;
+    }
+    console.log('');
+
+    // Summary
+    console.log('═══════════════════════════════════════════════════');
+    if (allOk && creds) {
+        console.log('All checks passed! You are ready to scan.');
+        console.log('');
+        console.log('Next steps:');
+        console.log('  securecode-mcp scan src/app.ts         # scan a file');
+        console.log('  securecode-mcp serve                   # start MCP server');
+    } else {
+        console.log('Some checks failed. Fix the issues above before scanning.');
+        if (!creds) {
+            console.log('  Run: securecode-mcp login');
+        }
+    }
+    process.exit(allOk && creds ? 0 : 1);
+}
+
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
     const command = args[0];
@@ -197,6 +407,12 @@ async function main(): Promise<void> {
             break;
         case 'logout':
             cmdLogout();
+            break;
+        case 'scan':
+            await cmdScan(subArgs);
+            break;
+        case 'doctor':
+            await cmdDoctor();
             break;
         default:
             console.error(`Unknown command: ${command}`);

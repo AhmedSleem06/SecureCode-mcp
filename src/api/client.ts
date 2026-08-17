@@ -50,7 +50,7 @@ export class ApiClient {
         this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     }
 
-    async postJson<T>(path: string, body: unknown): Promise<T> {
+    async postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
         const url = `${this.baseUrl}${path}`;
         const payload = JSON.stringify(body);
         const parsed = new URL(url);
@@ -68,6 +68,7 @@ export class ApiClient {
                         'Content-Length': Buffer.byteLength(payload),
                         Authorization: `Bearer ${this.token}`,
                     },
+                    signal,  // AbortSignal — when aborted, the request is destroyed
                 },
                 (res) => {
                     let raw = '';

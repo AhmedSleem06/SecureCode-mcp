@@ -51,6 +51,17 @@ export const SANITIZERS: SanitizerDef[] = [
     { method: 'rtrim',  receiver: 'validator',   languages: ['javascript', 'typescript', 'tsx'] },
     { method: 'trim',   receiver: 'validator',   languages: ['javascript', 'typescript', 'tsx'] },
 
+    // ── JS/TS — Zod schema validation ─────────────────────────────────────
+    { method: 'parse',        languages: ['javascript', 'typescript', 'tsx'] },
+    { method: 'safeParse',    languages: ['javascript', 'typescript', 'tsx'] },
+    // ── JS/TS — Effect-TS Schema validation ──────────────────────────────
+    { method: 'decodeSync',   languages: ['javascript', 'typescript', 'tsx'] },
+    { method: 'decode',       languages: ['javascript', 'typescript', 'tsx'] },
+    { method: 'encodeSync',   languages: ['javascript', 'typescript', 'tsx'] },
+    // ── JS/TS — Joi/express-validator ────────────────────────────────────
+    { method: 'validate',     languages: ['javascript', 'typescript', 'tsx'] },
+    { method: 'assert',       languages: ['javascript', 'typescript', 'tsx'] },
+
     // ── Python — type coercions ──────────────────────────────────────────
     { method: 'int',          languages: ['python'] },
     { method: 'float',        languages: ['python'] },

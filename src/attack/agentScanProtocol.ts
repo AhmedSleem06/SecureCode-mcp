@@ -6,9 +6,9 @@
  */
 
 export const AGENT_SCAN_DEFAULTS = {
-    maxSteps: 20,
-    costCapUsd: 0.40,
-    wallClockMs: 180_000,
+    maxSteps: 30,
+    costCapUsd: 0.50,
+    wallClockMs: 300_000,
     perStepEstimateUsd: 0.08,
     creditsPerRun: 5,
     dailyRunLimit: 20,
@@ -19,6 +19,8 @@ export const AGENT_SCAN_DEFAULTS = {
 export interface AgentScanReadFileAction {
     type: 'read_file';
     path: string;
+    startLine?: number;
+    endLine?: number;
     rationale: string;
 }
 
@@ -49,6 +51,36 @@ export interface AgentScanCheckPolicyAction {
     rationale: string;
 }
 
+export interface AgentScanTraceFlowCrossFileAction {
+    type: 'trace_flow_cross_file';
+    filePath: string;
+    /** How many import hops to follow (default 3). */
+    maxDepth?: number;
+    rationale: string;
+}
+
+export interface AgentScanGetEndpointsAction {
+    type: 'get_endpoints';
+    /** Optional glob filter (e.g. "*.ts"). */
+    glob?: string;
+    rationale: string;
+}
+
+export interface AgentScanListImportsAction {
+    type: 'list_imports';
+    filePath: string;
+    rationale: string;
+}
+
+export interface AgentScanListFilesAction {
+    type: 'list_files';
+    /** Directory to list (relative to workspace root). Defaults to root. */
+    path?: string;
+    /** Optional glob filter (e.g. "*.ts"). */
+    glob?: string;
+    rationale: string;
+}
+
 export interface AgentScanFinding {
     line: number;
     lineEnd?: number;
@@ -58,28 +90,45 @@ export interface AgentScanFinding {
     evidence: string;
     why: string;
     fixStrategy?: string;
+    fix?: {
+        fixedCode: string;
+        replaceRange: { start_line: number; end_line: number };
+        fixSummary: string;
+        importsNeeded?: string[];
+        confidence?: number;
+    };
 }
 
 export interface AgentScanFinishAction {
     type: 'finish';
     findings: AgentScanFinding[];
     summary: string;
+    /** Self-critique the agent writes before reporting — visible to the user. */
+    selfCritique?: string | null;
 }
 
 export type AgentScanAction =
     | AgentScanReadFileAction
     | AgentScanSearchCodeAction
     | AgentScanTraceFlowAction
+    | AgentScanTraceFlowCrossFileAction
     | AgentScanCheckGuardAction
     | AgentScanCheckPolicyAction
+    | AgentScanGetEndpointsAction
+    | AgentScanListImportsAction
+    | AgentScanListFilesAction
     | AgentScanFinishAction;
 
 export type AgentScanActionType =
     | 'read_file'
     | 'search_code'
     | 'trace_flow'
+    | 'trace_flow_cross_file'
     | 'check_guard'
     | 'check_policy'
+    | 'get_endpoints'
+    | 'list_imports'
+    | 'list_files'
     | 'finish';
 
 export type AttackType =
@@ -116,6 +165,8 @@ export interface AgentScanTarget {
     language: string;
     fileContent: string;
     endpointContext?: unknown;
+    /** Formatted workspace memory string (false positives + known facts). */
+    workspaceMemory?: string;
 }
 
 export interface AgentScanStartResponse {

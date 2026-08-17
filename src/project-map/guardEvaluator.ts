@@ -136,6 +136,45 @@ function identifyGuardType(
         return 'validator';
     }
 
+    // ── 9. Python-specific guards ─────────────────────────────────────────
+    if (language === 'python') {
+        // Python allowlist: if x in {'a', 'b'} or if x in ('a', 'b') or if x in ['a', 'b']
+        if (/if\s+\w+\s+in\s*[\(\{\[]\s*['"][^\])}]*[\])}]/.test(text)) {
+            const hasLiteralSet = /in\s*[\(\{\[]\s*['"][^)\]}]*['"]\s*[,)\]}]/.test(text);
+            return hasLiteralSet ? 'allowlist-literal' : 'allowlist-dynamic';
+        }
+
+        // Python parameterized query: cursor.execute("...%s...", [params]) or
+        // cursor.execute("...:name...", {...}) or session.execute(text("...:name..."), {...})
+        for (const node of walk(fnRoot)) {
+            if (node.type !== 'call' && node.type !== 'call_expression') continue;
+            const p = callParts(node, source);
+            if (!p || !p.receiver) continue;
+            if (['execute', 'executemany', 'execute_many'].includes(p.method)) {
+                if (p.args.length >= 2) {
+                    const firstArg = p.args[0];
+                    const argText = source.slice(firstArg.startIndex, firstArg.endIndex);
+                    const isStringLike = firstArg.type === 'string';
+                    const hasPlaceholder = argText.includes('%s') || /:\w+/.test(argText);
+                    const hasConcat = argText.includes(' + ') || argText.includes('% ') || argText.includes('.format(');
+                    if (isStringLike && hasPlaceholder && !hasConcat) {
+                        return 'parameterized-query';
+                    }
+                }
+            }
+        }
+
+        // Python constant-time comparison: secrets.compare_digest or hmac.compare_digest
+        if (/compare_digest|secrets\.compare|hmac\.compare/.test(text)) {
+            return 'auth-api-key';  // constant-time comparison = auth guard
+        }
+
+        // Python rate limiting: flask_limiter, slowapi, ratelimit decorator
+        if (/flask_limiter|Limiter|slowapi|ratelimit|@limiter|@rate_limit/i.test(text)) {
+            return 'rate-limit';
+        }
+    }
+
     return 'unknown';
 }
 

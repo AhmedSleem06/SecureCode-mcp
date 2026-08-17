@@ -9,12 +9,29 @@ const SUPPORTED_EXTENSIONS: Record<string, string> = {
     '.ts': 'typescript',
     '.tsx': 'typescriptreact',
     '.py': 'python',
-    '.php': 'php',
+    // Note: .php is intentionally omitted — the MCP parserLoader has no
+    // tree-sitter-php.wasm. PHP files will return 'Unsupported file type'
+    // with a clear message instead of silently producing zero findings.
+    '.json': 'json',
+    '.yaml': 'yaml',
+    '.yml': 'yaml',
+    '.toml': 'toml',
+    '.ini': 'ini',
+    '.env': 'env',
+    '.cfg': 'ini',
+    '.conf': 'ini',
+    '.config': 'ini',
 };
 
 export function inferLanguage(filePath: string): string | undefined {
     const ext = path.extname(filePath).toLowerCase();
-    return SUPPORTED_EXTENSIONS[ext];
+    if (SUPPORTED_EXTENSIONS[ext]) return SUPPORTED_EXTENSIONS[ext];
+
+    // Dotfiles like .env, .env.local, .env.production have no extension
+    const base = path.basename(filePath).toLowerCase();
+    if (base === '.env' || /^\.env\.[\w.-]+$/.test(base)) return 'env';
+
+    return undefined;
 }
 
 export function isSupportedFile(filePath: string): boolean {

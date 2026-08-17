@@ -193,6 +193,25 @@ function checkExpressionTaint(
                     sanitizersApplied: [],
                 };
             }
+
+            // General argument propagation — for non-sanitizer, non-source,
+            // non-taint-returning calls, check if any argument is tainted.
+            // Catches passthrough wrappers like SQLAlchemy text(),
+            // base64.b64decode(), str(), etc.
+            for (const arg of p.args) {
+                const argTaint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
+                if (argTaint) {
+                    return {
+                        ...argTaint,
+                        path: [...argTaint.path, {
+                            line: node.startPosition.row + 1,
+                            variable: sourceText.slice(node.startIndex, node.endIndex),
+                            operation: 'call-pass',
+                            description: `Tainted data passed through ${p.method}()`,
+                        }],
+                    };
+                }
+            }
         }
         // Also check if the receiver of a method call is tainted
         // e.g. const x = req.body; x.toString() — x is tainted, so x.toString() is tainted
@@ -220,7 +239,8 @@ function checkExpressionTaint(
     }
 
     // 4. Binary expression (concatenation) — check both operands
-    if (node.type === 'binary_expression' || node.type === 'binary_operator_expression') {
+    if (node.type === 'binary_expression' || node.type === 'binary_operator_expression'
+        || node.type === 'binary_operator') {
         const left = node.child(0);
         const right = node.child(node.childCount - 1);
         const leftTaint = left ? checkExpressionTaint(left, scope, sourceText, language, taintReturningFns) : null;
@@ -385,10 +405,48 @@ function processDeclarator(
     sourceText: string,
     language: SinkLanguage,
     taintReturningFns: Set<string>,
+    onSink?: (result: TaintResult) => void,
 ): void {
     const lhs = decl.child(0);
     const rhs = decl.child(decl.childCount - 1);
     if (!lhs || !rhs || lhs === rhs) return;
+
+    // Check if the RHS is a sink call with tainted arguments BEFORE
+    // propagating taint. This catches `const x = db.query(tainted)` and
+    // `const x = await db.query(tainted)`.
+    if (onSink) {
+        // Unwrap await/parenthesized expressions to find the inner call
+        let sinkCheckNode = rhs;
+        while (sinkCheckNode.type === 'await_expression' || sinkCheckNode.type === 'await'
+            || sinkCheckNode.type === 'parenthesized_expression') {
+            sinkCheckNode = sinkCheckNode.namedChildren[0];
+            if (!sinkCheckNode) break;
+        }
+        if (sinkCheckNode && CALL_NODE_TYPES.has(sinkCheckNode.type)) {
+            const sinkMatch = matchSink(sinkCheckNode, sourceText, language);
+            if (sinkMatch) {
+                for (const arg of sinkMatch.args) {
+                    const taint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
+                    if (taint) {
+                        onSink({
+                            source: taint.source,
+                            sourceLine: taint.sourceLine,
+                            sink: sinkMatch.def.id,
+                            sinkLine: sinkMatch.line + 1,
+                            canonicalType: sinkMatch.def.canonicalType,
+                            propagationPath: [...taint.path, {
+                                line: sinkMatch.line + 1,
+                                variable: sourceText.slice(arg.startIndex, arg.endIndex),
+                                operation: 'sink-arg',
+                                description: `${sinkMatch.def.id}(${sourceText.slice(arg.startIndex, arg.endIndex)})`,
+                            }],
+                            isTainted: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     const taint = checkExpressionTaint(rhs, scope, sourceText, language, taintReturningFns);
     if (!taint) return;
@@ -439,7 +497,65 @@ function processExpression(
         const lhs = node.child(0);
         const rhs = node.child(node.childCount - 1);
         if (!lhs || !rhs || lhs === rhs) return;
+
+        // Check if RHS is a sink call with tainted arguments
+        if (CALL_NODE_TYPES.has(rhs.type)) {
+            const sinkMatch = matchSink(rhs, sourceText, language);
+            if (sinkMatch) {
+                for (const arg of sinkMatch.args) {
+                    const taint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
+                    if (taint) {
+                        onSink({
+                            source: taint.source,
+                            sourceLine: taint.sourceLine,
+                            sink: sinkMatch.def.id,
+                            sinkLine: sinkMatch.line + 1,
+                            canonicalType: sinkMatch.def.canonicalType,
+                            propagationPath: [...taint.path, {
+                                line: sinkMatch.line + 1,
+                                variable: sourceText.slice(arg.startIndex, arg.endIndex),
+                                operation: 'sink-arg',
+                                description: `${sinkMatch.def.id}(${sourceText.slice(arg.startIndex, arg.endIndex)})`,
+                            }],
+                            isTainted: true,
+                        });
+                    }
+                }
+            }
+        }
+
         const taint = checkExpressionTaint(rhs, scope, sourceText, language, taintReturningFns);
+
+        // Check for member-assignment sinks (el.innerHTML = tainted)
+        if (taint && lhs.type === 'member_expression') {
+            const propNode = lhs.child(lhs.childCount - 1);
+            if (propNode) {
+                const propText = sourceText.slice(propNode.startIndex, propNode.endIndex);
+                for (const def of SINK_REGISTRY) {
+                    if (!def.languages.includes(language)) continue;
+                    for (const matcher of def.matchers) {
+                        if (matcher.kind !== 'member-assignment') continue;
+                        if (matcher.property === propText) {
+                            onSink({
+                                source: taint.source,
+                                sourceLine: taint.sourceLine,
+                                sink: def.id,
+                                sinkLine: node.startPosition.row + 1,
+                                canonicalType: def.canonicalType,
+                                propagationPath: [...taint.path, {
+                                    line: node.startPosition.row + 1,
+                                    variable: `${propText} = ${sourceText.slice(rhs.startIndex, rhs.endIndex)}`,
+                                    operation: 'sink-arg',
+                                    description: `${def.id} = ${sourceText.slice(rhs.startIndex, rhs.endIndex)}`,
+                                }],
+                                isTainted: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         if (taint && isIdentifier(lhs)) {
             const name = sourceText.slice(lhs.startIndex, lhs.endIndex);
             scope.tainted.set(name, {
@@ -475,6 +591,24 @@ function processExpression(
                     }],
                     isTainted: true,
                 });
+            }
+        }
+    }
+
+    // Recurse into arrow/function callbacks passed as call arguments.
+    // This catches app.post('/path', (req, res) => { ... }) where the
+    // handler body contains sources and sinks. Walk the entire call
+    // subtree to find function nodes (they may be nested inside arguments).
+    if (CALL_NODE_TYPES.has(node.type)) {
+        for (const child of walk(node)) {
+            // Skip the outer call node itself — only look at children
+            if (child === node) continue;
+            if (FUNCTION_NODE_TYPES.has(child.type)) {
+                const body = functionBody(child);
+                if (body) {
+                    const childScope: Scope = { tainted: new Map(), parent: scope };
+                    processScope(body, childScope, sourceText, language, taintReturningFns, onSink, () => {});
+                }
             }
         }
     }
@@ -532,7 +666,7 @@ function processScope(
                         }
                         continue;
                     }
-                    processDeclarator(decl, scope, sourceText, language, taintReturningFns);
+                    processDeclarator(decl, scope, sourceText, language, taintReturningFns, onSink);
                 }
             }
             continue;
@@ -555,6 +689,33 @@ function processScope(
         if (stmt.type === 'return_statement' || stmt.type === 'return') {
             const expr = stmt.namedChildren[0];
             if (expr) {
+                // Check for sinks within the return expression
+                for (const node of walk(expr)) {
+                    if (CALL_NODE_TYPES.has(node.type)) {
+                        const sinkMatch = matchSink(node, sourceText, language);
+                        if (sinkMatch) {
+                            for (const arg of sinkMatch.args) {
+                                const taint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
+                                if (taint) {
+                                    onSink({
+                                        source: taint.source,
+                                        sourceLine: taint.sourceLine,
+                                        sink: sinkMatch.def.id,
+                                        sinkLine: sinkMatch.line + 1,
+                                        canonicalType: sinkMatch.def.canonicalType,
+                                        propagationPath: [...taint.path, {
+                                            line: sinkMatch.line + 1,
+                                            variable: sourceText.slice(arg.startIndex, arg.endIndex),
+                                            operation: 'sink-arg',
+                                            description: `${sinkMatch.def.id}(${sourceText.slice(arg.startIndex, arg.endIndex)})`,
+                                        }],
+                                        isTainted: true,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 const taint = checkExpressionTaint(expr, scope, sourceText, language, taintReturningFns);
                 onReturn(taint);
             } else {
@@ -593,7 +754,13 @@ function processScope(
             || stmt.type === 'statement_block'
             || stmt.type === 'decorated_definition') {
             for (const child of stmt.namedChildren) {
-                if (child.type === 'statement_block' || child.type === 'block'
+                if (child.type === 'with_item' || child.type === 'with_clause') {
+                    for (const item of walk(child)) {
+                        if (item !== child && CALL_NODE_TYPES.has(item.type)) {
+                            processExpression(item, scope, sourceText, language, taintReturningFns, onSink);
+                        }
+                    }
+                } else if (child.type === 'statement_block' || child.type === 'block'
                     || STATEMENT_TYPES.has(child.type)) {
                     processScope(
                         child.type === 'statement_block' || child.type === 'block' ? child : { namedChildren: [child] } as any,
@@ -644,6 +811,9 @@ function findTaintReturningFunctions(
  *
  * @param source   the file's source text
  * @param language  the grammar to parse with
+ * @param seedParams  optional: parameter names to pre-taint as sources
+ *                    (used by cross-file taint tracking to analyze
+ *                    imported functions)
  * @returns taint results, one per tainted sink argument. Empty when the
  *          grammar is missing, the file fails to parse, or no tainted data
  *          reaches any sink (best-effort: never throws).
@@ -651,6 +821,7 @@ function findTaintReturningFunctions(
 export async function trackTaint(
     source: string,
     language: SinkLanguage,
+    seedParams?: string[],
 ): Promise<TaintResult[]> {
     const parsed = await parseSource(source, language);
     if (!parsed) return [];
@@ -671,6 +842,24 @@ export async function trackTaint(
 
     // Process module level
     const moduleScope: Scope = { tainted: new Map(), parent: null };
+
+    // Pre-seed parameters as taint sources (for cross-file analysis)
+    if (seedParams) {
+        for (const param of seedParams) {
+            moduleScope.tainted.set(param, {
+                source: `<param:${param}>`,
+                sourceLine: 1,
+                path: [{
+                    line: 1,
+                    variable: param,
+                    operation: 'source',
+                    description: `Parameter ${param} (tainted by caller)`,
+                }],
+                sanitizersApplied: [],
+            });
+        }
+    }
+
     processScope(root, moduleScope, source, language, taintReturningFns, onSink, () => {});
 
     return results;

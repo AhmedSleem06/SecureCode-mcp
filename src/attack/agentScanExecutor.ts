@@ -14,9 +14,13 @@ import type { ServerContext } from '../mcp/types';
 import { readFileFromWorkspace, resolveWorkspacePath } from '../utils/files';
 import { searchCode, formatSearchResult } from '../utils/searchCode';
 import { trackTaint } from '../project-map/taintTracker';
+import { trackTaintCrossFile } from '../project-map/crossFileTaintTracker';
 import { evaluateGuard } from '../project-map/guardEvaluator';
 import type { SinkLanguage } from '../project-map/sinkRegistry';
 import { redactText } from './report';
+import { discoverEndpoints, formatEndpoints } from '../project-map/endpointDiscovery';
+import { listImports, formatImports } from '../utils/listImports';
+import { listFiles, formatFileList } from '../utils/listFiles';
 import type {
     AgentScanAction,
     AgentScanToolRequest,
@@ -24,7 +28,8 @@ import type {
     AgentScanTarget,
 } from './agentScanProtocol';
 
-const MAX_OBSERVATION_CHARS = 8000;
+const MAX_OBSERVATION_CHARS = 16000;
+const LARGE_FILE_THRESHOLD = 300;
 
 function truncate(text: string): string {
     if (text.length <= MAX_OBSERVATION_CHARS) return text;
@@ -85,6 +90,89 @@ function escapeRegex(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Extract a function map from source code using tree-sitter.
+ * Returns a string like:
+ *   Function map:
+ *     L1-20   requireAuth (function_declaration)
+ *     L22-50  requireMembership (function_declaration)
+ *     ...
+ * Returns null if tree-sitter parsing fails.
+ */
+async function extractFunctionMap(content: string, relPath: string): Promise<string | null> {
+    try {
+        const { parseSource } = await import('../project-map/parserLoader');
+        const { walk } = await import('../project-map/astHelpers');
+
+        // Infer language from path
+        const ext = path.extname(relPath).toLowerCase();
+        const langMap: Record<string, string> = {
+            '.ts': 'typescript', '.tsx': 'tsx', '.js': 'javascript',
+            '.jsx': 'javascript', '.py': 'python',
+        };
+        const lang = langMap[ext];
+        if (!lang) return null;
+
+        const parsed = await parseSource(content, lang as any);
+        if (!parsed) return null;
+
+        const { root } = parsed;
+        const entries: string[] = [];
+        const FUNCTION_TYPES = new Set([
+            'function_declaration', 'async_function_declaration',
+            'method_definition', 'async_method_definition',
+            'arrow_function', 'function_expression',
+            'class_declaration', 'export_statement',
+        ]);
+
+        for (const node of walk(root)) {
+            if (!FUNCTION_TYPES.has(node.type)) continue;
+
+            // Get the name (first identifier child or property_identifier)
+            let name = '';
+            for (const child of node.children) {
+                if (child.type === 'identifier' || child.type === 'property_identifier' || child.type === 'type_identifier') {
+                    name = content.slice(child.startIndex, child.endIndex);
+                    break;
+                }
+            }
+            if (!name) continue;
+
+            const startLine = node.startPosition.row + 1;
+            const endLine = node.endPosition.row + 1;
+            const lineCount = endLine - startLine + 1;
+            const kind = node.type.replace(/_/g, ' ');
+            entries.push(`  L${startLine}-${endLine} (${lineCount}L) ${name} [${kind}]`);
+        }
+
+        if (entries.length === 0) return null;
+
+        // Also include export-level structure for TS/JS
+        const exportLines: string[] = [];
+        for (const node of walk(root)) {
+            if (node.type === 'export_statement') {
+                const text = content.slice(node.startIndex, node.endIndex);
+                const firstLine = text.split('\n')[0];
+                if (firstLine.length > 100) {
+                    exportLines.push(`  L${node.startPosition.row + 1} ${firstLine.slice(0, 100)}...`);
+                } else {
+                    exportLines.push(`  L${node.startPosition.row + 1} ${firstLine}`);
+                }
+            }
+        }
+
+        const parts = ['Function map (use read_file with startLine/endLine to read specific sections):'];
+        parts.push(...entries);
+        if (exportLines.length > 0 && exportLines.length <= 20) {
+            parts.push('', 'Exports:');
+            parts.push(...exportLines);
+        }
+        return parts.join('\n');
+    } catch {
+        return null;
+    }
+}
+
 export async function executeAction(
     action: AgentScanAction,
     ctx: ServerContext,
@@ -98,12 +186,32 @@ export async function executeAction(
                 const absPath = resolveWorkspacePath(ctx.workspaceRoot, action.path);
                 const content = fs.readFileSync(absPath, 'utf8');
                 const rel = path.relative(ctx.workspaceRoot, absPath).replace(/\\/g, '/');
-                const lines = content.split('\n').length;
-                const numbered = content
-                    .split('\n')
+                const allLines = content.split('\n');
+                const totalLines = allLines.length;
+
+                // If startLine/endLine provided, return only that range
+                if (action.startLine || action.endLine) {
+                    const start = Math.max(1, action.startLine || 1);
+                    const end = Math.min(totalLines, action.endLine || totalLines);
+                    const section = allLines.slice(start - 1, end)
+                        .map((line, i) => `${start + i}: ${line}`)
+                        .join('\n');
+                    return redact(`File: ${rel} (lines ${start}-${end} of ${totalLines})\n\n${section}`);
+                }
+
+                // For large files, return a function map instead of raw content
+                if (totalLines > LARGE_FILE_THRESHOLD) {
+                    const funcMap = await extractFunctionMap(content, rel);
+                    if (funcMap) {
+                        return redact(`File: ${rel} (${totalLines} lines — LARGE FILE)\n\nThis file is too large to show in full. Here is a function map. Use read_file with startLine/endLine to read specific sections.\n\n${funcMap}`);
+                    }
+                }
+
+                // Small file: return full content with line numbers
+                const numbered = allLines
                     .map((line, i) => `${i + 1}: ${line}`)
                     .join('\n');
-                return redact(`File: ${rel} (${lines} lines)\n\n${numbered}`);
+                return redact(`File: ${rel} (${totalLines} lines)\n\n${numbered}`);
             } catch (e: any) {
                 return `Error reading file "${action.path}": ${e.message || e}`;
             }
@@ -143,6 +251,28 @@ export async function executeAction(
             }
         }
 
+        case 'trace_flow_cross_file': {
+            try {
+                const results = await trackTaintCrossFile({
+                    workspaceRoot: ctx.workspaceRoot,
+                    filePath: action.filePath,
+                    maxDepth: (action as any).maxDepth ?? 3,
+                });
+                if (results.length === 0) {
+                    return `No cross-file taint flows found starting from ${action.filePath}.`;
+                }
+                const formatted = results.map(r => {
+                    const path = r.crossFileSteps
+                        .map(s => `  ${s.file}:${s.line} ${s.operation}: ${s.description}`)
+                        .join('\n');
+                    return `${r.source} (${r.sourceFile}:${r.sourceLine}) → ${r.sink} (${r.sinkFile}:${r.sinkLine}) [${r.canonicalType}]\n${path}`;
+                }).join('\n\n');
+                return redact(formatted);
+            } catch (e: any) {
+                return `Error tracing cross-file flow from "${action.filePath}": ${e.message || e}`;
+            }
+        }
+
         case 'check_guard': {
             try {
                 const absPath = resolveWorkspacePath(ctx.workspaceRoot, action.filePath);
@@ -179,6 +309,36 @@ export async function executeAction(
                 return truncate(resp.observation);
             } catch (e: any) {
                 return `Error running check_policy: ${e.message || e}`;
+            }
+        }
+
+        case 'get_endpoints': {
+            try {
+                const endpoints = await discoverEndpoints(ctx.workspaceRoot, (action as any).glob);
+                return truncate(formatEndpoints(endpoints));
+            } catch (e: any) {
+                return `Error discovering endpoints: ${e.message || e}`;
+            }
+        }
+
+        case 'list_imports': {
+            try {
+                const imports = await listImports(ctx.workspaceRoot, action.filePath);
+                return truncate(formatImports(imports, action.filePath));
+            } catch (e: any) {
+                return `Error listing imports for "${action.filePath}": ${e.message || e}`;
+            }
+        }
+
+        case 'list_files': {
+            try {
+                const files = listFiles(ctx.workspaceRoot, {
+                    dir: (action as any).path,
+                    glob: (action as any).glob,
+                });
+                return truncate(formatFileList(files));
+            } catch (e: any) {
+                return `Error listing files: ${e.message || e}`;
             }
         }
 
