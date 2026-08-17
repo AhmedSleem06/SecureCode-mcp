@@ -207,12 +207,18 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
     }
 }
 
-/** Parse a file:// URI to a filesystem path. */
+/** Parse a URI or path to a filesystem path.
+ * Handles file:// URIs (VS Code), plain Windows paths (Cursor), and POSIX paths. */
 function uriToPath(uri: string): string | null {
-    if (!uri.startsWith('file://')) return null;
-    let p = uri.replace(/^file:\/\/\/?/, '');
-    if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
-    p = decodeURIComponent(p);
+    let p: string;
+    if (uri.startsWith('file://')) {
+        p = uri.replace(/^file:\/\/\/?/, '');
+        if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+        p = decodeURIComponent(p);
+    } else {
+        // Cursor sends plain paths like "d:\BunyanTech\..." or "D:/foo"
+        p = uri;
+    }
     p = path.resolve(p);
     return fs.existsSync(p) ? p : null;
 }
