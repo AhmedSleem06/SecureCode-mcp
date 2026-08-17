@@ -1,4 +1,6 @@
 import * as readline from 'readline';
+import * as path from 'path';
+import * as fs from 'fs';
 import type { JsonRpcRequest, JsonRpcResponse, ToolDef, ServerContext } from './types';
 import { TOOLS } from './tools';
 import { toolScan } from '../tools/scan';
@@ -82,12 +84,61 @@ function validateArgs(tool: ToolDef, args: any): string | null {
     return null;
 }
 
+/** Extract a workspace path from the MCP initialize request's workspaceFolders.
+ * Cursor/VS Code send `file:///...` URIs. Falls back to the existing ctx.workspaceRoot. */
+function resolveWorkspaceFromInit(params: any, fallback: string): string {
+    const folders = params?.workspaceFolders;
+    if (Array.isArray(folders) && folders.length > 0) {
+        const uri = folders[0]?.uri;
+        if (typeof uri === 'string') {
+            let p: string;
+            if (uri.startsWith('file://')) {
+                // file:///D:/foo or file:///home/user/foo
+                p = uri.replace(/^file:\/\/\/?/, '');
+                // On Windows, restore the drive colon: /D:/foo -> D:/foo
+                if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+                p = decodeURIComponent(p);
+            } else {
+                p = uri;
+            }
+            p = path.resolve(p);
+            if (fs.existsSync(p)) return p;
+        }
+        // Some clients send `rootPath` instead of `workspaceFolders`
+        if (typeof folders[0] === 'string') {
+            const p = path.resolve(folders[0]);
+            if (fs.existsSync(p)) return p;
+        }
+    }
+    // VS Code legacy field
+    const rootPath = params?.rootPath;
+    if (typeof rootPath === 'string' && rootPath) {
+        const p = path.resolve(rootPath);
+        if (fs.existsSync(p)) return p;
+    }
+    const rootUri = params?.rootUri;
+    if (typeof rootUri === 'string' && rootUri.startsWith('file://')) {
+        let p = rootUri.replace(/^file:\/\/\/?/, '');
+        if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+        p = decodeURIComponent(p);
+        p = path.resolve(p);
+        if (fs.existsSync(p)) return p;
+    }
+    return fallback;
+}
+
 async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<JsonRpcResponse> {
     const id = req.id ?? null;
     try {
         switch (req.method) {
             case 'initialize': {
                 initialized = true;
+                const params = (req.params || {}) as any;
+                const resolved = resolveWorkspaceFromInit(params, ctx.workspaceRoot);
+                if (resolved !== ctx.workspaceRoot) {
+                    ctx.workspaceRoot = resolved;
+                    process.stderr.write(`[securecode-mcp] workspace set to ${resolved} (from client)\n`);
+                }
                 return {
                     jsonrpc: '2.0', id,
                     result: {
