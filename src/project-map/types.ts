@@ -203,6 +203,7 @@ export interface FileExtraction {
     file: string;
     language: 'javascript' | 'typescript' | 'tsx' | 'python' | 'unknown';
     endpoints: EndpointRecord[];
+    websockets: WebSocketHandler[];
     dynamicPatterns: DynamicPattern[];
     /** Imports resolved for cross-file use: name -> sourceFile (workspace-relative). */
     imports: Record<string, string>;
@@ -217,6 +218,8 @@ export interface ProjectMap {
     files: Record<string, FileExtraction>;
     /** Flat endpoint list (denormalized for the panel). */
     endpoints: EndpointRecord[];
+    /** Flat WebSocket handler list. */
+    websockets: WebSocketHandler[];
     /** Flat dynamic-pattern list. */
     dynamicPatterns: DynamicPattern[];
     /** Schema version, bumped when the on-disk format changes. */
@@ -225,8 +228,32 @@ export interface ProjectMap {
     builtAt: number;
 }
 
+/**
+ * A WebSocket handler registration site.
+ *
+ * Captured for projects that expose a real-time API instead of (or alongside)
+ * HTTP endpoints: `ws.on('message', h)`, `wss.on('connection', h)`,
+ * `socket.on('disconnect', h)`, `io.on('connection', h)`.
+ */
+export interface WebSocketHandler {
+    /** Stable id: `${file}:${line}:${event}`. */
+    id: string;
+    /** Event name as registered: 'connection', 'message', 'disconnect', 'error', 'close', ... */
+    event: string;
+    /** Handler function local name (or '<anonymous>'). */
+    handlerName: string;
+    /** Workspace-relative source file of the handler. */
+    sourceFile: string;
+    /** 1-indexed line of the `.on(event, handler)` call. */
+    line: number;
+    /** Receiver local name (e.g. 'ws', 'socket', 'io', 'wss'). */
+    receiver: string;
+    /** Confidence that this is a real WebSocket handler. */
+    confidence: number;
+}
+
 /** Schema version for the on-disk cache. Bump to invalidate old caches. */
-export const PROJECT_MAP_SCHEMA_VERSION = 1;
+export const PROJECT_MAP_SCHEMA_VERSION = 2;
 
 /**
  * EndpointContext — the slice of the Project Map that travels with a

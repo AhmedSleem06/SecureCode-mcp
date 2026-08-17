@@ -111,6 +111,39 @@ describe('Project Map — Layer 1 endpoint extraction', () => {
     });
 });
 
+describe('Project Map — Layer 1 WebSocket extraction', () => {
+    const WS_FIXTURE = `const WebSocket = require('ws');
+const wss = new WebSocket.Server({ port: 8080 });
+
+wss.on('connection', function handleConnection(ws) {
+  ws.on('message', function handleMessage(data) {
+    console.log('received:', data);
+  });
+  ws.on('close', function handleClose() {});
+  ws.on('error', function handleError(err) {});
+});
+
+io.on('disconnect', function handleDisconnect() {});
+`;
+
+    it('extracts WebSocket handlers from a ws/socket.io fixture', async () => {
+        const parsed = await parseSource(WS_FIXTURE, 'javascript');
+        expect(parsed).not.toBeNull();
+        const result = extractLayer1('server.js', WS_FIXTURE, parsed!.root);
+        expect(result.websockets.length).toBe(5);
+        const events = result.websockets.map(w => w.event);
+        expect(events).toContain('connection');
+        expect(events).toContain('message');
+        expect(events).toContain('close');
+        expect(events).toContain('error');
+        expect(events).toContain('disconnect');
+        const conn = result.websockets.find(w => w.event === 'connection');
+        expect(conn!.handlerName).toBe('handleConnection');
+        expect(conn!.receiver).toBe('wss');
+        expect(conn!.sourceFile).toBe('server.js');
+    });
+});
+
 describe('Project Map — Layer 2 dynamic detection', () => {
     it('detects D1-D10 dynamic patterns', async () => {
         const parsed = await parseSource(DYNAMIC_FIXTURE, 'javascript');
@@ -176,14 +209,14 @@ describe('Project Map — cache', () => {
         const cached = readCache(workspace);
         expect(cached).not.toBeNull();
         expect(cached!.endpoints.length).toBe(3);
-        expect(cached!.version).toBe(1);
+        expect(cached!.version).toBe(2);
     });
 
     it('cacheStatus reports metadata', async () => {
         const status = cacheStatus(workspace);
         expect(status.exists).toBe(true);
         expect(status.endpointCount).toBe(3);
-        expect(status.version).toBe(1);
+        expect(status.version).toBe(2);
     });
 
     it('readCache returns null when no cache exists', () => {

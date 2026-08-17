@@ -16,7 +16,9 @@ export function readCache(workspaceRoot: string): ProjectMap | null {
         if (!fs.existsSync(p)) return null;
         const raw = fs.readFileSync(p, 'utf8');
         const map = JSON.parse(raw) as ProjectMap;
-        if (!map.version || map.version > PROJECT_MAP_SCHEMA_VERSION) {
+        if (!map.version || map.version !== PROJECT_MAP_SCHEMA_VERSION) {
+            // Reject caches from a different schema version (older or newer)
+            // so the map is rebuilt with the current shape.
             return null;
         }
         return map;
@@ -41,6 +43,7 @@ export function cacheStatus(workspaceRoot: string): {
     builtAt?: number;
     version?: number;
     endpointCount?: number;
+    websocketCount?: number;
     fileCount?: number;
 } {
     const map = readCache(workspaceRoot);
@@ -50,6 +53,7 @@ export function cacheStatus(workspaceRoot: string): {
         builtAt: map.builtAt,
         version: map.version,
         endpointCount: (map.endpoints || []).length,
+        websocketCount: (map.websockets || []).length,
         fileCount: map.files ? Object.keys(map.files).length : 0,
     };
 }

@@ -338,3 +338,72 @@ export function isLikelyFrameworkFile(imports: Map<string, string>): boolean {
         s === 'django' || s.startsWith('django.')
     );
 }
+
+/**
+ * WebSocket lifecycle event names. A `.on(name, h)` where `name` is one of
+ * these is treated as a WebSocket handler even when the receiver name does not
+ * look like a socket — `io.on('connection', h)` is the canonical socket.io
+ * server setup and the receiver `io` is not in the WS_RECEIVER set.
+ */
+const WS_EVENTS = new Set([
+    'connection', 'message', 'disconnect', 'error', 'close', 'open',
+    'upgrade', 'ping', 'pong', 'listening', 'unexpected-response',
+    'handshake', 'data', 'end',
+]);
+
+/**
+ * Receiver names that are conventionally WebSocket objects. A `.on(name, h)`
+ * on one of these is treated as a WebSocket handler even when the event name
+ * is not in WS_EVENTS (custom application events over socket.io).
+ */
+const WS_RECEIVERS = new Set([
+    'ws', 'wss', 'socket', 'io', 'sio', 'webSocket', 'websocket',
+    'client', 'connection', 'sock',
+]);
+
+/** True iff a receiver name looks like a WebSocket object. */
+function isWsReceiver(receiver: string): boolean {
+    const r = receiver.toLowerCase();
+    if (WS_RECEIVERS.has(r)) return true;
+    // Catches `wsServer`, `socketRef`, `wsClient`, `ioServer`…
+    return /^(ws|socket|io|wss|sock)[A-Z0-9_]/.test(r) || /[A-Z0-9_](ws|socket|io)$/.test(r);
+}
+
+/**
+ * Detect a WebSocket handler registration: `.on(event, handler)` where the
+ * event is a known WS lifecycle event OR the receiver looks like a socket.
+ *
+ * Returns the event name, handler node, receiver name and line, or null when
+ * the call is not a WebSocket registration.
+ */
+export function isWebSocketRegistration(
+    callNode: TreeSitterNode,
+    source: string,
+): { receiver: string; event: string; handler: TreeSitterNode | null; line: number } | null {
+    if (callNode.type !== 'call_expression' && callNode.type !== 'call') return null;
+    const p = callParts(callNode, source);
+    if (!p || !p.receiver) return null;
+    // `.on(...)` / `.addEventListener(...)` / `.handle(...)`
+    if (p.method !== 'on' && p.method !== 'addEventListener' && p.method !== 'handle') return null;
+    if (p.args.length < 1) return null;
+    const eventArg = p.args[0];
+    if (!isStringLiteral(eventArg)) return null;
+    const event = stringLiteralValue(eventArg, source);
+    if (!event) return null;
+
+    const receiverLooksWs = isWsReceiver(p.receiver);
+    const eventIsWs = WS_EVENTS.has(event.toLowerCase());
+    // Require either the receiver name or the event name to look WebSocket-y.
+    // `emitter.on('tick', h)` is not a WebSocket handler; `io.on('tick', h)`
+    // is, because socket.io uses arbitrary custom events over the socket.
+    if (!receiverLooksWs && !eventIsWs) return null;
+    // For generic EventEmitters that also have `.on('error', h)` (e.g.
+    // process, streams), require the receiver to look WebSocket-y when the
+    // event is a common EventEmitter event.
+    if (!receiverLooksWs && (event === 'error' || event === 'end' || event === 'data')) {
+        return null;
+    }
+
+    const handler = p.args.length >= 2 ? p.args[p.args.length - 1] : null;
+    return { receiver: p.receiver, event, handler, line: p.line };
+}

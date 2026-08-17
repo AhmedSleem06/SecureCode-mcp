@@ -31,12 +31,13 @@ import {
     dataLayerBindings, DataLayerMatch, detectAuth, detectAuthInFunction,
     detectDataLayer, detectResponseShape,
     isDjangoRouteRegistration, isRouteRegistration, isUseRegistration,
+    isWebSocketRegistration,
     normalizeMethod, RESPONSE_CONSTRUCTORS, toDataLayer,
 } from './detectors';
 import {
     AuthScheme, CallGraphNode, Confidence, DataLayer,
     EndpointParam, EndpointRecord, HttpMethod, MiddlewareEntry, ParamSource,
-    ResponseShape, ValidatorLibrary,
+    ResponseShape, ValidatorLibrary, WebSocketHandler,
 } from './types';
 
 /** One global middleware registration: app.use(mw) or app.use('/path', mw). */
@@ -52,6 +53,8 @@ export interface GlobalMiddleware {
 
 export interface Layer1Result {
     endpoints: EndpointRecord[];
+    /** WebSocket handler registrations discovered in this file. */
+    websockets: WebSocketHandler[];
     /** app.use(...) registrations in order (for the panel + cross-file stitch). */
     globalMiddleware: GlobalMiddleware[];
     imports: Record<string, string>;
@@ -660,8 +663,31 @@ export function extractLayer1(
     const data = resolveDataLayer(imports, root, source, ctx);
 
     const endpoints: EndpointRecord[] = [];
+    const websockets: WebSocketHandler[] = [];
     const globalMiddleware: GlobalMiddleware[] = [];
     const drafts: EndpointDraft[] = [];
+
+    // Pass 0: collect WebSocket handler registrations (ws.on('message', h), io.on('connection', h), ...).
+    // Runs before the HTTP passes so that a file with no routes still yields a
+    // useful map entry for real-time / WebSocket-only projects.
+    for (const n of walk(root)) {
+        const ws = isWebSocketRegistration(n, source);
+        if (!ws) continue;
+        const handlerName = ws.handler
+            ? (isIdentifier(ws.handler)
+                ? source.slice(ws.handler.startIndex, ws.handler.endIndex)
+                : handlerNameOf(ws.handler, source))
+            : '<anonymous>';
+        websockets.push({
+            id: `${file}:${ws.line + 1}:${ws.event}`,
+            event: ws.event,
+            handlerName,
+            sourceFile: file,
+            line: ws.line + 1,
+            receiver: ws.receiver,
+            confidence: Confidence.STATIC_LITERAL,
+        });
+    }
 
     // Pass 1: collect app.use(...) global middleware registrations in order.
     for (const n of walk(root)) {
@@ -836,6 +862,7 @@ export function extractLayer1(
 
     return {
         endpoints,
+        websockets,
         globalMiddleware,
         imports: Object.fromEntries(imports),
     };

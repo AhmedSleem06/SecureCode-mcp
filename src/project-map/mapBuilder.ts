@@ -4,7 +4,7 @@ import { parseSource, grammarForFile } from './parserLoader';
 import { extractLayer1 } from './layer1';
 import { detectDynamicPatterns } from './layer2';
 import { aggregateConfidence } from './confidence';
-import type { ProjectMap, FileExtraction, EndpointRecord } from './types';
+import type { ProjectMap, FileExtraction, EndpointRecord, WebSocketHandler } from './types';
 import { PROJECT_MAP_SCHEMA_VERSION } from './types';
 import { readSecurecodeIgnore, isIgnored, SKIP_DIRS } from '../utils/ignore';
 
@@ -82,6 +82,7 @@ export async function buildProjectMap(opts: BuildOptions): Promise<BuildResult> 
 
     const fileExtractions: FileExtraction[] = [];
     const allEndpoints: EndpointRecord[] = [];
+    const allWebsockets: WebSocketHandler[] = [];
     const errors: Array<{ file: string; error: string }> = [];
     let processed = 0;
     let skipped = 0;
@@ -124,11 +125,15 @@ export async function buildProjectMap(opts: BuildOptions): Promise<BuildResult> 
                 ep.confidence = confidence;
                 allEndpoints.push(ep);
             }
+            for (const ws of layer1.websockets) {
+                allWebsockets.push(ws);
+            }
 
             fileExtractions.push({
                 file: relPath,
                 language: grammar,
                 endpoints: layer1.endpoints,
+                websockets: layer1.websockets,
                 dynamicPatterns,
                 imports: layer1.imports,
                 mtime: stat.mtimeMs,
@@ -145,6 +150,7 @@ export async function buildProjectMap(opts: BuildOptions): Promise<BuildResult> 
     const map: ProjectMap = {
         files: Object.fromEntries(fileExtractions.map((f) => [f.file, f])),
         endpoints: allEndpoints,
+        websockets: allWebsockets,
         dynamicPatterns: fileExtractions.flatMap((f) => f.dynamicPatterns),
         version: PROJECT_MAP_SCHEMA_VERSION,
         builtAt: Date.now(),
