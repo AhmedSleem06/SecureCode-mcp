@@ -12,7 +12,7 @@ const SUPPORTED_EXTENSIONS = new Set([
     '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py',
 ]);
 
-const MAX_FILES = 500;
+const MAX_FILES = 5000;
 const MAX_FILE_SIZE = 1024 * 1024;
 
 export interface BuildOptions {
