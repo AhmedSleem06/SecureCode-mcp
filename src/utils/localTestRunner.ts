@@ -26,7 +26,9 @@ export async function runLocalTest(
     const testDir = path.join(workspaceRoot, '.securecode');
     if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
 
-    const ext = (runner === 'tsx' || runner === 'ts' || runner === 'bun') ? '.test.ts' : '.test.js';
+    const isPython = runner === 'python' || runner === 'python3';
+    const isTsRunner = runner === 'tsx' || runner === 'ts' || runner === 'bun' || runner === 'deno' || runner === 'pnpm-tsx' || runner === 'yarn-tsx';
+    const ext = isPython ? '.py' : (isTsRunner ? '.test.ts' : '.test.js');
     const testFile = path.join(testDir, `verify-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
 
     try {
@@ -44,6 +46,15 @@ export async function runLocalTest(
             if (runner === 'tsx') {
                 runnerBin = 'npx';
                 runnerArgs = ['tsx', testFile];
+            } else if (runner === 'pnpm-tsx') {
+                runnerBin = 'pnpm';
+                runnerArgs = ['exec', 'tsx', testFile];
+            } else if (runner === 'yarn-tsx') {
+                runnerBin = 'yarn';
+                runnerArgs = ['tsx', testFile];
+            } else if (runner === 'deno') {
+                runnerBin = 'deno';
+                runnerArgs = ['run', '--allow-read', '--allow-env', testFile];
             } else if (runner === 'bun' && isWindows) {
                 runnerBin = 'npx';
                 runnerArgs = ['bun', testFile];

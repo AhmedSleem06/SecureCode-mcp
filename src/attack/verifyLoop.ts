@@ -40,11 +40,21 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
     let lastTestScript = '';
     let lastTestOutput = '';
 
-    const runtimeInfo = detectRuntime(workspaceRoot);
+    const runtimeInfo = detectRuntime(workspaceRoot, filePath || undefined);
     const testFileDir = path.join(workspaceRoot, '.securecode');
     const relativeImportPath = filePath
         ? computeRelativeImportPath(testFileDir, path.isAbsolute(filePath) ? filePath : path.join(workspaceRoot, filePath))
         : '';
+
+    if (!runtimeInfo.canRunLocally) {
+        return {
+            verdict: 'INCONCLUSIVE',
+            reason: runtimeInfo.skipReason || 'Detected framework cannot run a local exploit test.',
+            roundsUsed: 0,
+            testScript: '',
+            testOutput: '',
+        };
+    }
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
         onProgress?.(round, MAX_ROUNDS, `Round ${round}: generating test...`);
@@ -62,8 +72,13 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             previousErrors: previousErrors.length > 0 ? previousErrors : undefined,
             projectRuntime: runtimeInfo.runtime,
             suggestedRunner: runtimeInfo.runner,
+            framework: runtimeInfo.framework,
+            frameworkVersion: runtimeInfo.frameworkVersion,
+            testabilityTier: runtimeInfo.testabilityTier,
+            packageManager: runtimeInfo.packageManager,
             testFileDir: '.securecode',
             relativeImportPath,
+            depsInstalled: runtimeInfo.depsInstalled,
         });
 
         if (!genResp.canTest || !genResp.testScript) {
