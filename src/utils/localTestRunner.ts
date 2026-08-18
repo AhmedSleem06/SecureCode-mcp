@@ -44,6 +44,9 @@ export async function runLocalTest(
             if (runner === 'tsx') {
                 runnerBin = 'npx';
                 runnerArgs = ['tsx', testFile];
+            } else if (runner === 'bun' && isWindows) {
+                runnerBin = 'npx';
+                runnerArgs = ['bun', testFile];
             } else {
                 runnerBin = runner;
                 runnerArgs = [testFile];
