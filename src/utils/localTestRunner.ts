@@ -26,7 +26,7 @@ export async function runLocalTest(
     const testDir = path.join(workspaceRoot, '.securecode');
     if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
 
-    const ext = runner === 'tsx' || runner === 'ts' ? '.test.ts' : '.test.js';
+    const ext = (runner === 'tsx' || runner === 'ts' || runner === 'bun') ? '.test.ts' : '.test.js';
     const testFile = path.join(testDir, `verify-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
 
     try {

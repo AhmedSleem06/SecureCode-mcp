@@ -1,4 +1,6 @@
+import * as path from 'path';
 import { runLocalTest, type LocalTestResult } from '../utils/localTestRunner';
+import { detectRuntime, computeRelativeImportPath, type ProjectRuntime } from '../utils/runtimeDetect';
 import type { ApiClient } from '../api/client';
 import type { VerifyGenerateResponse, VerifyAnalyzeResponse } from '../api/types';
 
@@ -38,6 +40,12 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
     let lastTestScript = '';
     let lastTestOutput = '';
 
+    const runtimeInfo = detectRuntime(workspaceRoot);
+    const testFileDir = path.join(workspaceRoot, '.securecode');
+    const relativeImportPath = filePath
+        ? computeRelativeImportPath(testFileDir, path.isAbsolute(filePath) ? filePath : path.join(workspaceRoot, filePath))
+        : '';
+
     for (let round = 1; round <= MAX_ROUNDS; round++) {
         onProgress?.(round, MAX_ROUNDS, `Round ${round}: generating test...`);
 
@@ -52,6 +60,10 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             filePath,
             relatedFiles,
             previousErrors: previousErrors.length > 0 ? previousErrors : undefined,
+            projectRuntime: runtimeInfo.runtime,
+            suggestedRunner: runtimeInfo.runner,
+            testFileDir: '.securecode',
+            relativeImportPath,
         });
 
         if (!genResp.canTest || !genResp.testScript) {
@@ -65,7 +77,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         }
 
         lastTestScript = genResp.testScript;
-        const runner = genResp.runner || (language === 'typescript' ? 'tsx' : 'node');
+        const runner = genResp.runner || runtimeInfo.runner || (language === 'typescript' ? 'tsx' : 'node');
 
         onProgress?.(round, MAX_ROUNDS, `Round ${round}: running test...`);
 
