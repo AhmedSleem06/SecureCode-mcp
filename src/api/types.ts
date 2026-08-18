@@ -170,3 +170,19 @@ export interface SandboxProveResponse {
     };
     scanCredits?: number;
 }
+
+export interface VerifyGenerateResponse {
+    canTest: boolean;
+    testScript?: string;
+    runner?: string;
+    description?: string;
+    skipReason?: string;
+    scanCredits?: number;
+}
+
+export interface VerifyAnalyzeResponse {
+    verdict: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE';
+    reason: string;
+    shouldRetry: boolean;
+    scanCredits?: number;
+}

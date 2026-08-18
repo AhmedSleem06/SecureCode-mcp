@@ -1,20 +1,19 @@
 /**
- * securecode.agent-scan MCP tool — agent-mode scan with exploit proof.
+ * securecode.agent-scan MCP tool — agent-mode scan with exploit verification.
  *
  * An AI investigator that reads files, traces data flows, checks guards,
  * and compares endpoint policies to find vulnerabilities. Each high/critical
- * finding is then sent to the sandbox for PROVEN/UNPROVEN verification before
- * the Juror confirms it.
+ * finding is then verified by the verify subagent — a round-based loop that
+ * generates a local integration test, runs it on the user's machine, and
+ * analyzes the output for a PROVEN/UNPROVEN/INCONCLUSIVE verdict.
  *
  * Flow:
  *   1. Resolve code + language from filePath
  *   2. Build endpoint context from the project map
  *   3. Run the agent loop (POST /agent/scan/start + /step loop)
- *   4. For each high/critical finding → POST /sandbox/prove → PROVEN/UNPROVEN
- *   5. Map agent findings → CandidateContext[]
- *   6. POST /scan with scanDepth: 'agent' + candidateContexts (skips Scout,
- *      Juror + Phase 3 verify the agent's candidates)
- *   7. Return merged result (agent findings + proven stamps + Juror-verified)
+ *   4. For each finding → runVerifyLoop (generate test → run locally → analyze)
+ *   5. Generate fixes for proven/suspected findings
+ *   6. Return result with proven stamps
  */
 
 import { ApiClient } from '../api/client';
@@ -25,106 +24,18 @@ import { getEndpointContextForFile, getRelatedFilesForFile } from '../project-ma
 import { getCachedScan, writeCachedScan } from '../project-map/scanCache';
 import { loadAgentMemory, formatMemoryForPrompt } from '../project-map/agentMemory';
 import { runAgentScan } from '../attack/agentScanLoop';
+import { runVerifyLoop } from '../attack/verifyLoop';
 import type { AgentScanFinding, AgentScanTarget } from '../attack/agentScanProtocol';
-import type { ScanResponse, SandboxProveResponse, FixResponse } from '../api/types';
-
-interface CandidateContext {
-    line: number;
-    lineEnd?: number;
-    type: string;
-    snippet?: string;
-    definitionContext?: string;
-}
+import type { SandboxProveResponse, FixResponse } from '../api/types';
 
 interface ProvenFinding extends AgentScanFinding {
     proven: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'NOT_REPRODUCIBLE' | 'SKIPPED';
     provenReason?: string;
 }
 
-function mapFindingsToCandidates(findings: ProvenFinding[]): CandidateContext[] {
-    return findings.map(f => ({
-        line: f.line,
-        lineEnd: f.lineEnd,
-        type: f.type,
-        snippet: f.evidence,
-        definitionContext: f.why,
-    }));
-}
-
 /** Prove high/critical/medium findings — skip only low. */
 function shouldProve(finding: AgentScanFinding): boolean {
     return finding.severity === 'critical' || finding.severity === 'high' || finding.severity === 'medium';
-}
-
-/** Run a test script locally on the user's machine where the project is installed.
- * Writes the script to a temp file, runs it with the specified runner, reads the output.
- * Returns the verdict (pass/fail/error/timeout) and the output. */
-async function runLocalTest(
-    testScript: string,
-    runner: string,
-    workspaceRoot: string,
-): Promise<{ verdict: 'pass' | 'fail' | 'error' | 'timeout'; output: string }> {
-    const fs = require('fs');
-    const path = require('path');
-    const { execFileSync } = require('child_process');
-
-    const testDir = path.join(workspaceRoot, '.securecode');
-    if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
-
-    const ext = runner === 'tsx' || runner === 'ts' ? '.test.ts' : '.test.js';
-    const testFile = path.join(testDir, `prove-test-${Date.now()}${ext}`);
-    const outputFile = path.join(testDir, `prove-test-${Date.now()}.out`);
-
-    try {
-        fs.writeFileSync(testFile, testScript, 'utf8');
-
-        let stdout = '';
-        let stderr = '';
-        let exitCode: number;
-        let timedOut = false;
-
-        try {
-            const runnerBin = runner === 'tsx' ? 'npx' : runner;
-            const runnerArgs = runner === 'tsx' ? ['tsx', testFile] : [testFile];
-            stdout = execFileSync(runnerBin, runnerArgs, {
-                cwd: workspaceRoot,
-                timeout: 30000,
-                encoding: 'utf8',
-                stdio: ['pipe', 'pipe', 'pipe'],
-                env: { ...process.env, NODE_OPTIONS: '--loader tsx' },
-            });
-            exitCode = 0;
-        } catch (err: any) {
-            stdout = err.stdout || '';
-            stderr = err.stderr || '';
-            exitCode = err.status ?? 1;
-            if (err.signal === 'SIGTERM') timedOut = true;
-        }
-
-        const output = stdout + stderr;
-        const hasPass = /PASS:/i.test(output);
-        const hasFail = /FAIL:/i.test(output);
-
-        if (timedOut) {
-            return { verdict: 'timeout', output: 'Test timed out after 30s' };
-        }
-        if (hasPass) {
-            return { verdict: 'pass', output: output.slice(0, 2000) };
-        }
-        if (hasFail) {
-            return { verdict: 'fail', output: output.slice(0, 2000) };
-        }
-        // No PASS/FAIL marker — check exit code
-        if (exitCode === 0) {
-            return { verdict: 'pass', output: output.slice(0, 2000) };
-        }
-        return { verdict: 'error', output: output.slice(0, 2000) };
-    } catch (err: any) {
-        return { verdict: 'error', output: err.message || String(err) };
-    } finally {
-        try { fs.unlinkSync(testFile); } catch {}
-        try { fs.unlinkSync(outputFile); } catch {}
-    }
 }
 
 export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unknown> {
@@ -252,108 +163,80 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         throw new Error(agentResult.error || 'Agent scan failed to start.');
     }
 
-    // 4. Prove each high/critical finding via the sandbox
+    // 4. Verify each finding via the verify subagent (replaces sandbox prove + juror)
     const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
     const provenFindings: ProvenFinding[] = [];
 
     const proveable = agentResult.findings.filter(shouldProve);
     if (proveable.length > 0 && progress) {
-        progress(0, proveable.length, `Proving ${proveable.length} finding(s) in sandbox...`);
+        progress(0, proveable.length, `Verifying ${proveable.length} finding(s)...`);
     }
 
     let proveIdx = 0;
     for (const finding of agentResult.findings) {
         if (!shouldProve(finding)) {
-            provenFindings.push({ ...finding, proven: 'SKIPPED', provenReason: 'Low severity — not proven' });
+            provenFindings.push({ ...finding, proven: 'SKIPPED', provenReason: 'Low severity — not verified' });
             continue;
         }
 
         if (progress) {
             proveIdx++;
-            progress(proveIdx, proveable.length, `Proving ${finding.type} at line ${finding.line}...`);
+            progress(proveIdx, proveable.length, `Verifying ${finding.type} at line ${finding.line}...`);
         }
 
-        // Try local integration test first (100% proof — runs against real code)
-        let proved = false;
         try {
-            const localTestResp = await client.postJson<any>('/sandbox/prove/local', {
+            const result = await runVerifyLoop({
+                finding: {
+                    type: finding.type,
+                    line: finding.line,
+                    lineEnd: finding.lineEnd,
+                    evidence: finding.evidence,
+                    why: finding.why,
+                    severity: finding.severity,
+                },
+                filePath: filePath || '',
                 code,
-                language,
-                vulnerabilityType: finding.type,
-                line: finding.line,
-                lineEnd: finding.lineEnd,
-                evidence: finding.evidence,
-                why: finding.why,
-                filePath,
                 relatedFiles: relatedFiles.map(rf => ({
                     filePath: rf.filePath,
                     content: rf.content,
                     relationship: rf.relationship,
                 })),
+                workspaceRoot: ctx.workspaceRoot,
+                language,
+                client,
+                onProgress: (round, maxR, msg) => {
+                    if (progress) progress(proveIdx, proveable.length, `Verify round ${round}/${maxR}: ${msg}`);
+                },
             });
 
-            if (localTestResp.canTest && localTestResp.testScript) {
-                // Run the test locally
-                const testResult = await runLocalTest(
-                    localTestResp.testScript,
-                    localTestResp.runner || (language === 'typescript' ? 'tsx' : 'node'),
-                    ctx.workspaceRoot,
-                );
-
-                if (testResult.verdict === 'pass') {
-                    provenFindings.push({
-                        ...finding,
-                        proven: 'PROVEN',
-                        provenReason: `Local integration test PASSED: ${testResult.output.slice(0, 200)}`,
-                    });
-                    proved = true;
-                } else if (testResult.verdict === 'fail') {
-                    provenFindings.push({
-                        ...finding,
-                        proven: 'UNPROVEN',
-                        provenReason: `Local integration test FAILED (exploit was blocked): ${testResult.output.slice(0, 200)}`,
-                    });
-                    proved = true;
-                }
-                // If error/timeout, fall through to sandbox prove
-            }
+            provenFindings.push({
+                ...finding,
+                proven: result.verdict,
+                provenReason: result.reason,
+            });
         } catch (err: any) {
-            console.warn(`[Agent Scan] Local test failed: ${err.message}. Falling back to sandbox prove.`);
-        }
-
-        // Fall back to sandbox prove if local test didn't give a definitive answer
-        if (!proved) {
-            for (let attempt = 1; attempt <= 2; attempt++) {
-                try {
-                    const proveResp = await client.postJson<SandboxProveResponse>('/sandbox/prove', {
-                        code,
-                        language,
-                        vulnerabilityType: finding.type,
-                        line: finding.line,
-                        lineEnd: finding.lineEnd,
-                        evidence: finding.evidence,
-                        why: finding.why,
-                    });
-
-                    provenFindings.push({
-                        ...finding,
-                        proven: proveResp.proven,
-                        provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
-                    });
-                    proved = true;
-                    break;
-                } catch (err: any) {
-                    if (attempt === 1) {
-                        console.warn(`[Agent Scan] Prove attempt 1 failed: ${err.message}. Retrying...`);
-                        await new Promise(r => setTimeout(r, 2000));
-                    } else {
-                        provenFindings.push({
-                            ...finding,
-                            proven: 'INCONCLUSIVE',
-                            provenReason: `Sandbox prove failed after 2 attempts: ${err.message || err}`,
-                        });
-                    }
-                }
+            console.warn(`[Agent Scan] Verify loop failed: ${err.message}. Falling back to sandbox prove.`);
+            try {
+                const proveResp = await client.postJson<SandboxProveResponse>('/sandbox/prove', {
+                    code,
+                    language,
+                    vulnerabilityType: finding.type,
+                    line: finding.line,
+                    lineEnd: finding.lineEnd,
+                    evidence: finding.evidence,
+                    why: finding.why,
+                });
+                provenFindings.push({
+                    ...finding,
+                    proven: proveResp.proven,
+                    provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
+                });
+            } catch (err2: any) {
+                provenFindings.push({
+                    ...finding,
+                    proven: 'INCONCLUSIVE',
+                    provenReason: `Verify failed: ${err.message}; Sandbox fallback also failed: ${err2.message}`,
+                });
             }
         }
     }
@@ -401,58 +284,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         }
     }
 
-    // 5. Map findings → CandidateContext[]
-    const candidateContexts = mapFindingsToCandidates(provenFindings);
-
-    // 6. If no findings, return early
-    if (candidateContexts.length === 0) {
-        if (useCache) {
-            try {
-                writeCachedScan(ctx.workspaceRoot, filePath!, code, {
-                    findings: provenFindings,
-                    status: agentResult.status,
-                    summary: agentResult.summary,
-                    stepsUsed: agentResult.stepsUsed,
-                    costSpentUsd: agentResult.costSpentUsd,
-                });
-            } catch (err: any) {
-                console.warn(`[Agent Scan] Cache write skipped: ${err?.message || err}`);
-            }
-        }
-        return {
-            status: agentResult.status,
-            summary: agentResult.summary || 'Agent completed with no findings.',
-            findings: [],
-            agentFindings: provenFindings,
-            stepsUsed: agentResult.stepsUsed,
-            costSpentUsd: agentResult.costSpentUsd,
-            transcript: agentResult.transcript,
-        };
-    }
-
-    // 7. POST /scan with scanDepth: 'agent' + candidateContexts
-    //    This skips Scout and sends the agent's candidates directly to Juror
-    //    + Phase 3 for verification.
-    //    If this call fails, return the agent findings without Juror
-    //    verification (degraded mode) instead of throwing everything away.
-    let scanResp: ScanResponse | null = null;
-    try {
-        scanResp = await client.postJson<ScanResponse>('/scan', {
-            code,
-            language,
-            ...(filePath ? { filePath } : {}),
-            scanDepth: 'agent',
-            candidateContexts,
-            ...(endpointContext.length > 0 ? { endpointContext } : {}),
-            ...(relatedFiles.length > 0 ? { workspaceHints: { relatedFiles } } : {}),
-        });
-    } catch (err: any) {
-        // Juror verification failed — return agent findings as-is (degraded).
-        // This is better than throwing, which would lose all the agent's work.
-        console.warn(`[Agent Scan] Juror verification failed (${err?.message || err}). Returning agent findings without verification.`);
-    }
-
-    // 8. Write to cache before returning
+    // 5. Write to cache before returning
     if (useCache) {
         try {
             writeCachedScan(ctx.workspaceRoot, filePath!, code, {
@@ -467,37 +299,13 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         }
     }
 
-    // 9. Return merged result with proven stamps
-    //    If Juror failed, scanResp is null — return agent findings as verified=false
-    if (!scanResp) {
-        return {
-            status: agentResult.status,
-            summary: (agentResult.summary || 'Agent completed') + ' (Juror verification skipped — degraded)',
-            agentFindings: provenFindings,
-            verifiedFindings: [],
-            allFindings: [],
-            degraded: true,
-            stepsUsed: agentResult.stepsUsed,
-            costSpentUsd: agentResult.costSpentUsd,
-            transcript: agentResult.transcript,
-            provenCount: provenFindings.filter(f => f.proven === 'PROVEN').length,
-            unprovenCount: provenFindings.filter(f => f.proven === 'UNPROVEN').length,
-            inconclusiveCount: provenFindings.filter(f => f.proven === 'INCONCLUSIVE').length,
-            notReproducibleCount: provenFindings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
-            skippedCount: provenFindings.filter(f => f.proven === 'SKIPPED').length,
-        };
-    }
+    // 6. Return result — the verify subagent IS the verifier (no separate Juror call)
     return {
         status: agentResult.status,
         summary: agentResult.summary,
         agentFindings: provenFindings,
-        verifiedFindings: scanResp.finalFindings || [],
-        allFindings: scanResp.findings || [],
-        scanId: scanResp.scanId,
-        scanType: scanResp.scanType,
-        degraded: scanResp.degraded,
-        scanCredits: scanResp.scanCredits,
-        plan: scanResp.plan,
+        verifiedFindings: provenFindings.filter(f => f.proven === 'PROVEN'),
+        allFindings: [],
         stepsUsed: agentResult.stepsUsed,
         costSpentUsd: agentResult.costSpentUsd,
         transcript: agentResult.transcript,
