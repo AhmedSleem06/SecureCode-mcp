@@ -23,7 +23,7 @@ const CACHE_FILE = 'scan-cache.json';
  * would produce different findings for the same file. All cached entries
  * with an older version are invalidated.
  */
-export const AGENT_SCAN_CACHE_VERSION = 19;
+export const AGENT_SCAN_CACHE_VERSION = 20;
 
 /** Cache TTL: 7 days. Findings older than this are re-scanned. */
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
