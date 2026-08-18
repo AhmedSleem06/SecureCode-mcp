@@ -351,6 +351,8 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
             provenCount: provenFindings.filter(f => f.proven === 'PROVEN').length,
             unprovenCount: provenFindings.filter(f => f.proven === 'UNPROVEN').length,
             inconclusiveCount: provenFindings.filter(f => f.proven === 'INCONCLUSIVE').length,
+            notReproducibleCount: provenFindings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
+            skippedCount: provenFindings.filter(f => f.proven === 'SKIPPED').length,
         };
     }
     return {
@@ -370,5 +372,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         provenCount: provenFindings.filter(f => f.proven === 'PROVEN').length,
         unprovenCount: provenFindings.filter(f => f.proven === 'UNPROVEN').length,
         inconclusiveCount: provenFindings.filter(f => f.proven === 'INCONCLUSIVE').length,
+        notReproducibleCount: provenFindings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
+        skippedCount: provenFindings.filter(f => f.proven === 'SKIPPED').length,
     };
 }
