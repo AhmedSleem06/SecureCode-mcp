@@ -38,14 +38,23 @@ export async function runLocalTest(
         let timedOut = false;
 
         try {
-            const runnerBin = runner === 'tsx' ? 'npx' : runner;
-            const runnerArgs = runner === 'tsx' ? ['tsx', testFile] : [testFile];
+            const isWindows = process.platform === 'win32';
+            let runnerBin: string;
+            let runnerArgs: string[];
+            if (runner === 'tsx') {
+                runnerBin = 'npx';
+                runnerArgs = ['tsx', testFile];
+            } else {
+                runnerBin = runner;
+                runnerArgs = [testFile];
+            }
             stdout = execFileSync(runnerBin, runnerArgs, {
                 cwd: workspaceRoot,
                 timeout: TIMEOUT_MS,
                 encoding: 'utf8',
                 stdio: ['pipe', 'pipe', 'pipe'],
                 env: { ...process.env, NODE_ENV: 'test' },
+                shell: isWindows,
             });
         } catch (err: any) {
             stdout = err.stdout || '';
