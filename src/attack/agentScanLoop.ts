@@ -62,11 +62,28 @@ export async function runAgentScan(
 
         const transcript: AgentScanTranscriptStep[] = [];
         const readFiles = new Set<string>();
-        // Track read count per file path (case-insensitive) to prevent
-        // the agent re-reading the same file dozens of times with different
-        // line ranges, which wastes the entire step budget on one file.
         const readFileCounts = new Map<string, number>();
-        const MAX_READS_PER_FILE = 5;
+        // Dynamic read cap based on file size:
+        //   < 200 lines  → 5 reads (small file, 5 chunks is enough)
+        //   < 1000 lines  → 10 reads (medium file)
+        //   < 5000 lines  → 20 reads (large file, needs many sections)
+        //   >= 5000 lines → 30 reads (very large, allow thorough coverage)
+        function maxReadsForFile(filePath: string): number {
+            try {
+                const fs = require('fs');
+                const abs = require('path').resolve(ctx.workspaceRoot, filePath);
+                const stat = fs.statSync(abs);
+                if (stat.size > 200_000) return 30;
+                const content = fs.readFileSync(abs, 'utf8');
+                const lines = content.split('\n').length;
+                if (lines < 200) return 5;
+                if (lines < 1000) return 10;
+                if (lines < 5000) return 20;
+                return 30;
+            } catch {
+                return 10;
+            }
+        }
         // Track non-read tool calls to prevent the agent from looping on the
         // same search_code/trace_flow call repeatedly. Keyed by (type + args).
         const toolCallCounts = new Map<string, number>();
@@ -229,13 +246,13 @@ export async function runAgentScan(
                     observation = `File "${action.path}" (lines ${action.startLine || 'all'}-${action.endLine || 'all'}) was already read. The content is in the transcript above. Use a DIFFERENT line range or a different tool.`;
                     wasBlocked = true;
                 } else {
-                    // Per-file read cap: prevent the agent from re-reading the
-                    // same file with slightly different line ranges dozens of
-                    // times (observed 28 re-reads on one file). After 3 reads
-                    // of any range, force the agent to use a different tool.
+                    // Per-file read cap: dynamic based on file size.
+                    // Small files (7 lines) get 5 reads; large files (5000 lines)
+                    // get up to 30 reads so the agent can cover the whole file.
+                    const fileMax = maxReadsForFile(action.path);
                     const count = (readFileCounts.get(normalizedPath) || 0) + 1;
-                    if (count > MAX_READS_PER_FILE) {
-                        observation = `BLOCKED: You have already read "${action.path}" ${MAX_READS_PER_FILE} times. Further read_file calls on this file will also be blocked. You MUST use a different tool (search_code, trace_flow, check_guard, check_policy, list_imports, or finish) to proceed.`;
+                    if (count > fileMax) {
+                        observation = `BLOCKED: You have already read "${action.path}" ${fileMax} times. Further read_file calls on this file will also be blocked. You MUST use a different tool (search_code, trace_flow, check_guard, check_policy, list_imports, or finish) to proceed.`;
                         wasBlocked = true;
                     } else {
                         readFileCounts.set(normalizedPath, count);
@@ -276,7 +293,7 @@ export async function runAgentScan(
             // read_file on blocked files, force-finish to stop wasting steps.
             if (wasBlocked) {
                 consecutiveBlockedReads++;
-                if (consecutiveBlockedReads >= 5) {
+                if (consecutiveBlockedReads >= 8) {
                     console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — force-finishing to stop wasting steps.`);
                     transcript.push({ action, observation });
                     return {
