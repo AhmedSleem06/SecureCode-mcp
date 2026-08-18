@@ -18,9 +18,10 @@
  */
 
 import { ApiClient } from '../api/client';
+import * as path from 'path';
 import type { ServerContext } from '../mcp/types';
 import { readFileFromWorkspace } from '../utils/files';
-import { getEndpointContextForFile } from '../project-map/mapContext';
+import { getEndpointContextForFile, getRelatedFilesForFile } from '../project-map/mapContext';
 import { getCachedScan, writeCachedScan } from '../project-map/scanCache';
 import { loadAgentMemory, formatMemoryForPrompt } from '../project-map/agentMemory';
 import { runAgentScan } from '../attack/agentScanLoop';
@@ -105,13 +106,22 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         throw new Error(`File too large (${sizeMB}MB). Maximum is 1.5MB. Split the file or scan a specific section using the API directly.`);
     }
 
-    // 2. Build endpoint context from the project map
+    // 2. Build endpoint context + related files from the project map
     let endpointContext: any[] = [];
+    let relatedFiles: any[] = [];
     if (filePath) {
         try {
-            endpointContext = await getEndpointContextForFile(filePath, ctx.workspaceRoot);
+            const absPath = path.isAbsolute(filePath)
+                ? filePath
+                : path.join(ctx.workspaceRoot, filePath);
+            const [eps, rels] = await Promise.all([
+                getEndpointContextForFile(filePath, ctx.workspaceRoot),
+                getRelatedFilesForFile(absPath, ctx.workspaceRoot),
+            ]);
+            endpointContext = eps;
+            relatedFiles = rels;
         } catch {
-            // best-effort — proceed without endpoint context
+            // best-effort — proceed without context
         }
     }
 
@@ -313,6 +323,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
             scanDepth: 'agent',
             candidateContexts,
             ...(endpointContext.length > 0 ? { endpointContext } : {}),
+            ...(relatedFiles.length > 0 ? { workspaceHints: { relatedFiles } } : {}),
         });
     } catch (err: any) {
         // Juror verification failed — return agent findings as-is (degraded).
