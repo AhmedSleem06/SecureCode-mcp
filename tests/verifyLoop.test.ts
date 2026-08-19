@@ -130,8 +130,10 @@ describe('runVerifyLoop', () => {
         });
 
         const client = makeMockClient({});
+        // Call order matters: /verify/generate is called first, then
+        // /verify/analyze. mockResolvedValueOnce queues in call order.
         vi.mocked(client.postJson)
-            .mockResolvedValue({ canTest: true, testScript: 'console.log("test")', runner: 'node', description: 'test' })
+            .mockResolvedValueOnce({ canTest: true, testScript: 'console.log("test")', runner: 'node', description: 'test' })
             .mockResolvedValueOnce({ verdict: 'INCONCLUSIVE', reason: 'type error', shouldRetry: false });
 
         const result = await runVerifyLoop({
@@ -146,5 +148,74 @@ describe('runVerifyLoop', () => {
 
         expect(result.verdict).toBe('INCONCLUSIVE');
         expect(result.roundsUsed).toBe(1);
+        expect(result.subVerdict).toBe('analyzed');
+    });
+
+    it('returns subVerdict=sandbox-unavailable when no isolation backend exists', async () => {
+        // The runner returns sandbox-unavailable — the loop must surface this
+        // as a distinct subVerdict so toolAgentScan can count it and show
+        // a single top-level install hint instead of N per-finding reasons.
+        vi.mocked(runLocalTest).mockResolvedValue({
+            verdict: 'sandbox-unavailable',
+            output: 'No verification sandbox backend (Docker or Deno) was detected.',
+            exitCode: -1,
+        });
+
+        const client = makeMockClient(
+            { canTest: true, testScript: 'console.log("PASS: test")', runner: 'node', description: 'test' },
+        );
+
+        const result = await runVerifyLoop({
+            finding: { type: 'command_injection', line: 10, evidence: 'exec(input)', why: 'user input', severity: 'high' },
+            filePath: 'src/foo.ts',
+            code: 'const x = 1;',
+            relatedFiles: [],
+            workspaceRoot: '/tmp/workspace',
+            language: 'javascript',
+            client,
+        });
+
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.subVerdict).toBe('sandbox-unavailable');
+        expect(result.reason).toContain('Docker or Deno');
+    });
+
+    it('returns subVerdict=cannot-test when /verify/generate says canTest:false', async () => {
+        const client = makeMockClient({ canTest: false, skipReason: 'needs running server' });
+
+        const result = await runVerifyLoop({
+            finding: { type: 'missing_rate_limiting', line: 10, evidence: 'no rate limit', why: 'no middleware', severity: 'medium' },
+            filePath: 'src/foo.ts',
+            code: 'const x = 1;',
+            relatedFiles: [],
+            workspaceRoot: '/tmp/workspace',
+            language: 'javascript',
+            client,
+        });
+
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.subVerdict).toBe('cannot-test');
+    });
+
+    it('returns subVerdict=budget-exhausted when the aggregate budget is empty at entry', async () => {
+        const client = makeMockClient({});
+        const { VerifyBudgetTracker, defaultVerifyBudget } = await import('../src/attack/agentScanProtocol');
+        const tracker = new VerifyBudgetTracker(defaultVerifyBudget());
+        // Exhaust the budget before the call.
+        tracker.findingsAttempted = tracker.budget.maxFindings;
+
+        const result = await runVerifyLoop({
+            finding: { type: 'xss', line: 5, evidence: 'innerHTML', why: 'tainted', severity: 'high' },
+            filePath: 'src/foo.ts',
+            code: 'const x = 1;',
+            relatedFiles: [],
+            workspaceRoot: '/tmp/workspace',
+            language: 'javascript',
+            client,
+            budgetTracker: tracker,
+        });
+
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.subVerdict).toBe('budget-exhausted');
     });
 });

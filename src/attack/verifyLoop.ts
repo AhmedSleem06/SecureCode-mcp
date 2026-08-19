@@ -43,6 +43,31 @@ export interface VerifyLoopResult {
     budgetExhaustedReason?: string;
     /** Backend that executed the test (docker, deno, etc.). Empty when none ran. */
     backend?: string;
+    /**
+     * Machine-readable sub-verdict so callers (toolAgentScan) can detect the
+     * INCONCLUSIVE reason without string-matching `reason`. Distinct from
+     * `verdict` because all of these collapse to INCONCLUSIVE at the top
+     * level — the difference is what the user should do about it.
+     *
+     *   - 'analyzed'         : the analyze LLM ran and returned INCONCLUSIVE
+     *                          (couldn't decide after exhausting rounds).
+     *   - 'cannot-test'       : /verify/generate returned canTest:false — the
+     *                          vuln type/framework can't be tested locally.
+     *   - 'sandbox-unavailable': no Docker/Deno on the user's machine. The
+     *                          caller should surface an install hint.
+     *   - 'blocked'           : the static safety check rejected the script.
+     *   - 'budget-exhausted'  : the aggregate VerifyBudget ran out.
+     *   - 'aborted'           : the AbortSignal fired.
+     *   - 'runtime-blocked'   : detectRuntime said canRunLocally:false.
+     *   - undefined           : PROVEN or UNPROVEN (no sub-verdict needed).
+     */
+    subVerdict?: 'analyzed'
+        | 'cannot-test'
+        | 'sandbox-unavailable'
+        | 'blocked'
+        | 'budget-exhausted'
+        | 'aborted'
+        | 'runtime-blocked';
 }
 
 const PER_FINDING_MAX_ROUNDS = 8;
@@ -72,6 +97,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             roundsUsed: 0,
             testScript: '',
             testOutput: '',
+            subVerdict: 'runtime-blocked',
         };
     }
 
@@ -86,6 +112,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             testScript: '',
             testOutput: '',
             budgetExhaustedReason: 'aggregate',
+            subVerdict: 'budget-exhausted',
         };
     }
     if (tracker) tracker.findingsAttempted += 1;
@@ -100,6 +127,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 testScript: lastTestScript,
                 testOutput: lastTestOutput,
                 budgetExhaustedReason: 'aggregate',
+                subVerdict: 'budget-exhausted',
             };
         }
         if (tracker) tracker.roundsUsed += 1;
@@ -111,6 +139,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 roundsUsed: round - 1,
                 testScript: lastTestScript,
                 testOutput: lastTestOutput,
+                subVerdict: 'aborted',
             };
         }
 
@@ -146,6 +175,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 roundsUsed: round,
                 testScript: '',
                 testOutput: '',
+                subVerdict: 'cannot-test',
             };
         }
 
@@ -184,6 +214,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 testScript: lastTestScript,
                 testOutput: lastTestOutput,
                 backend: testResult.backend || '',
+                subVerdict: 'sandbox-unavailable',
             };
         }
         if (testResult.verdict === 'blocked') {
@@ -197,6 +228,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 roundsUsed: round,
                 testScript: lastTestScript,
                 testOutput: lastTestOutput,
+                subVerdict: 'blocked',
             };
         }
         if (testResult.verdict === 'timeout') {
@@ -209,6 +241,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                     roundsUsed: round,
                     testScript: lastTestScript,
                     testOutput: lastTestOutput,
+                    subVerdict: 'analyzed',
                 };
             }
             continue;
@@ -238,13 +271,13 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         }
 
         if (!analyzeResp.shouldRetry || round >= maxRounds) {
-            return { verdict: 'INCONCLUSIVE', reason: analyzeResp.reason || `Could not verify after ${round} round(s).`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '' };
+            return { verdict: 'INCONCLUSIVE', reason: analyzeResp.reason || `Could not verify after ${round} round(s).`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed' };
         }
 
         previousErrors.push(`Round ${round}: ${testResult.verdict} — ${testResult.output.slice(0, 500)}`);
     }
 
-    return { verdict: 'INCONCLUSIVE', reason: `Exhausted all ${maxRounds} rounds.`, roundsUsed: maxRounds, testScript: lastTestScript, testOutput: lastTestOutput };
+    return { verdict: 'INCONCLUSIVE', reason: `Exhausted all ${maxRounds} rounds.`, roundsUsed: maxRounds, testScript: lastTestScript, testOutput: lastTestOutput, subVerdict: 'analyzed' };
 }
 
 export { VerifyBudgetTracker, defaultVerifyBudget, type VerifyBudget };

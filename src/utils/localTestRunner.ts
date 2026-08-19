@@ -39,6 +39,23 @@ export interface LocalTestResult {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * The message shown when no isolation backend is available. Exported so the
+ * agent-scan tool can reuse it in its top-level `verifyHint` (instead of
+ * every finding carrying the full text in its `provenReason`).
+ *
+ * Why this matters: without a sandbox, the verify loop returns INCONCLUSIVE
+ * for every high/medium finding. The headline differentiator of Pipeline 2
+ * ("exploit-verified, not just LLM-believed") is offline. The user needs to
+ * know — in one place, with a copy-pasteable install path — what to do.
+ */
+export const SANDBOX_UNAVAILABLE_MESSAGE =
+    'No verification sandbox backend (Docker or Deno) was detected. ' +
+    'Exploit verification was skipped — the finding is reported as INCONCLUSIVE ' +
+    'with confidence capped at 75%. To enable exploit-verified findings:\n' +
+    '  • Docker (preferred, supports any language): https://docs.docker.com/get-docker\n' +
+    '  • Deno (JS/TS only, lighter install):    https://deno.com/#installation';
+
 export async function runLocalTest(
     script: string,
     runner: string,
@@ -69,7 +86,7 @@ export async function runLocalTest(
     if (!backend) {
         return {
             verdict: 'sandbox-unavailable',
-            output: 'No verification sandbox backend available. Install Docker (preferred) or Deno to enable local exploit verification. Returning INCONCLUSIVE for this finding.',
+            output: SANDBOX_UNAVAILABLE_MESSAGE,
             exitCode: -1,
         };
     }

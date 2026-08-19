@@ -33,6 +33,7 @@ import { runAgentScan } from '../attack/agentScanLoop';
 import { runVerifyLoop } from '../attack/verifyLoop';
 import { VerifyBudgetTracker, defaultVerifyBudget, type VerifyBudget } from '../attack/agentScanProtocol';
 import type { AgentScanFinding, AgentScanTarget } from '../attack/agentScanProtocol';
+import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
 import type { SandboxProveResponse, FixResponse } from '../api/types';
 
 interface ProvenFinding extends AgentScanFinding {
@@ -206,6 +207,15 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     const verifyTracker = new VerifyBudgetTracker(verifyBudget);
     const abortSignal = (args as any)._signal as AbortSignal | undefined;
 
+    // Track why findings ended up INCONCLUSIVE so the final result can
+    // surface one actionable hint instead of N identical per-finding
+    // reasons. The most common case on a developer's laptop is
+    // `sandbox-unavailable` (no Docker/Deno installed) — that gets a
+    // top-level `verifyHint` with install URLs so the user sees it once,
+    // at the top of the result, rather than buried in finding.reason.
+    let sandboxUnavailableCount = 0;
+    let budgetExhaustedCount = 0;
+
     const proveable = agentResult.findings.filter(shouldProve);
     if (proveable.length > 0 && progress) {
         progress(0, proveable.length, `Verifying ${proveable.length} finding(s)...`);
@@ -223,6 +233,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         // runVerifyLoop, but checking here lets us mark the finding SKIPPED
         // with a clean reason instead of running INCONCLUSIVE.
         if (!verifyTracker.canAttemptFinding()) {
+            budgetExhaustedCount++;
             provenFindings.push({
                 ...finding,
                 proven: 'INCONCLUSIVE',
@@ -262,6 +273,9 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     if (progress) progress(proveIdx, proveable.length, `Verify round ${round}/${maxR}: ${msg}`);
                 },
             });
+
+            if (result.subVerdict === 'sandbox-unavailable') sandboxUnavailableCount++;
+            if (result.subVerdict === 'budget-exhausted') budgetExhaustedCount++;
 
             provenFindings.push({
                 ...finding,
@@ -364,6 +378,21 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     }
 
     // 6. Return result — the verify subagent IS the verifier (no separate Juror call)
+    //
+    // verifyHint: surfaced once at the top level when one or more findings
+    // couldn't be exploit-verified because no isolation backend (Docker/Deno)
+    // was detected on the user's machine. Without this hint, the user sees
+    // every high/medium finding marked INCONCLUSIVE with confidence capped
+    // at 75% and no clear reason — the headline differentiator of Pipeline 2
+    // ("exploit-verified, not just LLM-believed") silently goes offline.
+    // The hint tells them exactly what to install and what they get back.
+    let verifyHint: string | undefined;
+    if (sandboxUnavailableCount > 0) {
+        verifyHint = `Exploit verification was skipped for ${sandboxUnavailableCount} finding(s) because no isolation backend (Docker or Deno) was detected. Without it, high/medium findings are reported as INCONCLUSIVE with confidence capped at 75%.\n${SANDBOX_UNAVAILABLE_MESSAGE}`;
+    } else if (budgetExhaustedCount > 0) {
+        verifyHint = `Exploit verification was skipped for ${budgetExhaustedCount} finding(s) because the per-scan verification budget (${verifyBudget.maxFindings} findings, ${verifyBudget.maxLlmCalls} LLM calls, ${Math.round(verifyBudget.maxWallClockMs / 1000)}s) was exhausted. Re-run the scan to verify the remaining findings, or raise the budget via the VerifyBudget config.`;
+    }
+
     return {
         status: agentResult.status,
         summary: agentResult.summary,
@@ -378,6 +407,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         inconclusiveCount: provenFindings.filter(f => f.proven === 'INCONCLUSIVE').length,
         notReproducibleCount: provenFindings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
         skippedCount: provenFindings.filter(f => f.proven === 'SKIPPED').length,
+        verifyHint,
         verifyUsage: {
             findingsAttempted: verifyTracker.findingsAttempted,
             roundsUsed: verifyTracker.roundsUsed,

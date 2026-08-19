@@ -100,6 +100,7 @@ const DANGEROUS_PROCESS_ACCESS: Array<{ pattern: RegExp; reason: string }> = [
     { pattern: /\bprocess\.env\b/, reason: 'process.env access can leak host secrets — pass values explicitly' },
     { pattern: /\bprocess\.argv\b/, reason: 'process.argv access can leak host arguments' },
     { pattern: /\bprocess\.execPath\b/, reason: 'process.execPath exposes the host runtime path' },
+    { pattern: /\bprocess\.cwd\s*\(/, reason: 'process.cwd() exposes the host filesystem layout' },
     { pattern: /\bprocess\.getuid\s*\(/, reason: 'process.getuid() exposes host user identity' },
     { pattern: /\bprocess\.getgid\s*\(/, reason: 'process.getgid() exposes host group identity' },
 ];
