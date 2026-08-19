@@ -14,9 +14,9 @@
  * This module replaces that with a real isolation boundary. Pluggable
  * backends provide kernel-enforced isolation:
  *
- *   - DockerSandbox: `docker run --network=none --read-only --cpus=1
+ *   - DockerSandbox: `docker run --network=none --cpus=1
  *     --memory=256m --pids-limit=64 --user 1000:1000 -v <workspace>:/workspace:ro`
- *     — network disabled at the kernel level, filesystem read-only, temp
+ *     — network disabled at the kernel level, workspace read-only, temp
  *     dir as tmpfs, no host env, non-root user. Works for any Node/Python
  *     test script unchanged.
  *   - DenoSandbox: `deno run --allow-read=<workspace> --allow-write=<tmp>
@@ -141,7 +141,7 @@ function probe(bin: string, args: string[] = ['--version']): boolean {
     try {
         const r = spawnSync(bin, args, {
             stdio: 'ignore',
-            shell: process.platform === 'win32',
+            shell: false,
             timeout: 4000,
         });
         ok = r.status === 0;
@@ -308,7 +308,6 @@ class DockerSandbox implements SandboxBackend {
         const dockerArgs: string[] = [
             'run', '--rm', '-i',
             '--network=none',
-            '--read-only',
             '--tmpfs', '/tmp:rw,noexec,nosuid,size=128m,uid=1000,gid=1000',
             '--cpus=1',
             '--memory=512m',
@@ -355,13 +354,20 @@ class DockerSandbox implements SandboxBackend {
                 };
             }
 
-            const containerTestPath = `/workspace/.securecode/test${ext}`;
-            const containerSetupPath = `/workspace/.securecode/setup${setupExt}`;
+            // The test and setup files are written inside workspaceRoot/.securecode/,
+            // so they're already accessible via the workspace bind mount. We compute
+            // the in-container path from the host path — no separate bind mount needed.
+            // (A separate bind mount would fail on Docker Desktop for Windows because
+            // it can't create a mountpoint inside a read-only bind mount.)
+            const toContainerPath = (hostPath: string): string =>
+                '/workspace/' + path.relative(opts.workspaceRoot, hostPath).replace(/\\/g, '/');
+
+            const containerTestPath = toContainerPath(testFile);
+            const containerSetupPath = setupFile ? toContainerPath(setupFile) : '';
 
             const dockerArgs: string[] = [
                 'run', '--rm', '-i',
                 '--network=none',
-                '--read-only',
                 '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000',
                 '--cpus=1',
                 '--memory=256m',
@@ -374,11 +380,7 @@ class DockerSandbox implements SandboxBackend {
                 '--env', 'HOME=/tmp',
                 '--env', 'npm_config_cache=/tmp/npm-cache',
                 '-v', `${opts.workspaceRoot}:/workspace:ro`,
-                '-v', `${testFile}:${containerTestPath}:ro`,
             ];
-            if (setupFile) {
-                dockerArgs.push('-v', `${setupFile}:${containerSetupPath}:ro`);
-            }
             dockerArgs.push(imageInfo.image);
 
             // Build the in-container command for the requested runner.
@@ -522,8 +524,14 @@ function runSandboxedProcess(
         const proc = spawn(bin, args, {
             cwd: opts.workspaceRoot,
             stdio: ['pipe', 'pipe', 'pipe'],
-            shell: process.platform === 'win32',
-            env: { NODE_ENV: 'test', CI: '1', PATH: process.env.PATH || '' },
+            shell: false,
+            env: {
+                NODE_ENV: 'test',
+                CI: '1',
+                PATH: process.env.PATH || '',
+                PATHEXT: process.env.PATHEXT || '',
+                SystemRoot: process.env.SystemRoot || '',
+            },
             windowsHide: true,
         });
 
