@@ -329,18 +329,16 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 },
             });
 
-            if (result.subVerdict === 'sandbox-unavailable') sandboxUnavailableCount++;
             if (result.subVerdict === 'budget-exhausted') budgetExhaustedCount++;
-
-            provenFindings.push({
-                ...finding,
-                proven: result.verdict,
-                provenReason: result.reason,
-            });
 
             // User cancelled mid-verify: stop verifying further findings and
             // mark the rest as SKIPPED so the report still includes them.
             if (result.subVerdict === 'cancelled') {
+                provenFindings.push({
+                    ...finding,
+                    proven: result.verdict,
+                    provenReason: result.reason,
+                });
                 for (const remaining of agentResult.findings.slice(agentResult.findings.indexOf(finding) + 1)) {
                     provenFindings.push({
                         ...remaining,
@@ -350,6 +348,42 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 }
                 break;
             }
+
+            // No local sandbox (Docker/Deno) on the user's machine. Fall back to
+            // the API-side sandbox on Vultr, which has Docker installed. This
+            // gives every user exploit verification without a local install.
+            if (result.subVerdict === 'sandbox-unavailable') {
+                try {
+                    const proveResp = await client.postJson<SandboxProveResponse>('/sandbox/prove', {
+                        code,
+                        language,
+                        vulnerabilityType: finding.type,
+                        line: finding.line,
+                        lineEnd: finding.lineEnd,
+                        evidence: finding.evidence,
+                        why: finding.why,
+                    });
+                    provenFindings.push({
+                        ...finding,
+                        proven: proveResp.proven,
+                        provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
+                    });
+                } catch (proveErr: any) {
+                    sandboxUnavailableCount++;
+                    provenFindings.push({
+                        ...finding,
+                        proven: 'INCONCLUSIVE',
+                        provenReason: result.reason,
+                    });
+                }
+                continue;
+            }
+
+            provenFindings.push({
+                ...finding,
+                proven: result.verdict,
+                provenReason: result.reason,
+            });
         } catch (err: any) {
             console.warn(`[Agent Scan] Verify loop failed: ${err.message}. Falling back to sandbox prove.`);
             try {
@@ -448,15 +482,14 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     // 6. Return result — the verify subagent IS the verifier (no separate Juror call)
     //
     // verifyHint: surfaced once at the top level when one or more findings
-    // couldn't be exploit-verified because no isolation backend (Docker/Deno)
-    // was detected on the user's machine. Without this hint, the user sees
-    // every high/medium finding marked INCONCLUSIVE with confidence capped
-    // at 75% and no clear reason — the headline differentiator of Pipeline 2
-    // ("exploit-verified, not just LLM-believed") silently goes offline.
-    // The hint tells them exactly what to install and what they get back.
+    // couldn't be exploit-verified. The local sandbox (Docker/Deno) was
+    // unavailable AND the API-side sandbox fallback failed — so the finding
+    // got INCONCLUSIVE. The hint tells the user what to install for local
+    // verification (faster, no round-trip) and reminds them the API sandbox
+    // is the automatic fallback.
     let verifyHint: string | undefined;
     if (sandboxUnavailableCount > 0) {
-        verifyHint = `Exploit verification was skipped for ${sandboxUnavailableCount} finding(s) because no isolation backend (Docker or Deno) was detected. Without it, high/medium findings are reported as INCONCLUSIVE with confidence capped at 75%.\n${SANDBOX_UNAVAILABLE_MESSAGE}`;
+        verifyHint = `Exploit verification was skipped for ${sandboxUnavailableCount} finding(s). No local sandbox (Docker or Deno) was detected and the API-side sandbox was unavailable. Findings are reported as INCONCLUSIVE with confidence capped at 75%.\n${SANDBOX_UNAVAILABLE_MESSAGE}`;
     } else if (budgetExhaustedCount > 0) {
         verifyHint = `Exploit verification was skipped for ${budgetExhaustedCount} finding(s) because the per-scan verification budget (${verifyBudget.maxFindings} findings, ${verifyBudget.maxLlmCalls} LLM calls, ${Math.round(verifyBudget.maxWallClockMs / 1000)}s) was exhausted. Re-run the scan to verify the remaining findings, or raise the budget via the VerifyBudget config.`;
     }
