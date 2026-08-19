@@ -22,7 +22,7 @@ import { discoverEndpoints, formatEndpoints } from '../project-map/endpointDisco
 import { listImports, formatImports } from '../utils/listImports';
 import { listFiles, formatFileList } from '../utils/listFiles';
 import { getCallGraph } from '../project-map/callGraphExtractor';
-import { getGitBlame, getGitHistory } from '../utils/gitContext';
+import { getGitBlame, getGitHistory, formatGitChangedFiles } from '../utils/gitContext';
 import { scanDependencies } from '../dependency/dependencyChecker';
 import { FileCacheStore } from '../dependency/depCache';
 import { readSecurityConfig } from '../utils/securityConfig';
@@ -393,6 +393,19 @@ export async function executeAction(
                 return truncate(result);
             } catch (e: any) {
                 return `Error running git history: ${e.message || e}`;
+            }
+        }
+
+        case 'git_diff': {
+            try {
+                const result = await formatGitChangedFiles(
+                    ctx.workspaceRoot,
+                    (action as any).baseRef,
+                    (action as any).headRef,
+                );
+                return truncate(result);
+            } catch (e: any) {
+                return `Error running git diff: ${e.message || e}`;
             }
         }
 

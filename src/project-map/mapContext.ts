@@ -18,7 +18,7 @@ import { toEndpointContext, type EndpointContext, type ProjectMap, type RelatedF
  * Get the project map — from cache if available, or build + cache if not.
  * Returns null on any failure (best-effort).
  */
-async function getMap(workspaceRoot: string): Promise<ProjectMap | null> {
+export async function getMap(workspaceRoot: string): Promise<ProjectMap | null> {
     let map = readCache(workspaceRoot);
     if (map) return map;
 

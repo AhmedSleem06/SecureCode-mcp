@@ -196,3 +196,136 @@ export async function getGitHistory(
     }
     return truncate(out.join('\n'));
 }
+
+// ── Git diff (changed files) ────────────────────────────────────────────────
+//
+// Returns the list of files changed between a base ref and HEAD (or between
+// two refs). Used by the agent scan's diff-aware blast radius scoping: only
+// files that changed (and their blast radius) need to be scanned.
+//
+// Security:
+//   - baseRef/headRef validated against a strict regex (no shell injection)
+//   - execFile only, no shell
+//   - argument arrays, `--` separator not needed for refs (git treats them
+//     as positional args to `diff --name-only`)
+//   - output truncated, redacted, 10s timeout
+//   - non-git workspaces return a clear message
+
+const REF_PATTERN = /^[a-zA-Z0-9._~^/-]{1,100}$/;
+const MAX_CHANGED_FILES = 500;
+
+function validateRef(ref: string): string | null {
+    if (!ref || ref.length === 0) return null;
+    if (!REF_PATTERN.test(ref)) return null;
+    if (ref.includes('..')) return null; // reject range operators
+    return ref;
+}
+
+export interface GitChangedFilesResult {
+    ok: boolean;
+    files: string[];
+    baseRef: string;
+    headRef: string;
+    error?: string;
+}
+
+export async function getGitChangedFiles(
+    workspaceRoot: string,
+    baseRef: string,
+    headRef?: string,
+): Promise<GitChangedFilesResult> {
+    const isGit = await isGitRepo(workspaceRoot);
+    if (!isGit) {
+        return {
+            ok: false,
+            files: [],
+            baseRef,
+            headRef: headRef || 'HEAD',
+            error: 'Not a git repository — git_diff unavailable.',
+        };
+    }
+
+    const base = validateRef(baseRef);
+    if (!base) {
+        return {
+            ok: false,
+            files: [],
+            baseRef,
+            headRef: headRef || 'HEAD',
+            error: `Invalid base ref: "${baseRef}". Refs must match /^[a-zA-Z0-9._\\/-]{1,100}$/ and not contain "..".`,
+        };
+    }
+
+    const head = headRef ? validateRef(headRef) : 'HEAD';
+    if (headRef && !head) {
+        return {
+            ok: false,
+            files: [],
+            baseRef: base,
+            headRef: headRef,
+            error: `Invalid head ref: "${headRef}".`,
+        };
+    }
+
+    const args = ['diff', '--name-only', '--no-renames'];
+    if (base === 'HEAD' && !headRef) {
+        args.push('--cached');
+    } else {
+        args.push(`${base}...${head}`);
+    }
+
+    const result = await execGit(args, workspaceRoot);
+    if (!result.ok) {
+        return {
+            ok: false,
+            files: [],
+            baseRef: base,
+            headRef: head || 'HEAD',
+            error: `git diff failed: ${result.error || 'unknown error'}. The ref "${base}" may not exist.`,
+        };
+    }
+
+    const files = result.output
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map(f => f.replace(/\\/g, '/'))
+        .filter(f => !f.startsWith(' '))
+
+    const capped = files.slice(0, MAX_CHANGED_FILES);
+    const truncated = files.length > MAX_CHANGED_FILES;
+
+    return {
+        ok: true,
+        files: capped,
+        baseRef: base,
+        headRef: head || 'HEAD',
+        error: truncated ? `Truncated to ${MAX_CHANGED_FILES} files (${files.length} total changed).` : undefined,
+    };
+}
+
+export async function formatGitChangedFiles(
+    workspaceRoot: string,
+    baseRef: string,
+    headRef?: string,
+): Promise<string> {
+    const result = await getGitChangedFiles(workspaceRoot, baseRef, headRef);
+    if (!result.ok) {
+        return result.error || 'Failed to get changed files.';
+    }
+
+    if (result.files.length === 0) {
+        return `No files changed between ${result.baseRef} and ${result.headRef}.`;
+    }
+
+    const out: string[] = [
+        `Changed files (${result.files.length}) between ${result.baseRef} and ${result.headRef}:`,
+    ];
+    for (const f of result.files) {
+        out.push(`  ${f}`);
+    }
+    if (result.error) {
+        out.push(`\nNote: ${result.error}`);
+    }
+    return truncate(out.join('\n'));
+}

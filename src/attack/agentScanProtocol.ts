@@ -31,7 +31,7 @@ export const AGENT_SCAN_PROTOCOL_VERSION = 2;
 export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
     'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
-    'list_files', 'call_graph', 'git_blame', 'git_history',
+    'list_files', 'call_graph', 'git_blame', 'git_history', 'git_diff',
     'check_dependencies', 'read_config', 'find_definition', 'find_references', 'find_tests', 'run_tests',
     'finish',
 ];
@@ -145,6 +145,15 @@ export interface AgentScanGitHistoryAction {
     functionName?: string;
     /** Max commits to return (hard cap 20, default 10). */
     limit?: number;
+    rationale: string;
+}
+
+export interface AgentScanGitDiffAction {
+    type: 'git_diff';
+    /** Base git ref to compare from (e.g. "main", "HEAD~1", a commit SHA). */
+    baseRef: string;
+    /** Optional head ref (defaults to HEAD). */
+    headRef?: string;
     rationale: string;
 }
 
@@ -283,6 +292,7 @@ export type AgentScanAction =
     | AgentScanCallGraphAction
     | AgentScanGitBlameAction
     | AgentScanGitHistoryAction
+    | AgentScanGitDiffAction
     | AgentScanCheckDependenciesAction
     | AgentScanReadConfigAction
     | AgentScanFindDefinitionAction
@@ -305,6 +315,7 @@ export type AgentScanActionType =
     | 'call_graph'
     | 'git_blame'
     | 'git_history'
+    | 'git_diff'
     | 'check_dependencies'
     | 'read_config'
     | 'find_definition'
@@ -343,6 +354,17 @@ export interface AgentScanBudget {
 
 // ── Request / Response ──────────────────────────────────────────────────────
 
+export interface AgentScanScope {
+    /** Files that changed (from git diff). */
+    changedFiles: string[];
+    /** Full blast radius (changed + affected files). */
+    blastRadius: string[];
+    /** Base git ref used for the diff. */
+    baseRef?: string;
+    /** Head git ref used for the diff. */
+    headRef?: string;
+}
+
 export interface AgentScanTarget {
     filePath: string;
     language: string;
@@ -350,6 +372,9 @@ export interface AgentScanTarget {
     endpointContext?: unknown;
     /** Formatted workspace memory string (false positives + known facts). */
     workspaceMemory?: string;
+    /** Diff-aware blast radius scope. When present, the agent should focus
+     *  its investigation on files within this scope. */
+    scope?: AgentScanScope;
 }
 
 export interface AgentScanStartResponse {

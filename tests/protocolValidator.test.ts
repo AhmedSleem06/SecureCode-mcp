@@ -229,4 +229,20 @@ describe('protocolValidator', () => {
         expect(r.ok).toBe(false);
         if (!r.ok) expect(r.error).toContain('runner');
     });
+
+    it('accepts git_diff with baseRef', () => {
+        const r = validateAction({ type: 'git_diff', baseRef: 'main', rationale: 'r' });
+        expect(r.ok).toBe(true);
+    });
+
+    it('accepts git_diff with baseRef and headRef', () => {
+        const r = validateAction({ type: 'git_diff', baseRef: 'main', headRef: 'feature', rationale: 'r' });
+        expect(r.ok).toBe(true);
+    });
+
+    it('rejects git_diff without baseRef', () => {
+        const r = validateAction({ type: 'git_diff', rationale: 'r' });
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.error).toContain('baseRef');
+    });
 });

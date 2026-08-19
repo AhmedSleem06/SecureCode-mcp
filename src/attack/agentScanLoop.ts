@@ -364,6 +364,8 @@ export async function runAgentScan(
                     toolKey = `git_blame:${(action as any).filePath || ''}:${(action as any).startLine || 0}:${(action as any).endLine || 0}`;
                 } else if (action.type === 'git_history') {
                     toolKey = `git_history:${(action as any).filePath || ''}:${(action as any).functionName || ''}`;
+                } else if (action.type === 'git_diff') {
+                    toolKey = `git_diff:${(action as any).baseRef || ''}:${(action as any).headRef || 'HEAD'}`;
                 } else if (action.type === 'check_dependencies') {
                     toolKey = `check_dependencies`;
                 } else if (action.type === 'read_config') {
@@ -454,6 +456,7 @@ function describeAction(action: AgentScanAction): string {
         case 'call_graph': return `call_graph(${(action as any).filePath})`;
         case 'git_blame': return `git_blame(${(action as any).filePath})`;
         case 'git_history': return `git_history(${(action as any).filePath || 'repo'})`;
+        case 'git_diff': return `git_diff(${(action as any).baseRef}..${(action as any).headRef || 'HEAD'})`;
         case 'check_dependencies': return 'check_dependencies';
         case 'read_config': return `read_config(${(action as any).configKind || 'all'})`;
         case 'find_definition': return `find_definition(${(action as any).symbol})`;

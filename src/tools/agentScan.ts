@@ -20,7 +20,7 @@ import { ApiClient } from '../api/client';
 import * as path from 'path';
 import type { ServerContext } from '../mcp/types';
 import { readFileFromWorkspace } from '../utils/files';
-import { getEndpointContextForFile, getRelatedFilesForFile } from '../project-map/mapContext';
+import { getEndpointContextForFile, getRelatedFilesForFile, getMap } from '../project-map/mapContext';
 import {
     getCachedScan,
     writeCachedScan,
@@ -31,9 +31,11 @@ import { loadAgentMemory, formatMemoryForPrompt } from '../project-map/agentMemo
 import { getCapability, evidenceLevelTag } from '../project-map/capabilityRegistry';
 import { runAgentScan } from '../attack/agentScanLoop';
 import { runVerifyLoop } from '../attack/verifyLoop';
-import { VerifyBudgetTracker, defaultVerifyBudget, type VerifyBudget } from '../attack/agentScanProtocol';
+import { VerifyBudgetTracker, defaultVerifyBudget, type VerifyBudget, type AgentScanScope } from '../attack/agentScanProtocol';
 import type { AgentScanFinding, AgentScanTarget } from '../attack/agentScanProtocol';
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
+import { getGitChangedFiles } from '../utils/gitContext';
+import { computeBlastRadius } from '../project-map/blastRadius';
 import type { SandboxProveResponse, FixResponse } from '../api/types';
 
 interface ProvenFinding extends AgentScanFinding {
@@ -117,6 +119,41 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         }
     }
 
+    // 2a. Diff-aware blast radius scoping — if baseRef is provided, compute
+    // the set of changed files and their blast radius from the project map.
+    // The scope is passed to the agent target so the API prompt can guide
+    // the agent to focus on changed files and their dependents.
+    let scope: AgentScanScope | undefined;
+    const baseRef = args.baseRef as string | undefined;
+    if (baseRef) {
+        try {
+            const diffResult = await getGitChangedFiles(ctx.workspaceRoot, baseRef, args.headRef);
+            if (diffResult.ok && diffResult.files.length > 0) {
+                let blastFiles = diffResult.files;
+                try {
+                    const map = await getMap(ctx.workspaceRoot);
+                    if (map && map.files) {
+                        const blastResult = computeBlastRadius({
+                            changedFiles: diffResult.files,
+                            map,
+                        });
+                        blastFiles = blastResult.files;
+                    }
+                } catch {
+                    // map not available — use just the changed files
+                }
+                scope = {
+                    changedFiles: diffResult.files,
+                    blastRadius: blastFiles,
+                    baseRef: diffResult.baseRef,
+                    headRef: diffResult.headRef,
+                };
+            }
+        } catch {
+            // best-effort — proceed without scope
+        }
+    }
+
     // 2b. Load workspace memory BEFORE the cache check.
     //
     // Memory (dismissed false positives + known facts) is part of the cache
@@ -184,6 +221,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         fileContent: code,
         endpointContext,
         workspaceMemory,
+        scope,
     };
 
     const agentResult = await runAgentScan(ctx, target, {

@@ -53,7 +53,7 @@ function isOptionalNumber(x: unknown): x is number | undefined { return x === un
 const VALID_ACTION_TYPES = new Set([
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
     'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
-    'list_files', 'call_graph', 'git_blame', 'git_history',
+    'list_files', 'call_graph', 'git_blame', 'git_history', 'git_diff',
     'check_dependencies', 'read_config', 'find_definition',
     'find_references', 'find_tests', 'run_tests',
     'finish', 'system_event',
@@ -151,6 +151,11 @@ export function validateAction(raw: unknown): ValidationResult<AgentScanAction> 
             if (!isOptionalString(raw.filePath)) return err('git_history filePath must be string or null');
             if (!isOptionalString(raw.functionName)) return err('git_history functionName must be string or null');
             if (!isOptionalNumber(raw.limit)) return err('git_history limit must be number or null');
+            return ok(raw as unknown as AgentScanAction);
+        }
+        case 'git_diff': {
+            if (!isString(raw.baseRef) || raw.baseRef.length === 0) return err('git_diff requires non-empty "baseRef"');
+            if (!isOptionalString(raw.headRef)) return err('git_diff headRef must be string or null');
             return ok(raw as unknown as AgentScanAction);
         }
         case 'check_dependencies':

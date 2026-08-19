@@ -186,7 +186,7 @@ export const TOOLS: ToolDef[] = [
     {
         name: 'securecode.agent-scan',
         description:
-            'Agent-mode scan: an AI investigator that reads files, traces data flows, checks guards, and compares endpoint policies to find vulnerabilities. Slower but deeper than a deep scan. The agent replaces the Scout phase and its findings are verified by the Juror. Uses 5 scan credits. Best for complex access-control and cross-file vulnerabilities.',
+            'Agent-mode scan: an AI investigator that reads files, traces data flows, checks guards, and compares endpoint policies to find vulnerabilities. Slower but deeper than a deep scan. The agent replaces the Scout phase and its findings are verified by the Juror. Uses 5 scan credits. Best for complex access-control and cross-file vulnerabilities. Supports diff-aware scoping: pass baseRef to focus the scan on changed files and their blast radius (files that import or call the changed files).',
         inputSchema: {
             type: 'object',
             properties: {
@@ -201,6 +201,14 @@ export const TOOLS: ToolDef[] = [
                 language: {
                     type: 'string',
                     description: 'Language id (javascript, typescript, python). Inferred from filePath if omitted.',
+                },
+                baseRef: {
+                    type: 'string',
+                    description: 'Optional git ref (branch, tag, SHA) to diff against. When provided, computes the blast radius of changed files and scopes the scan to them. Example: "main", "HEAD~1", "abc1234". Must match /^[a-zA-Z0-9._/-]{1,100}$/ and not contain "..".',
+                },
+                headRef: {
+                    type: 'string',
+                    description: 'Optional git ref to diff from baseRef (defaults to HEAD).',
                 },
             },
         },
