@@ -32,7 +32,7 @@ export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
     'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
     'list_files', 'call_graph', 'git_blame', 'git_history',
-    'check_dependencies', 'read_config', 'find_definition', 'find_references',
+    'check_dependencies', 'read_config', 'find_definition', 'find_references', 'find_tests',
     'finish',
 ];
 
@@ -182,6 +182,15 @@ export interface AgentScanFindReferencesAction {
     rationale: string;
 }
 
+export interface AgentScanFindTestsAction {
+    type: 'find_tests';
+    /** Workspace-relative path to the source file to find tests for. */
+    filePath: string;
+    /** Optional symbol name — if provided, also search test files for references. */
+    symbol?: string;
+    rationale: string;
+}
+
 export interface AgentScanFinding {
     line: number;
     lineEnd?: number;
@@ -254,6 +263,7 @@ export type AgentScanAction =
     | AgentScanReadConfigAction
     | AgentScanFindDefinitionAction
     | AgentScanFindReferencesAction
+    | AgentScanFindTestsAction
     | AgentScanFinishAction
     | AgentScanSystemEventAction;
 
@@ -274,6 +284,7 @@ export type AgentScanActionType =
     | 'read_config'
     | 'find_definition'
     | 'find_references'
+    | 'find_tests'
     | 'finish'
     | 'system_event';
 

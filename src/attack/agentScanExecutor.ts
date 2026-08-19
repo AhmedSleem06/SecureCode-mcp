@@ -27,6 +27,7 @@ import { scanDependencies } from '../dependency/dependencyChecker';
 import { FileCacheStore } from '../dependency/depCache';
 import { readSecurityConfig } from '../utils/securityConfig';
 import { findDefinition, findReferences } from '../project-map/symbolIndex';
+import { findTests } from '../project-map/findTests';
 import { validateToolResponse } from './protocolValidator';
 import type {
     AgentScanAction,
@@ -467,6 +468,19 @@ export async function executeAction(
                 return redact(result);
             } catch (e: any) {
                 return `Error finding references for "${(action as any).symbol}": ${e.message || e}`;
+            }
+        }
+
+        case 'find_tests': {
+            try {
+                const result = await findTests(
+                    ctx.workspaceRoot,
+                    (action as any).filePath,
+                    (action as any).symbol,
+                );
+                return redact(result);
+            } catch (e: any) {
+                return `Error finding tests for "${(action as any).filePath}": ${e.message || e}`;
             }
         }
 

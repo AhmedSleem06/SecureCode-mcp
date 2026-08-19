@@ -372,6 +372,8 @@ export async function runAgentScan(
                     toolKey = `find_definition:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
                 } else if (action.type === 'find_references') {
                     toolKey = `find_references:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
+                } else if (action.type === 'find_tests') {
+                    toolKey = `find_tests:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
                 }
 
                 if (toolKey) {
@@ -447,6 +449,7 @@ function describeAction(action: AgentScanAction): string {
         case 'read_config': return `read_config(${(action as any).configKind || 'all'})`;
         case 'find_definition': return `find_definition(${(action as any).symbol})`;
         case 'find_references': return `find_references(${(action as any).symbol})`;
+        case 'find_tests': return `find_tests(${(action as any).filePath}${(action as any).symbol ? ':' + (action as any).symbol : ''})`;
         case 'finish': return 'finish';
         case 'system_event': return `system_event(${(action as any).eventType})`;
     }
