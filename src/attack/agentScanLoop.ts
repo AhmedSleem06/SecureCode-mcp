@@ -87,23 +87,25 @@ export async function runAgentScan(
         const readFileCounts = new Map<string, number>();
         // Dynamic read cap based on file size:
         //   < 200 lines  → 5 reads (small file, 5 chunks is enough)
-        //   < 1000 lines  → 10 reads (medium file)
-        //   < 5000 lines  → 20 reads (large file, needs many sections)
-        //   >= 5000 lines → 30 reads (very large, allow thorough coverage)
+        //   < 1000 lines  → 8 reads (medium file)
+        //   < 5000 lines  → 12 reads (large file — use search_code/trace_flow, not brute reading)
+        //   >= 5000 lines → 15 reads (very large — still capped; the agent must use
+        //                  search_code and trace_flow for pattern discovery, not
+        //                  read the entire file section by section)
         function maxReadsForFile(filePath: string): number {
             try {
                 const fs = require('fs');
                 const abs = require('path').resolve(ctx.workspaceRoot, filePath);
                 const stat = fs.statSync(abs);
-                if (stat.size > 200_000) return 30;
+                if (stat.size > 200_000) return 15;
                 const content = fs.readFileSync(abs, 'utf8');
                 const lines = content.split('\n').length;
                 if (lines < 200) return 5;
-                if (lines < 1000) return 10;
-                if (lines < 5000) return 20;
-                return 30;
+                if (lines < 1000) return 8;
+                if (lines < 5000) return 12;
+                return 15;
             } catch {
-                return 10;
+                return 8;
             }
         }
         // Track non-read tool calls to prevent the agent from looping on the
@@ -332,12 +334,18 @@ export async function runAgentScan(
                     wasBlocked = true;
                 } else {
                     // Per-file read cap: dynamic based on file size.
-                    // Small files (7 lines) get 5 reads; large files (5000 lines)
-                    // get up to 30 reads so the agent can cover the whole file.
                     const fileMax = maxReadsForFile(action.path);
                     const count = (readFileCounts.get(normalizedPath) || 0) + 1;
+                    // Circuit breaker: if the agent has spent >40% of ALL steps
+                    // reading the same file, force it to switch to analysis tools.
+                    // This prevents the "read every section of a 2000-line file"
+                    // anti-pattern that wastes the entire step budget on reading.
+                    const stepFraction = count / Math.max(stepsTaken, 1);
                     if (count > fileMax) {
                         observation = `BLOCKED: You have already read "${action.path}" ${fileMax} times. Further read_file calls on this file will also be blocked. You MUST use a different tool (search_code, trace_flow, check_guard, check_policy, list_imports, or finish) to proceed.`;
+                        wasBlocked = true;
+                    } else if (stepFraction > 0.4 && count > 5) {
+                        observation = `BLOCKED: You have spent ${count} of ${stepsTaken} steps reading "${action.path}". That's too much — switch to search_code, trace_flow, check_guard, or check_policy to analyze the code you've already read. If you have enough evidence, call finish to report your findings.`;
                         wasBlocked = true;
                     } else {
                         readFileCounts.set(normalizedPath, count);
