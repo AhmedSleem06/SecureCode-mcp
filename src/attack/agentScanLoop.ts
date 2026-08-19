@@ -368,6 +368,10 @@ export async function runAgentScan(
                     toolKey = `check_dependencies`;
                 } else if (action.type === 'read_config') {
                     toolKey = `read_config:${(action as any).configKind || 'all'}`;
+                } else if (action.type === 'find_definition') {
+                    toolKey = `find_definition:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
+                } else if (action.type === 'find_references') {
+                    toolKey = `find_references:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
                 }
 
                 if (toolKey) {
@@ -441,6 +445,8 @@ function describeAction(action: AgentScanAction): string {
         case 'git_history': return `git_history(${(action as any).filePath || 'repo'})`;
         case 'check_dependencies': return 'check_dependencies';
         case 'read_config': return `read_config(${(action as any).configKind || 'all'})`;
+        case 'find_definition': return `find_definition(${(action as any).symbol})`;
+        case 'find_references': return `find_references(${(action as any).symbol})`;
         case 'finish': return 'finish';
         case 'system_event': return `system_event(${(action as any).eventType})`;
     }

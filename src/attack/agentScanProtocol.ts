@@ -32,7 +32,8 @@ export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
     'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
     'list_files', 'call_graph', 'git_blame', 'git_history',
-    'check_dependencies', 'read_config', 'finish',
+    'check_dependencies', 'read_config', 'find_definition', 'find_references',
+    'finish',
 ];
 
 export interface AgentScanClientCapabilities {
@@ -159,6 +160,28 @@ export interface AgentScanReadConfigAction {
     rationale: string;
 }
 
+export interface AgentScanFindDefinitionAction {
+    type: 'find_definition';
+    /** Workspace-relative path to the file where the symbol is referenced. */
+    filePath: string;
+    /** The symbol name to find the definition of. */
+    symbol: string;
+    /** Optional 1-indexed line (for disambiguation). */
+    line?: number;
+    rationale: string;
+}
+
+export interface AgentScanFindReferencesAction {
+    type: 'find_references';
+    /** Workspace-relative path to the file where the symbol is defined. */
+    filePath: string;
+    /** The symbol name to find references to. */
+    symbol: string;
+    /** Optional 1-indexed line (for disambiguation). */
+    line?: number;
+    rationale: string;
+}
+
 export interface AgentScanFinding {
     line: number;
     lineEnd?: number;
@@ -229,6 +252,8 @@ export type AgentScanAction =
     | AgentScanGitHistoryAction
     | AgentScanCheckDependenciesAction
     | AgentScanReadConfigAction
+    | AgentScanFindDefinitionAction
+    | AgentScanFindReferencesAction
     | AgentScanFinishAction
     | AgentScanSystemEventAction;
 
@@ -247,6 +272,8 @@ export type AgentScanActionType =
     | 'git_history'
     | 'check_dependencies'
     | 'read_config'
+    | 'find_definition'
+    | 'find_references'
     | 'finish'
     | 'system_event';
 

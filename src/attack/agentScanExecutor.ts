@@ -26,6 +26,7 @@ import { getGitBlame, getGitHistory } from '../utils/gitContext';
 import { scanDependencies } from '../dependency/dependencyChecker';
 import { FileCacheStore } from '../dependency/depCache';
 import { readSecurityConfig } from '../utils/securityConfig';
+import { findDefinition, findReferences } from '../project-map/symbolIndex';
 import { validateToolResponse } from './protocolValidator';
 import type {
     AgentScanAction,
@@ -438,6 +439,34 @@ export async function executeAction(
                 return truncate(result);
             } catch (e: any) {
                 return `Error reading security config: ${e.message || e}`;
+            }
+        }
+
+        case 'find_definition': {
+            try {
+                const result = await findDefinition(
+                    ctx.workspaceRoot,
+                    (action as any).filePath,
+                    (action as any).symbol,
+                    (action as any).line,
+                );
+                return redact(result);
+            } catch (e: any) {
+                return `Error finding definition for "${(action as any).symbol}": ${e.message || e}`;
+            }
+        }
+
+        case 'find_references': {
+            try {
+                const result = await findReferences(
+                    ctx.workspaceRoot,
+                    (action as any).filePath,
+                    (action as any).symbol,
+                    (action as any).line,
+                );
+                return redact(result);
+            } catch (e: any) {
+                return `Error finding references for "${(action as any).symbol}": ${e.message || e}`;
             }
         }
 
