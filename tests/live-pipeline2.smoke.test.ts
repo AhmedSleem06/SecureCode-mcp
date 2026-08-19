@@ -55,10 +55,9 @@ async function apiPost(endpoint: string, body: any): Promise<any> {
     return json;
 }
 
-// Fixture loader
-function loadFixture(name: string): any {
-    const fixturesDir = path.join(__dirname, 'fixtures');
-    return require(path.join(fixturesDir, name));
+// Fixture loader — dynamic import handles .ts via vitest's transform.
+async function loadFixture(name: string): Promise<any> {
+    return await import(`./fixtures/${name}.ts`);
 }
 
 describe('Live Pipeline 2 smoke (Phase 5) — requires SECURECODE_API_TOKEN + Docker', () => {
@@ -75,7 +74,7 @@ describe('Live Pipeline 2 smoke (Phase 5) — requires SECURECODE_API_TOKEN + Do
 
     describeLive('vulnerable-sqli fixture', () => {
         it('verify/generate returns canTest=true with a test script', async () => {
-            const fx = loadFixture('vulnerable-sqli');
+            const fx = await loadFixture('vulnerable-sqli');
             const resp = await apiPost('/verify/generate', {
                 code: fx.code,
                 language: fx.language,
@@ -94,7 +93,7 @@ describe('Live Pipeline 2 smoke (Phase 5) — requires SECURECODE_API_TOKEN + Do
 
     describeLive('safe-guarded-sqli fixture', () => {
         it('verify/generate returns canTest=true (guard test) or canTest=false', async () => {
-            const fx = loadFixture('safe-guarded-sqli');
+            const fx = await loadFixture('safe-guarded-sqli');
             const resp = await apiPost('/verify/generate', {
                 code: fx.code,
                 language: fx.language,
@@ -139,7 +138,7 @@ describe('Live Pipeline 2 smoke (Phase 5) — requires SECURECODE_API_TOKEN + Do
 
     describeLive('inconclusive-needs-db fixture', () => {
         it('verify/generate returns canTest=false (needs running DB)', async () => {
-            const fx = loadFixture('inconclusive-needs-db');
+            const fx = await loadFixture('inconclusive-needs-db');
             const resp = await apiPost('/verify/generate', {
                 code: fx.code,
                 language: fx.language,
@@ -156,7 +155,7 @@ describe('Live Pipeline 2 smoke (Phase 5) — requires SECURECODE_API_TOKEN + Do
 
     describeLive('costUsd is present and positive on successful generate', () => {
         it('returns a non-zero costUsd when the LLM ran', async () => {
-            const fx = loadFixture('vulnerable-sqli');
+            const fx = await loadFixture('vulnerable-sqli');
             const resp = await apiPost('/verify/generate', {
                 code: fx.code,
                 language: fx.language,
