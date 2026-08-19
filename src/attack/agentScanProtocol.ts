@@ -487,10 +487,10 @@ export interface VerifyBudget {
 
 export const VERIFY_DEFAULTS = {
     maxFindings: 10,
-    maxRoundsPerFinding: 8,
-    maxLlmCalls: 40,         // 5 findings × 8 rounds × 2 calls = 80 max; default to ~half
-    maxWallClockMs: 5 * 60_000, // 5 minutes
-    costCapUsd: 0.50,
+    maxRoundsPerFinding: 12,
+    maxLlmCalls: 60,          // 10 findings × 12 rounds × 2 calls = 240 max; default to ~25%
+    maxWallClockMs: 10 * 60_000, // 10 minutes
+    costCapUsd: 0.80,
 } as const;
 
 export function defaultVerifyBudget(overrides?: Partial<VerifyBudget>): VerifyBudget {

@@ -126,10 +126,10 @@ describe('Cross-repo contract parity (Suite 5)', () => {
             const { defaultVerifyBudget } = await import('../src/attack/agentScanProtocol');
             const b = defaultVerifyBudget();
             expect(b.maxFindings).toBe(10);
-            expect(b.maxRoundsPerFinding).toBe(8);
-            expect(b.maxLlmCalls).toBe(40);
-            expect(b.maxWallClockMs).toBe(5 * 60 * 1000);
-            expect(b.costCapUsd).toBe(0.50);
+            expect(b.maxRoundsPerFinding).toBe(12);
+            expect(b.maxLlmCalls).toBe(60);
+            expect(b.maxWallClockMs).toBe(10 * 60 * 1000);
+            expect(b.costCapUsd).toBe(0.80);
         });
     });
 

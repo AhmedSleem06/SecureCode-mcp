@@ -73,7 +73,7 @@ export interface VerifyLoopResult {
         | 'runtime-blocked';
 }
 
-const PER_FINDING_MAX_ROUNDS = 8;
+const PER_FINDING_MAX_ROUNDS = 12;
 
 export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoopResult> {
     const { finding, filePath, code, relatedFiles, workspaceRoot, language, client, onProgress } = opts;
