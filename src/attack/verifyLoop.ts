@@ -100,6 +100,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             genResp.testScript,
             runner,
             workspaceRoot,
+            genResp.setupScript,
         );
 
         lastTestOutput = testResult.output;

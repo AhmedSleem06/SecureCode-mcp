@@ -174,6 +174,7 @@ export interface SandboxProveResponse {
 export interface VerifyGenerateResponse {
     canTest: boolean;
     testScript?: string;
+    setupScript?: string | null;
     runner?: string;
     description?: string;
     skipReason?: string;

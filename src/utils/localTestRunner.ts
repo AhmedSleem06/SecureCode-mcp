@@ -17,6 +17,7 @@ export async function runLocalTest(
     script: string,
     runner: string,
     workspaceRoot: string,
+    setupScript?: string | null,
 ): Promise<LocalTestResult> {
     const safety = checkTestSafety(script, workspaceRoot);
     if (!safety.allowed) {
@@ -31,7 +32,37 @@ export async function runLocalTest(
     const ext = isPython ? '.py' : (isTsRunner ? '.test.ts' : '.test.js');
     const testFile = path.join(testDir, `verify-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
 
+    const setupFile = setupScript
+        ? path.join(testDir, `verify-setup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`)
+        : null;
+
     try {
+        if (setupFile && setupScript) {
+            const setupSafety = checkTestSafety(setupScript, workspaceRoot);
+            if (!setupSafety.allowed) {
+                return { verdict: 'error', output: `Setup script blocked: ${setupSafety.reason}`, exitCode: -1 };
+            }
+            fs.writeFileSync(setupFile, setupScript, 'utf8');
+            try {
+                const isWindows = process.platform === 'win32';
+                let sRunnerBin: string;
+                let sRunnerArgs: string[];
+                if (runner === 'tsx') { sRunnerBin = 'npx'; sRunnerArgs = ['tsx', setupFile]; }
+                else if (runner === 'bun' && isWindows) { sRunnerBin = 'npx'; sRunnerArgs = ['bun', setupFile]; }
+                else { sRunnerBin = runner; sRunnerArgs = [setupFile]; }
+                execFileSync(sRunnerBin, sRunnerArgs, {
+                    cwd: workspaceRoot,
+                    timeout: 10_000,
+                    encoding: 'utf8',
+                    stdio: ['pipe', 'pipe', 'pipe'],
+                    env: { ...process.env, NODE_ENV: 'test' },
+                    shell: isWindows,
+                });
+            } catch (err: any) {
+                return { verdict: 'error', output: `Setup script failed: ${err.stderr || err.stdout || err.message}`, exitCode: -1 };
+            }
+        }
+
         fs.writeFileSync(testFile, script, 'utf8');
 
         let stdout = '';
@@ -98,5 +129,6 @@ export async function runLocalTest(
         return { verdict: 'error', output: err.message || String(err), exitCode: -1 };
     } finally {
         try { fs.unlinkSync(testFile); } catch {}
+        if (setupFile) { try { fs.unlinkSync(setupFile); } catch {} }
     }
 }
