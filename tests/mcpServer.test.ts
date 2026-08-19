@@ -222,12 +222,13 @@ describe('SecureCode MCP — protocol conformance', () => {
             'securecode.scan-batch',
             'securecode.scan-secrets',
             'securecode.agent-scan',
+            'securecode.run-tests',
             'securecode.record-false-positive',
             'securecode.get-agent-memory',
             'securecode.clear-agent-memory',
             'securecode.add-known-fact',
         ]));
-        expect(names.length).toBe(12);
+        expect(names.length).toBe(13);
     });
 
     it('every tool carries a valid JSON Schema', async () => {
