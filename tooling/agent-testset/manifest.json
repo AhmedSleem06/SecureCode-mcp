@@ -1,0 +1,52 @@
+{
+    "schema_version": 1,
+    "total": 4,
+    "targets": {
+        "recall_min": 0.70,
+        "precision_min": 0.70,
+        "fpr_max": 0.30,
+        "completion_rate_min": 0.90
+    },
+    "classes": [
+        { "name": "prisma-queryraw-sqli", "total": 2 },
+        { "name": "nextjs-middleware-bypass", "total": 2 }
+    ],
+    "fixtures": [
+        {
+            "id": "sqli-vuln-01",
+            "class": "prisma-queryraw-sqli",
+            "file": "prisma-queryraw-sqli/vulnerable/queryraw-unsafe-req-query.ts",
+            "language": "typescript",
+            "framework": "express",
+            "verdict": "vulnerable",
+            "expect_line": 7,
+            "expect_type": "sql_injection"
+        },
+        {
+            "id": "sqli-safe-01",
+            "class": "prisma-queryraw-sqli",
+            "file": "prisma-queryraw-sqli/safe/constant-sql.ts",
+            "language": "typescript",
+            "framework": "express",
+            "verdict": "safe"
+        },
+        {
+            "id": "mw-vuln-01",
+            "class": "nextjs-middleware-bypass",
+            "file": "nextjs-middleware-bypass/vulnerable/header-trusted.ts",
+            "language": "typescript",
+            "framework": "nextjs",
+            "verdict": "vulnerable",
+            "expect_line": 5,
+            "expect_type": "broken_access_control"
+        },
+        {
+            "id": "mw-safe-01",
+            "class": "nextjs-middleware-bypass",
+            "file": "nextjs-middleware-bypass/safe/jwt-verified.ts",
+            "language": "typescript",
+            "framework": "nextjs",
+            "verdict": "safe"
+        }
+    ]
+}
