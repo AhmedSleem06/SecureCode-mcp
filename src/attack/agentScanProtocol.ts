@@ -32,7 +32,7 @@ export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
     'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
     'list_files', 'call_graph', 'git_blame', 'git_history',
-    'check_dependencies', 'finish',
+    'check_dependencies', 'read_config', 'finish',
 ];
 
 export interface AgentScanClientCapabilities {
@@ -152,6 +152,13 @@ export interface AgentScanCheckDependenciesAction {
     rationale: string;
 }
 
+export interface AgentScanReadConfigAction {
+    type: 'read_config';
+    /** What kind of config to look for. */
+    configKind: 'auth' | 'cors' | 'rate_limit' | 'headers' | 'env' | 'all';
+    rationale: string;
+}
+
 export interface AgentScanFinding {
     line: number;
     lineEnd?: number;
@@ -221,6 +228,7 @@ export type AgentScanAction =
     | AgentScanGitBlameAction
     | AgentScanGitHistoryAction
     | AgentScanCheckDependenciesAction
+    | AgentScanReadConfigAction
     | AgentScanFinishAction
     | AgentScanSystemEventAction;
 
@@ -238,6 +246,7 @@ export type AgentScanActionType =
     | 'git_blame'
     | 'git_history'
     | 'check_dependencies'
+    | 'read_config'
     | 'finish'
     | 'system_event';
 

@@ -25,6 +25,7 @@ import { getCallGraph } from '../project-map/callGraphExtractor';
 import { getGitBlame, getGitHistory } from '../utils/gitContext';
 import { scanDependencies } from '../dependency/dependencyChecker';
 import { FileCacheStore } from '../dependency/depCache';
+import { readSecurityConfig } from '../utils/securityConfig';
 import { validateToolResponse } from './protocolValidator';
 import type {
     AgentScanAction,
@@ -427,6 +428,16 @@ export async function executeAction(
                 return truncate(lines.join('\n'));
             } catch (e: any) {
                 return `Error scanning dependencies: ${e.message || e}`;
+            }
+        }
+
+        case 'read_config': {
+            try {
+                const kind = (action as any).configKind || 'all';
+                const result = await readSecurityConfig(ctx.workspaceRoot, kind);
+                return truncate(result);
+            } catch (e: any) {
+                return `Error reading security config: ${e.message || e}`;
             }
         }
 
