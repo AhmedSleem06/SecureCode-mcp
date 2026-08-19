@@ -468,14 +468,14 @@ function clampConfidenceByCapability(
  *     → ≤75). Fallback-tier languages get ≤55 across the board.
  *   - SKIPPED: low severity, we didn't even try. Same as INCONCLUSIVE.
  */
-function confidenceCeilingForFinding(
+export function confidenceCeilingForFinding(
     verdict: ProvenFinding['proven'],
     capabilityTier: 'deep' | 'standard' | 'fallback',
     evidenceTools: number,
 ): number | undefined {
     switch (verdict) {
         case 'PROVEN':
-            return undefined; // no ceiling; floor handled separately
+            return undefined;
         case 'UNPROVEN':
             return 25;
         case 'NOT_REPRODUCIBLE':
@@ -485,8 +485,25 @@ function confidenceCeilingForFinding(
             if (capabilityTier === 'fallback') return 55;
             if (evidenceTools === 0) return 40;
             if (evidenceTools === 1) return 60;
-            return 75; // evidenceTools >= 2
+            return 75;
         default:
-            return 40; // unreachable — verdict is a closed enum
+            return 40;
     }
+}
+
+/**
+ * Apply the confidence clamp to a single finding. Exported for testing
+ * so the test imports the real policy, not a copy that can drift.
+ */
+export function applyConfidenceClamp(
+    original: number,
+    verdict: ProvenFinding['proven'],
+    capabilityTier: 'deep' | 'standard' | 'fallback',
+    evidenceTools: number,
+): number {
+    const ceiling = confidenceCeilingForFinding(verdict, capabilityTier, evidenceTools);
+    let clamped = original;
+    if (ceiling !== undefined) clamped = Math.min(clamped, ceiling);
+    if (verdict === 'PROVEN') clamped = Math.max(clamped, 80);
+    return Math.round(clamped);
 }

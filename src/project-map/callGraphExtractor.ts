@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { parseSource, grammarForFile, TreeSitterNode } from './parserLoader';
 import { walk, callParts, isIdentifier, collectImports, resolveModulePath } from './astHelpers';
-import { readFileFromWorkspace } from '../utils/files';
+import { resolveWorkspacePath } from '../utils/files';
 
 interface FunctionInfo {
     name: string;
@@ -75,7 +75,13 @@ function extractFunctionList(root: TreeSitterNode, source: string): FunctionInfo
     return out;
 }
 
-function extractCallees(funcNode: TreeSitterNode, source: string, imports: Map<string, string>): CallEdge[] {
+function extractCallees(
+    funcNode: TreeSitterNode,
+    source: string,
+    imports: Map<string, string>,
+    fromFile: string,
+    workspaceRoot: string,
+): CallEdge[] {
     const out: CallEdge[] = [];
     const seen = new Set<string>();
 
@@ -86,14 +92,18 @@ function extractCallees(funcNode: TreeSitterNode, source: string, imports: Map<s
         const name = p.receiver ? `${p.receiver}.${p.method}` : p.method;
         if (seen.has(name)) continue;
         seen.add(name);
-        const calleeFile = imports.get(p.receiver || '') || imports.get(p.method) || null;
-        const resolved = calleeFile ? resolveModulePath(calleeFile, '', '') : null;
+        const calleeSpec = imports.get(p.receiver || '') || imports.get(p.method) || null;
+        const resolved = calleeSpec ? resolveModulePath(calleeSpec, fromFile, workspaceRoot) : null;
         out.push({ name, calleeFile: resolved, line: p.line + 1 });
     }
     return out;
 }
 
-function findCallers(root: TreeSitterNode, source: string, targetName: string, functions: FunctionInfo[]): { caller: string; line: number; callerStart: number }[] {
+function findCallers(
+    root: TreeSitterNode,
+    source: string,
+    targetName: string,
+): { caller: string; line: number; callerStart: number }[] {
     const out: { caller: string; line: number; callerStart: number }[] = [];
     const seen = new Set<string>();
 
@@ -135,12 +145,11 @@ export async function getCallGraph(
 
     let content: string;
     let relPath: string;
+    let absPath: string;
     try {
-        const abs = path.isAbsolute(filePath)
-            ? filePath
-            : path.resolve(workspaceRoot, filePath);
-        content = fs.readFileSync(abs, 'utf8');
-        relPath = path.relative(workspaceRoot, abs).replace(/\\/g, '/');
+        absPath = resolveWorkspacePath(workspaceRoot, filePath);
+        content = fs.readFileSync(absPath, 'utf8');
+        relPath = path.relative(workspaceRoot, absPath).replace(/\\/g, '/');
     } catch (e: any) {
         return `Error reading file "${filePath}": ${e.message || e}`;
     }
@@ -173,7 +182,7 @@ export async function getCallGraph(
 
         lines.push(`\nFunction: ${target.name} (L${target.startLine}-${target.endLine})`);
 
-        const callees = extractCallees(target.node, content, imports);
+        const callees = extractCallees(target.node, content, imports, absPath, workspaceRoot);
         lines.push(`\n  Callees (${callees.length} — what ${target.name} calls):`);
         if (callees.length === 0) {
             lines.push('    (none)');
@@ -184,7 +193,7 @@ export async function getCallGraph(
             }
         }
 
-        const callers = findCallers(root, content, target.name, functions);
+        const callers = findCallers(root, content, target.name);
         lines.push(`\n  Callers (${callers.length} — who calls ${target.name}):`);
         if (callers.length === 0) {
             lines.push('    (none — this may be an entry point)');
@@ -196,7 +205,7 @@ export async function getCallGraph(
     } else {
         lines.push('');
         for (const f of functions) {
-            const callees = extractCallees(f.node, content, imports);
+            const callees = extractCallees(f.node, content, imports, absPath, workspaceRoot);
             const calleeNames = callees.length > 0
                 ? callees.map(c => c.name).join(', ')
                 : '(no calls)';
