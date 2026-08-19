@@ -14,6 +14,40 @@ export const AGENT_SCAN_DEFAULTS = {
     dailyRunLimit: 20,
 } as const;
 
+// ── Protocol versioning + capability negotiation ─────────────────────────────
+//
+// When the API adds a new agent action, old MCPs that don't know about it
+// would crash trying to execute it. Capability negotiation lets the API
+// filter the LLM's action enum to only include actions the connected MCP
+// actually supports, preventing the mismatch.
+//
+// PROTOCOL_VERSION is bumped when the wire contract changes in a way that
+// is not backward-compatible (e.g., a required field is added). Adding a
+// new optional action type only requires adding it to SUPPORTED_ACTIONS
+// and bumping the MCP version — the API filters its schema accordingly.
+
+export const AGENT_SCAN_PROTOCOL_VERSION = 2;
+
+export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
+    'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
+    'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
+    'list_files', 'call_graph', 'finish',
+];
+
+export interface AgentScanClientCapabilities {
+    /** Protocol version the MCP implements. */
+    protocolVersion: number;
+    /** Action types the MCP can execute locally. */
+    supportedActions: AgentScanActionType[];
+}
+
+export function defaultClientCapabilities(): AgentScanClientCapabilities {
+    return {
+        protocolVersion: AGENT_SCAN_PROTOCOL_VERSION,
+        supportedActions: AGENT_SCAN_SUPPORTED_ACTIONS,
+    };
+}
+
 // ── Actions ─────────────────────────────────────────────────────────────────
 
 export interface AgentScanReadFileAction {
@@ -223,6 +257,13 @@ export interface AgentScanStepRequest {
     target: AgentScanTarget;
     transcript: AgentScanTranscriptStep[];
     budget: AgentScanBudget;
+    /**
+     * Client capability advertisement. The API uses this to filter the
+     * action enum in the LLM schema so it never emits an action the MCP
+     * can't execute. Old MCPs that omit this field get the default action
+     * set (all actions the current API version knows about).
+     */
+    clientCapabilities?: AgentScanClientCapabilities;
 }
 
 export interface AgentScanStepResponse {

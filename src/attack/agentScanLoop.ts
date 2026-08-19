@@ -27,6 +27,7 @@ import {
 } from './protocolValidator';
 import {
     AGENT_SCAN_DEFAULTS,
+    defaultClientCapabilities,
     type AgentScanAction,
     type AgentScanBudget,
     type AgentScanFinding,
@@ -143,6 +144,7 @@ export async function runAgentScan(
                     costSpentUsd,
                     costCapUsd: budget.costCapUsd,
                 },
+                clientCapabilities: defaultClientCapabilities(),
             };
 
             let stepResp: AgentScanStepResponse;
