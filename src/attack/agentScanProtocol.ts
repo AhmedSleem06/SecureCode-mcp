@@ -31,7 +31,8 @@ export const AGENT_SCAN_PROTOCOL_VERSION = 2;
 export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
     'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
-    'list_files', 'call_graph', 'git_blame', 'git_history', 'finish',
+    'list_files', 'call_graph', 'git_blame', 'git_history',
+    'check_dependencies', 'finish',
 ];
 
 export interface AgentScanClientCapabilities {
@@ -146,6 +147,11 @@ export interface AgentScanGitHistoryAction {
     rationale: string;
 }
 
+export interface AgentScanCheckDependenciesAction {
+    type: 'check_dependencies';
+    rationale: string;
+}
+
 export interface AgentScanFinding {
     line: number;
     lineEnd?: number;
@@ -214,6 +220,7 @@ export type AgentScanAction =
     | AgentScanCallGraphAction
     | AgentScanGitBlameAction
     | AgentScanGitHistoryAction
+    | AgentScanCheckDependenciesAction
     | AgentScanFinishAction
     | AgentScanSystemEventAction;
 
@@ -230,6 +237,7 @@ export type AgentScanActionType =
     | 'call_graph'
     | 'git_blame'
     | 'git_history'
+    | 'check_dependencies'
     | 'finish'
     | 'system_event';
 

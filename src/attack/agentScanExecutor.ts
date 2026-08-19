@@ -23,6 +23,8 @@ import { listImports, formatImports } from '../utils/listImports';
 import { listFiles, formatFileList } from '../utils/listFiles';
 import { getCallGraph } from '../project-map/callGraphExtractor';
 import { getGitBlame, getGitHistory } from '../utils/gitContext';
+import { scanDependencies } from '../dependency/dependencyChecker';
+import { FileCacheStore } from '../dependency/depCache';
 import { validateToolResponse } from './protocolValidator';
 import type {
     AgentScanAction,
@@ -387,6 +389,44 @@ export async function executeAction(
                 return truncate(result);
             } catch (e: any) {
                 return `Error running git history: ${e.message || e}`;
+            }
+        }
+
+        case 'check_dependencies': {
+            try {
+                const cache = new FileCacheStore(ctx.workspaceRoot);
+                const result = await scanDependencies({
+                    workspaceRoot: ctx.workspaceRoot,
+                    state: cache,
+                    licensePolicy: 'warn',
+                    useGhsa: true,
+                });
+                if (result.findings.length === 0) {
+                    return `No vulnerable dependencies found. Scanned ${result.packageCount} package(s) across ${result.lockfiles.length} lockfile(s).`;
+                }
+                const lines: string[] = [
+                    `Dependency scan: ${result.findings.length} finding(s) across ${result.packageCount} package(s) (${result.lockfiles.length} lockfile(s)):`,
+                    '',
+                ];
+                const vulnFindings = result.findings.filter(f => !f.check_id.startsWith('dep.license.') && !f.check_id.startsWith('dep.unresolved.'));
+                const sortedBySeverity = vulnFindings.sort((a, b) => {
+                    const rank = (s: string) => s === 'ERROR' ? 0 : 1;
+                    return rank(a.severity) - rank(b.severity);
+                });
+                for (const f of sortedBySeverity.slice(0, 20)) {
+                    const dep = (f as any).dependency;
+                    const sev = f.severity === 'ERROR' ? 'CRITICAL' : 'HIGH';
+                    lines.push(`  [${sev}] ${dep?.name || 'unknown'}@${dep?.installedVersion || '?'} — ${f.message}`);
+                    if (dep?.fixedVersion) lines.push(`    Fix: upgrade to ${dep.fixedVersion}`);
+                }
+                if (vulnFindings.length > 20) {
+                    lines.push(`  ... and ${vulnFindings.length - 20} more (run securecode.scan-dependencies for the full list)`);
+                }
+                lines.push('');
+                lines.push('NOTE: These are known-vulnerable library versions (SCA), NOT code-level vulnerabilities. Report them separately from code-path findings. These do not need exploit verification.');
+                return truncate(lines.join('\n'));
+            } catch (e: any) {
+                return `Error scanning dependencies: ${e.message || e}`;
             }
         }
 
