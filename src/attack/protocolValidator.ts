@@ -13,6 +13,8 @@
  *   - AgentScanStartResponse
  *   - AgentScanStepResponse (and the embedded AgentScanAction)
  *   - AgentScanToolResponse
+ *   - VerifyGenerateResponse (POST /verify/generate)
+ *   - VerifyAnalyzeResponse (POST /verify/analyze)
  *
  * On validation failure, the caller treats it as a controlled `spawn_failed`
  * or `degraded` result rather than executing the malformed action.
@@ -30,6 +32,7 @@ import type {
     AgentScanStepResponse,
     AgentScanToolResponse,
 } from '../attack/agentScanProtocol';
+import type { VerifyGenerateResponse, VerifyAnalyzeResponse } from '../api/types';
 
 export interface ValidationOk<T> { ok: true; value: T; }
 export interface ValidationErr { ok: false; error: string; }
@@ -287,4 +290,98 @@ export function validateToolResponse(raw: unknown): ValidationResult<AgentScanTo
         (raw as any).observation = (raw as any).observation.slice(0, MAX_OBS) + '… [truncated by MCP validator]';
     }
     return ok(raw as unknown as AgentScanToolResponse);
+}
+
+// ── Verify generate response ───────────────────────────────────────────────
+//
+// POST /verify/generate returns a test script + runner for local execution.
+// The MCP feeds testScript directly into the sandbox, so a malformed response
+// can cause unsafe or broken execution. Validate before use.
+
+const VALID_VERIFY_RUNNERS = new Set([
+    'node', 'tsx', 'bun', 'deno', 'python', 'python3',
+    'pnpm-tsx', 'yarn-tsx',
+]);
+
+const MAX_TEST_SCRIPT_BYTES = 64 * 1024;
+const MAX_SETUP_SCRIPT_BYTES = 32 * 1024;
+
+export function validateVerifyGenerateResponse(raw: unknown): ValidationResult<VerifyGenerateResponse> {
+    if (!isObject(raw)) return err('verify generate response is not an object');
+    if (!isBool(raw.canTest)) return err('verify generate response canTest must be a boolean');
+
+    if (raw.canTest) {
+        if (!isString(raw.testScript) || raw.testScript.length === 0) {
+            return err('verify generate response: canTest=true requires non-empty "testScript"');
+        }
+        if (raw.testScript.length > MAX_TEST_SCRIPT_BYTES) {
+            return err(`verify generate response: testScript too large (${raw.testScript.length} > ${MAX_TEST_SCRIPT_BYTES})`);
+        }
+        if (!isString(raw.runner) || raw.runner.length === 0) {
+            return err('verify generate response: canTest=true requires "runner"');
+        }
+        if (!VALID_VERIFY_RUNNERS.has(raw.runner)) {
+            return err(`verify generate response: runner "${raw.runner}" is not supported (valid: ${[...VALID_VERIFY_RUNNERS].join(', ')})`);
+        }
+    } else {
+        if (!isString(raw.skipReason) || raw.skipReason.length === 0) {
+            return err('verify generate response: canTest=false requires non-empty "skipReason"');
+        }
+    }
+
+    if (raw.setupScript !== undefined && raw.setupScript !== null) {
+        if (!isString(raw.setupScript)) return err('verify generate response: setupScript must be a string or null');
+        if (raw.setupScript.length > MAX_SETUP_SCRIPT_BYTES) {
+            return err(`verify generate response: setupScript too large (${raw.setupScript.length} > ${MAX_SETUP_SCRIPT_BYTES})`);
+        }
+    }
+
+    if (raw.description !== undefined && raw.description !== null) {
+        if (!isString(raw.description)) return err('verify generate response: description must be a string or null');
+    }
+
+    if (raw.scanCredits !== undefined && raw.scanCredits !== null) {
+        if (!isNumber(raw.scanCredits)) return err('verify generate response: scanCredits must be a number or null');
+    }
+
+    if (raw.costUsd !== undefined && raw.costUsd !== null) {
+        if (!isNumber(raw.costUsd)) return err('verify generate response: costUsd must be a number or null');
+    }
+
+    return ok(raw as unknown as VerifyGenerateResponse);
+}
+
+// ── Verify analyze response ────────────────────────────────────────────────
+//
+// POST /verify/analyze returns a verdict (PROVEN/UNPROVEN/INCONCLUSIVE),
+// a reason string, and a shouldRetry flag. The verify loop uses shouldRetry
+// to decide whether to generate another test. A malformed response can cause
+// infinite retries or a wrong verdict.
+
+const VALID_VERIFY_VERDICTS = new Set(['PROVEN', 'UNPROVEN', 'INCONCLUSIVE']);
+
+export function validateVerifyAnalyzeResponse(raw: unknown): ValidationResult<VerifyAnalyzeResponse> {
+    if (!isObject(raw)) return err('verify analyze response is not an object');
+    if (!isString(raw.verdict) || !VALID_VERIFY_VERDICTS.has(raw.verdict)) {
+        return err(`verify analyze response: verdict must be one of PROVEN|UNPROVEN|INCONCLUSIVE, got "${String(raw.verdict)}"`);
+    }
+    if (!isString(raw.reason) || raw.reason.length === 0) {
+        return err('verify analyze response: reason must be a non-empty string');
+    }
+    if (!isBool(raw.shouldRetry)) return err('verify analyze response: shouldRetry must be a boolean');
+
+    // PROVEN and UNPROVEN are definitive — retrying makes no sense.
+    if ((raw.verdict === 'PROVEN' || raw.verdict === 'UNPROVEN') && raw.shouldRetry === true) {
+        return err(`verify analyze response: verdict "${raw.verdict}" cannot have shouldRetry=true (definitive verdict)`);
+    }
+
+    if (raw.scanCredits !== undefined && raw.scanCredits !== null) {
+        if (!isNumber(raw.scanCredits)) return err('verify analyze response: scanCredits must be a number or null');
+    }
+
+    if (raw.costUsd !== undefined && raw.costUsd !== null) {
+        if (!isNumber(raw.costUsd)) return err('verify analyze response: costUsd must be a number or null');
+    }
+
+    return ok(raw as unknown as VerifyAnalyzeResponse);
 }

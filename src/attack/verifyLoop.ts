@@ -8,6 +8,7 @@ import {
     defaultVerifyBudget,
     type VerifyBudget,
 } from './agentScanProtocol';
+import { validateVerifyGenerateResponse, validateVerifyAnalyzeResponse } from './protocolValidator';
 
 export interface VerifyFinding {
     type: string;
@@ -58,6 +59,7 @@ export interface VerifyLoopResult {
      *   - 'blocked'           : the static safety check rejected the script.
      *   - 'budget-exhausted'  : the aggregate VerifyBudget ran out.
      *   - 'aborted'           : the AbortSignal fired.
+     *   - 'cancelled'         : the user cancelled the scan mid-test.
      *   - 'runtime-blocked'   : detectRuntime said canRunLocally:false.
      *   - undefined           : PROVEN or UNPROVEN (no sub-verdict needed).
      */
@@ -67,6 +69,7 @@ export interface VerifyLoopResult {
         | 'blocked'
         | 'budget-exhausted'
         | 'aborted'
+        | 'cancelled'
         | 'runtime-blocked';
 }
 
@@ -145,7 +148,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
 
         onProgress?.(round, maxRounds, `Round ${round}: generating test...`);
 
-        const genResp = await client.postJson<VerifyGenerateResponse>('/verify/generate', {
+        const genRespRaw = await client.postJson<VerifyGenerateResponse>('/verify/generate', {
             code,
             language,
             vulnerabilityType: finding.type,
@@ -166,7 +169,20 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             relativeImportPath,
             depsInstalled: runtimeInfo.depsInstalled,
         });
-        if (tracker) tracker.recordLlmCall(0); // cost tracked server-side; count the call
+        if (tracker) tracker.recordLlmCall((genRespRaw as any).costUsd ?? 0);
+
+        const genValidation = validateVerifyGenerateResponse(genRespRaw);
+        if (!genValidation.ok) {
+            return {
+                verdict: 'INCONCLUSIVE',
+                reason: `API returned a malformed verify/generate response: ${genValidation.error}`,
+                roundsUsed: round,
+                testScript: '',
+                testOutput: '',
+                subVerdict: 'analyzed',
+            };
+        }
+        const genResp = genValidation.value;
 
         if (!genResp.canTest || !genResp.testScript) {
             return {
@@ -231,6 +247,18 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 subVerdict: 'blocked',
             };
         }
+        if (testResult.verdict === 'cancelled') {
+            // User aborted the scan. Do NOT retry — return immediately so the
+            // cancellation propagates up to toolAgentScan, which stops the loop.
+            return {
+                verdict: 'INCONCLUSIVE',
+                reason: `Verification cancelled by user at round ${round}.`,
+                roundsUsed: round,
+                testScript: lastTestScript,
+                testOutput: lastTestOutput,
+                subVerdict: 'cancelled',
+            };
+        }
         if (testResult.verdict === 'timeout') {
             // Treat as a retryable error — feed it back to the LLM.
             previousErrors.push(`Round ${round}: timed out — ${testResult.output.slice(0, 500)}`);
@@ -249,7 +277,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
 
         onProgress?.(round, maxRounds, `Round ${round}: analyzing result...`);
 
-        const analyzeResp = await client.postJson<VerifyAnalyzeResponse>('/verify/analyze', {
+        const analyzeRespRaw = await client.postJson<VerifyAnalyzeResponse>('/verify/analyze', {
             vulnerabilityType: finding.type,
             line: finding.line,
             evidence: finding.evidence,
@@ -261,7 +289,21 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             round,
             maxRounds,
         });
-        if (tracker) tracker.recordLlmCall(0);
+        if (tracker) tracker.recordLlmCall((analyzeRespRaw as any).costUsd ?? 0);
+
+        const analyzeValidation = validateVerifyAnalyzeResponse(analyzeRespRaw);
+        if (!analyzeValidation.ok) {
+            return {
+                verdict: 'INCONCLUSIVE',
+                reason: `API returned a malformed verify/analyze response: ${analyzeValidation.error}`,
+                roundsUsed: round,
+                testScript: lastTestScript,
+                testOutput: lastTestOutput,
+                backend: testResult.backend || '',
+                subVerdict: 'analyzed',
+            };
+        }
+        const analyzeResp = analyzeValidation.value;
 
         if (analyzeResp.verdict === 'PROVEN') {
             return { verdict: 'PROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '' };

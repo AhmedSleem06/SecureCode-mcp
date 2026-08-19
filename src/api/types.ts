@@ -179,6 +179,8 @@ export interface VerifyGenerateResponse {
     description?: string;
     skipReason?: string;
     scanCredits?: number;
+    /** Dollar cost the API charged for this generate call (credits → USD). */
+    costUsd?: number;
 }
 
 export interface VerifyAnalyzeResponse {
@@ -186,4 +188,6 @@ export interface VerifyAnalyzeResponse {
     reason: string;
     shouldRetry: boolean;
     scanCredits?: number;
+    /** Dollar cost the API charged for this analyze call (credits → USD). */
+    costUsd?: number;
 }

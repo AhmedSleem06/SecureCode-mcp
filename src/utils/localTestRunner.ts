@@ -30,7 +30,7 @@ import {
 } from './verificationSandbox';
 
 export interface LocalTestResult {
-    verdict: 'pass' | 'fail' | 'error' | 'timeout' | 'blocked' | 'sandbox-unavailable';
+    verdict: 'pass' | 'fail' | 'error' | 'timeout' | 'blocked' | 'sandbox-unavailable' | 'cancelled';
     output: string;
     exitCode: number;
     /** Name of the backend that executed the test (e.g. "docker", "deno"). Empty when blocked or unavailable. */

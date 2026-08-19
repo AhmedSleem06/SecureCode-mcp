@@ -337,6 +337,19 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 proven: result.verdict,
                 provenReason: result.reason,
             });
+
+            // User cancelled mid-verify: stop verifying further findings and
+            // mark the rest as SKIPPED so the report still includes them.
+            if (result.subVerdict === 'cancelled') {
+                for (const remaining of agentResult.findings.slice(agentResult.findings.indexOf(finding) + 1)) {
+                    provenFindings.push({
+                        ...remaining,
+                        proven: 'SKIPPED',
+                        provenReason: 'Scan cancelled by user — not verified.',
+                    });
+                }
+                break;
+            }
         } catch (err: any) {
             console.warn(`[Agent Scan] Verify loop failed: ${err.message}. Falling back to sandbox prove.`);
             try {

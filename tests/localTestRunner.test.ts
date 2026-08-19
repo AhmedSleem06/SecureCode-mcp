@@ -79,4 +79,21 @@ describe('runLocalTest', () => {
         expect(result.output).toContain('docs.docker.com');
         expect(result.output).toContain('deno.com');
     });
+
+    it('returns cancelled (not timeout) when the AbortSignal fires mid-test', async () => {
+        // A script that hangs long enough for us to abort it before the timeout.
+        const script = `setTimeout(() => {}, 60000);`;
+        const controller = new AbortController();
+        const resultP = runLocalTest(script, 'node', workspaceRoot, {
+            timeoutMs: 30000,
+            signal: controller.signal,
+        });
+        // Abort shortly after the test starts.
+        setTimeout(() => controller.abort(), 300);
+        const result = await resultP;
+        expect(result.verdict).toBe('cancelled');
+        expect(result.output).toContain('cancelled');
+        // Must NOT be reported as a timeout — that would trigger a retry.
+        expect(result.verdict).not.toBe('timeout');
+    }, 20000);
 });
