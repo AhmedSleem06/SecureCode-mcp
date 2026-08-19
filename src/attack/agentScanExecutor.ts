@@ -22,6 +22,7 @@ import { discoverEndpoints, formatEndpoints } from '../project-map/endpointDisco
 import { listImports, formatImports } from '../utils/listImports';
 import { listFiles, formatFileList } from '../utils/listFiles';
 import { getCallGraph } from '../project-map/callGraphExtractor';
+import { validateToolResponse } from './protocolValidator';
 import type {
     AgentScanAction,
     AgentScanToolRequest,
@@ -306,8 +307,12 @@ export async function executeAction(
                     action,
                     target,
                 };
-                const resp = await client.postJson<AgentScanToolResponse>('/agent/scan/tool', toolReq);
-                return truncate(resp.observation);
+                const respRaw = await client.postJson<AgentScanToolResponse>('/agent/scan/tool', toolReq);
+                const validation = validateToolResponse(respRaw);
+                if (!validation.ok) {
+                    return `Error running check_policy: API returned a malformed tool response: ${validation.error}`;
+                }
+                return truncate(validation.value.observation);
             } catch (e: any) {
                 return `Error running check_policy: ${e.message || e}`;
             }
@@ -358,6 +363,12 @@ export async function executeAction(
 
         case 'finish': {
             // finish is handled by the loop, not the executor
+            return '';
+        }
+
+        case 'system_event': {
+            // system_event is appended to the transcript by the loop, never
+            // executed. Return empty if somehow reached.
             return '';
         }
     }

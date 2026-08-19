@@ -3,16 +3,28 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { runLocalTest } from '../src/utils/localTestRunner';
+import { __UnsafeHostSandboxForTests, _setSandboxForTests } from '../src/utils/verificationSandbox';
+
+// These tests exercise the runner's PASS/FAIL parsing, cleanup, and blocked
+// paths. They use __UnsafeHostSandboxForTests to run scripts directly on the
+// host — this is acceptable because the scripts are benign and we're
+// testing the runner logic, not the sandbox boundary. Production code never
+// uses this backend.
+process.env.SECURECODE_TEST_MODE = '1';
 
 describe('runLocalTest', () => {
     let workspaceRoot: string;
+    let unsafeBackend: __UnsafeHostSandboxForTests;
 
     beforeEach(() => {
         workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-'));
         fs.mkdirSync(path.join(workspaceRoot, '.securecode'), { recursive: true });
+        unsafeBackend = new __UnsafeHostSandboxForTests();
+        _setSandboxForTests(unsafeBackend);
     });
 
     afterEach(() => {
+        _setSandboxForTests(null);
         try { fs.rmSync(workspaceRoot, { recursive: true, force: true }); } catch {}
     });
 
@@ -46,15 +58,23 @@ describe('runLocalTest', () => {
 
     it('returns timeout when script hangs', async () => {
         const script = `setTimeout(() => {}, 60000);`;
-        const result = await runLocalTest(script, 'node', workspaceRoot);
+        const result = await runLocalTest(script, 'node', workspaceRoot, { timeoutMs: 2000 });
         expect(result.verdict).toBe('timeout');
-    }, 40000);
+    }, 20000);
 
-    it('cleans up the test file after running', async () => {
+    it('returns blocked when the static safety check rejects the script', async () => {
+        // eval() is on the deny list.
+        const script = `eval("console.log('hi')");`;
+        const result = await runLocalTest(script, 'node', workspaceRoot);
+        expect(result.verdict).toBe('blocked');
+        expect(result.output).toContain('blocked');
+    });
+
+    it('returns sandbox-unavailable when no backend is configured', async () => {
+        _setSandboxForTests(null);
         const script = `console.log("PASS: done");`;
-        await runLocalTest(script, 'node', workspaceRoot);
-        const securecodeDir = path.join(workspaceRoot, '.securecode');
-        const files = fs.readdirSync(securecodeDir).filter(f => f.startsWith('verify-test-'));
-        expect(files.length).toBe(0);
+        const result = await runLocalTest(script, 'node', workspaceRoot);
+        expect(result.verdict).toBe('sandbox-unavailable');
+        expect(result.output).toContain('Install Docker');
     });
 });

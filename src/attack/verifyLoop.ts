@@ -3,6 +3,11 @@ import { runLocalTest, type LocalTestResult } from '../utils/localTestRunner';
 import { detectRuntime, computeRelativeImportPath, type ProjectRuntime } from '../utils/runtimeDetect';
 import type { ApiClient } from '../api/client';
 import type { VerifyGenerateResponse, VerifyAnalyzeResponse } from '../api/types';
+import {
+    VerifyBudgetTracker,
+    defaultVerifyBudget,
+    type VerifyBudget,
+} from './agentScanProtocol';
 
 export interface VerifyFinding {
     type: string;
@@ -22,6 +27,10 @@ export interface VerifyLoopOptions {
     language: string;
     client: ApiClient;
     onProgress?: (round: number, maxRounds: number, message: string) => void;
+    /** Aggregate budget tracker shared across all findings in one scan. */
+    budgetTracker?: VerifyBudgetTracker;
+    /** AbortSignal — aborts the loop and any running test. */
+    signal?: AbortSignal;
 }
 
 export interface VerifyLoopResult {
@@ -30,15 +39,25 @@ export interface VerifyLoopResult {
     roundsUsed: number;
     testScript: string;
     testOutput: string;
+    /** Why the loop stopped early, when verdict is INCONCLUSIVE due to budget. */
+    budgetExhaustedReason?: string;
+    /** Backend that executed the test (docker, deno, etc.). Empty when none ran. */
+    backend?: string;
 }
 
-const MAX_ROUNDS = 8;
+const PER_FINDING_MAX_ROUNDS = 8;
 
 export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoopResult> {
     const { finding, filePath, code, relatedFiles, workspaceRoot, language, client, onProgress } = opts;
+    const tracker = opts.budgetTracker;
     const previousErrors: string[] = [];
     let lastTestScript = '';
     let lastTestOutput = '';
+
+    // Per-finding round cap = min(per-finding default, budget's per-finding cap).
+    const maxRounds = tracker
+        ? Math.min(PER_FINDING_MAX_ROUNDS, tracker.budget.maxRoundsPerFinding)
+        : PER_FINDING_MAX_ROUNDS;
 
     const runtimeInfo = detectRuntime(workspaceRoot, filePath || undefined);
     const testFileDir = path.join(workspaceRoot, '.securecode');
@@ -56,8 +75,46 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         };
     }
 
-    for (let round = 1; round <= MAX_ROUNDS; round++) {
-        onProgress?.(round, MAX_ROUNDS, `Round ${round}: generating test...`);
+    // Pre-flight: if the aggregate budget is already exhausted at finding entry,
+    // skip without spending any LLM calls. The caller (toolAgentScan) should
+    // also check this before calling, but we double-enforce here.
+    if (tracker && !tracker.canAttemptFinding()) {
+        return {
+            verdict: 'INCONCLUSIVE',
+            reason: `Verification budget exhausted before this finding (findings=${tracker.findingsAttempted}/${tracker.budget.maxFindings}, llmCalls=${tracker.llmCallsUsed}/${tracker.budget.maxLlmCalls}, wallClock=${tracker.wallClockElapsedMs}ms/${tracker.budget.maxWallClockMs}ms).`,
+            roundsUsed: 0,
+            testScript: '',
+            testOutput: '',
+            budgetExhaustedReason: 'aggregate',
+        };
+    }
+    if (tracker) tracker.findingsAttempted += 1;
+
+    for (let round = 1; round <= maxRounds; round++) {
+        // Per-round budget check (need at least generate + analyze = 2 calls).
+        if (tracker && !tracker.canAttemptRound()) {
+            return {
+                verdict: 'INCONCLUSIVE',
+                reason: `Verification budget exhausted mid-finding (llmCalls=${tracker.llmCallsUsed}/${tracker.budget.maxLlmCalls}, wallClock=${tracker.wallClockElapsedMs}ms/${tracker.budget.maxWallClockMs}ms).`,
+                roundsUsed: round - 1,
+                testScript: lastTestScript,
+                testOutput: lastTestOutput,
+                budgetExhaustedReason: 'aggregate',
+            };
+        }
+        if (tracker) tracker.roundsUsed += 1;
+
+        if (opts.signal?.aborted) {
+            return {
+                verdict: 'INCONCLUSIVE',
+                reason: 'Cancelled by user.',
+                roundsUsed: round - 1,
+                testScript: lastTestScript,
+                testOutput: lastTestOutput,
+            };
+        }
+
+        onProgress?.(round, maxRounds, `Round ${round}: generating test...`);
 
         const genResp = await client.postJson<VerifyGenerateResponse>('/verify/generate', {
             code,
@@ -80,6 +137,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             relativeImportPath,
             depsInstalled: runtimeInfo.depsInstalled,
         });
+        if (tracker) tracker.recordLlmCall(0); // cost tracked server-side; count the call
 
         if (!genResp.canTest || !genResp.testScript) {
             return {
@@ -94,18 +152,69 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         lastTestScript = genResp.testScript;
         const runner = genResp.runner || runtimeInfo.runner || (language === 'typescript' ? 'tsx' : 'node');
 
-        onProgress?.(round, MAX_ROUNDS, `Round ${round}: running test...`);
+        onProgress?.(round, maxRounds, `Round ${round}: running test...`);
+
+        // Cap the local test timeout at the remaining verify-budget wall-clock.
+        const testTimeoutMs = tracker
+            ? Math.min(30_000, tracker.remainingWallClockMs())
+            : 30_000;
 
         const testResult: LocalTestResult = await runLocalTest(
             genResp.testScript,
             runner,
             workspaceRoot,
-            genResp.setupScript,
+            {
+                setupScript: genResp.setupScript || null,
+                timeoutMs: testTimeoutMs,
+                signal: opts.signal,
+            },
         );
 
         lastTestOutput = testResult.output;
 
-        onProgress?.(round, MAX_ROUNDS, `Round ${round}: analyzing result...`);
+        // Handle non-LLM-judged verdicts that should short-circuit the loop.
+        if (testResult.verdict === 'sandbox-unavailable') {
+            // No isolation backend on the user's machine. We must NOT run
+            // the script with host privileges — return INCONCLUSIVE so the
+            // finding keeps its non-PROVEN status but isn't buried as UNPROVEN.
+            return {
+                verdict: 'INCONCLUSIVE',
+                reason: testResult.output,
+                roundsUsed: round,
+                testScript: lastTestScript,
+                testOutput: lastTestOutput,
+                backend: testResult.backend || '',
+            };
+        }
+        if (testResult.verdict === 'blocked') {
+            // Static safety check rejected the script. Don't retry — the
+            // LLM would have to emit a less dangerous script, but anything
+            // that trips the blocklist is almost certainly trying to do
+            // something we don't want.
+            return {
+                verdict: 'INCONCLUSIVE',
+                reason: `Test script rejected by safety check: ${testResult.output}`,
+                roundsUsed: round,
+                testScript: lastTestScript,
+                testOutput: lastTestOutput,
+            };
+        }
+        if (testResult.verdict === 'timeout') {
+            // Treat as a retryable error — feed it back to the LLM.
+            previousErrors.push(`Round ${round}: timed out — ${testResult.output.slice(0, 500)}`);
+            if (round >= maxRounds) {
+                return {
+                    verdict: 'INCONCLUSIVE',
+                    reason: `Test timed out after ${round} round(s).`,
+                    roundsUsed: round,
+                    testScript: lastTestScript,
+                    testOutput: lastTestOutput,
+                };
+            }
+            continue;
+        }
+
+        onProgress?.(round, maxRounds, `Round ${round}: analyzing result...`);
 
         const analyzeResp = await client.postJson<VerifyAnalyzeResponse>('/verify/analyze', {
             vulnerabilityType: finding.type,
@@ -117,22 +226,25 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             stderr: '',
             exitCode: testResult.exitCode,
             round,
-            maxRounds: MAX_ROUNDS,
+            maxRounds,
         });
+        if (tracker) tracker.recordLlmCall(0);
 
         if (analyzeResp.verdict === 'PROVEN') {
-            return { verdict: 'PROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput };
+            return { verdict: 'PROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '' };
         }
         if (analyzeResp.verdict === 'UNPROVEN') {
-            return { verdict: 'UNPROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput };
+            return { verdict: 'UNPROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '' };
         }
 
-        if (!analyzeResp.shouldRetry || round >= MAX_ROUNDS) {
-            return { verdict: 'INCONCLUSIVE', reason: analyzeResp.reason || `Could not verify after ${round} round(s).`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput };
+        if (!analyzeResp.shouldRetry || round >= maxRounds) {
+            return { verdict: 'INCONCLUSIVE', reason: analyzeResp.reason || `Could not verify after ${round} round(s).`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '' };
         }
 
         previousErrors.push(`Round ${round}: ${testResult.verdict} — ${testResult.output.slice(0, 500)}`);
     }
 
-    return { verdict: 'INCONCLUSIVE', reason: `Exhausted all ${MAX_ROUNDS} rounds.`, roundsUsed: MAX_ROUNDS, testScript: lastTestScript, testOutput: lastTestOutput };
+    return { verdict: 'INCONCLUSIVE', reason: `Exhausted all ${maxRounds} rounds.`, roundsUsed: maxRounds, testScript: lastTestScript, testOutput: lastTestOutput };
 }
+
+export { VerifyBudgetTracker, defaultVerifyBudget, type VerifyBudget };

@@ -1,134 +1,112 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import { execFileSync } from 'child_process';
+/**
+ * Local test runner — drives execution of LLM-generated verification tests
+ * through the verification sandbox.
+ *
+ * SECURITY MODEL (post-rewrite):
+ *   1. `checkTestSafety()` runs first as defense-in-depth. If it blocks,
+ *      we return early without spawning anything.
+ *   2. `detectSandbox()` returns the best available real isolation backend
+ *      (Docker preferred, Deno as a JS/TS-only fallback). If neither is
+ *      available, this runner returns `sandbox-unavailable` — it does NOT
+ *      fall back to executing the script with host privileges.
+ *   3. The sandbox backend executes the script with no network, a
+ *      read-only workspace, a tmpfs /tmp, capped CPU/memory/pids, and a
+ *      scrubbed env (only NODE_ENV and PATH). The verdict is parsed from
+ *      stdout/stderr against `/PASS:/` and `/FAIL:/` markers.
+ *
+ * The previous implementation spread the full `process.env` into the
+ * child and ran via `execFileSync` with no isolation. That allowed
+ * prompt-injected content in scanned source to ride into the
+ * verify-generate prompt and produce a test that exfiltrated secrets.
+ */
+
 import { checkTestSafety } from './testSafety';
+import { createEffectMock } from './effectMock';
+import {
+    detectSandbox,
+    type SandboxBackend,
+    type SandboxExecuteOptions,
+    type SandboxExecuteResult,
+} from './verificationSandbox';
 
 export interface LocalTestResult {
-    verdict: 'pass' | 'fail' | 'error' | 'timeout';
+    verdict: 'pass' | 'fail' | 'error' | 'timeout' | 'blocked' | 'sandbox-unavailable';
     output: string;
     exitCode: number;
+    /** Name of the backend that executed the test (e.g. "docker", "deno"). Empty when blocked or unavailable. */
+    backend?: string;
 }
 
-const PASS_PATTERN = /^PASS:\s*(.+)$/m;
-const FAIL_PATTERN = /^FAIL:\s*(.+)$/m;
-const TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 export async function runLocalTest(
     script: string,
     runner: string,
     workspaceRoot: string,
-    setupScript?: string | null,
+    options?: {
+        setupScript?: string | null;
+        timeoutMs?: number;
+        signal?: AbortSignal;
+        /** Test-only: inject a sandbox backend. Production code leaves this unset. */
+        sandboxBackend?: SandboxBackend;
+    },
 ): Promise<LocalTestResult> {
+    // 1. Defense-in-depth static check.
     const safety = checkTestSafety(script, workspaceRoot);
     if (!safety.allowed) {
-        return { verdict: 'error', output: `Test script blocked: ${safety.reason}`, exitCode: -1 };
+        return { verdict: 'blocked', output: `Test script blocked: ${safety.reason}`, exitCode: -1 };
     }
 
-    const testDir = path.join(workspaceRoot, '.securecode');
-    if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
-
-    const isPython = runner === 'python' || runner === 'python3';
-    const isTsRunner = runner === 'tsx' || runner === 'ts' || runner === 'bun' || runner === 'deno' || runner === 'pnpm-tsx' || runner === 'yarn-tsx';
-    const ext = isPython ? '.py' : (isTsRunner ? '.test.ts' : '.test.js');
-    const testFile = path.join(testDir, `verify-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
-
-    const setupFile = setupScript
-        ? path.join(testDir, `verify-setup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`)
-        : null;
-
-    try {
-        if (setupFile && setupScript) {
-            const setupSafety = checkTestSafety(setupScript, workspaceRoot);
-            if (!setupSafety.allowed) {
-                return { verdict: 'error', output: `Setup script blocked: ${setupSafety.reason}`, exitCode: -1 };
-            }
-            fs.writeFileSync(setupFile, setupScript, 'utf8');
-            try {
-                const isWindows = process.platform === 'win32';
-                let sRunnerBin: string;
-                let sRunnerArgs: string[];
-                if (runner === 'tsx') { sRunnerBin = 'npx'; sRunnerArgs = ['tsx', setupFile]; }
-                else if (runner === 'bun' && isWindows) { sRunnerBin = 'npx'; sRunnerArgs = ['bun', setupFile]; }
-                else { sRunnerBin = runner; sRunnerArgs = [setupFile]; }
-                execFileSync(sRunnerBin, sRunnerArgs, {
-                    cwd: workspaceRoot,
-                    timeout: 10_000,
-                    encoding: 'utf8',
-                    stdio: ['pipe', 'pipe', 'pipe'],
-                    env: { ...process.env, NODE_ENV: 'test' },
-                    shell: isWindows,
-                });
-            } catch (err: any) {
-                return { verdict: 'error', output: `Setup script failed: ${err.stderr || err.stdout || err.message}`, exitCode: -1 };
-            }
+    if (options?.setupScript) {
+        const setupSafety = checkTestSafety(options.setupScript, workspaceRoot);
+        if (!setupSafety.allowed) {
+            return { verdict: 'blocked', output: `Setup script blocked: ${setupSafety.reason}`, exitCode: -1 };
         }
-
-        fs.writeFileSync(testFile, script, 'utf8');
-
-        let stdout = '';
-        let stderr = '';
-        let exitCode = 0;
-        let timedOut = false;
-
-        try {
-            const isWindows = process.platform === 'win32';
-            let runnerBin: string;
-            let runnerArgs: string[];
-            if (runner === 'tsx') {
-                runnerBin = 'npx';
-                runnerArgs = ['tsx', testFile];
-            } else if (runner === 'pnpm-tsx') {
-                runnerBin = 'pnpm';
-                runnerArgs = ['exec', 'tsx', testFile];
-            } else if (runner === 'yarn-tsx') {
-                runnerBin = 'yarn';
-                runnerArgs = ['tsx', testFile];
-            } else if (runner === 'deno') {
-                runnerBin = 'deno';
-                runnerArgs = ['run', '--allow-read', '--allow-env', testFile];
-            } else if (runner === 'bun' && isWindows) {
-                runnerBin = 'npx';
-                runnerArgs = ['bun', testFile];
-            } else {
-                runnerBin = runner;
-                runnerArgs = [testFile];
-            }
-            stdout = execFileSync(runnerBin, runnerArgs, {
-                cwd: workspaceRoot,
-                timeout: TIMEOUT_MS,
-                encoding: 'utf8',
-                stdio: ['pipe', 'pipe', 'pipe'],
-                env: { ...process.env, NODE_ENV: 'test' },
-                shell: isWindows,
-            });
-        } catch (err: any) {
-            stdout = err.stdout || '';
-            stderr = err.stderr || '';
-            exitCode = err.status ?? 1;
-            if (err.signal === 'SIGTERM') timedOut = true;
-        }
-
-        const output = (stdout + '\n' + stderr).trim();
-
-        if (timedOut) {
-            return { verdict: 'timeout', output: 'Test timed out after 30s', exitCode: -1 };
-        }
-
-        if (PASS_PATTERN.test(output)) {
-            return { verdict: 'pass', output, exitCode };
-        }
-        if (FAIL_PATTERN.test(output)) {
-            return { verdict: 'fail', output, exitCode };
-        }
-
-        if (exitCode === 0) {
-            return { verdict: 'error', output: output + '\nTest exited 0 but did not print PASS: or FAIL:', exitCode };
-        }
-        return { verdict: 'error', output, exitCode };
-    } catch (err: any) {
-        return { verdict: 'error', output: err.message || String(err), exitCode: -1 };
-    } finally {
-        try { fs.unlinkSync(testFile); } catch {}
-        if (setupFile) { try { fs.unlinkSync(setupFile); } catch {} }
     }
+
+    // 2. Resolve the sandbox backend. Production: detectSandbox(). Tests: inject.
+    const backend = options?.sandboxBackend ?? detectSandbox();
+    if (!backend) {
+        return {
+            verdict: 'sandbox-unavailable',
+            output: 'No verification sandbox backend available. Install Docker (preferred) or Deno to enable local exploit verification. Returning INCONCLUSIVE for this finding.',
+            exitCode: -1,
+        };
+    }
+
+    // 2b. Auto-create effect mock for JS/TS projects (harmless if unused).
+    //     Must happen before the sandbox mounts the workspace.
+    if (runner !== 'python' && runner !== 'python3') {
+        try { createEffectMock(workspaceRoot); } catch {}
+    }
+
+    // 3. Execute inside the sandbox.
+    const execOpts: SandboxExecuteOptions = {
+        script,
+        runner,
+        workspaceRoot,
+        setupScript: options?.setupScript,
+        timeoutMs: options?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        signal: options?.signal,
+    };
+
+    const result: SandboxExecuteResult = await backend.execute(execOpts);
+
+    // Preserve the "exited 0 but no PASS/FAIL marker" message — it's a
+    // useful signal that the test ran but didn't follow the protocol.
+    if (result.verdict === 'error' && result.exitCode === 0) {
+        return {
+            verdict: 'error',
+            output: `${result.output}\nTest exited 0 but did not print PASS: or FAIL:`,
+            exitCode: result.exitCode,
+            backend: result.backend,
+        };
+    }
+
+    return {
+        verdict: result.verdict,
+        output: result.output,
+        exitCode: result.exitCode,
+        backend: result.backend,
+    };
 }

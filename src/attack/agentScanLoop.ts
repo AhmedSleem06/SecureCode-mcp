@@ -21,6 +21,11 @@ import { ApiClient } from '../api/client';
 import type { ServerContext } from '../mcp/types';
 import { executeAction } from './agentScanExecutor';
 import {
+    validateStartResponse,
+    validateStepResponse,
+    type ValidationResult,
+} from './protocolValidator';
+import {
     AGENT_SCAN_DEFAULTS,
     type AgentScanAction,
     type AgentScanBudget,
@@ -58,7 +63,19 @@ export async function runAgentScan(
     let costSpentUsd = 0;
 
     try {
-        const startResp = await client.postJson<AgentScanStartResponse>('/agent/scan/start', {}, options.signal);
+        const startRespRaw = await client.postJson<AgentScanStartResponse>('/agent/scan/start', {}, options.signal);
+        const startValidation = validateStartResponse(startRespRaw);
+        if (!startValidation.ok) {
+            return {
+                status: 'spawn_failed',
+                findings: [],
+                transcript: [],
+                stepsUsed: 0,
+                costSpentUsd: 0,
+                error: `API returned an invalid start response: ${startValidation.error}`,
+            };
+        }
+        const startResp = startValidation.value;
 
         const transcript: AgentScanTranscriptStep[] = [];
         const readFiles = new Set<string>();
@@ -130,7 +147,40 @@ export async function runAgentScan(
 
             let stepResp: AgentScanStepResponse;
             try {
-                stepResp = await client.postJson<AgentStepResponse>('/agent/scan/step', stepReq, options.signal);
+                const stepRespRaw = await client.postJson<AgentStepResponse>('/agent/scan/step', stepReq, options.signal);
+                const stepValidation = validateStepResponse(stepRespRaw);
+                if (!stepValidation.ok) {
+                    // Wire-level malformed response. Don't execute the
+                    // potentially-dangerous `next` action; treat it as a
+                    // controlled error so the agent can retry against a
+                    // well-formed response on the next call.
+                    const vErr = stepValidation.error;
+                    console.warn(`[Agent Scan Loop] Step ${stepsTaken + 1} returned a malformed response: ${vErr}`);
+                    consecutiveErrors++;
+                    stepsTaken++;
+                    budget.stepsRemaining--;
+                    const errMsg = `API returned a malformed step response: ${vErr}`;
+                    transcript.push({
+                        action: {
+                            type: 'system_event',
+                            eventType: 'error',
+                            message: errMsg,
+                        } as any,
+                        observation: errMsg,
+                    });
+                    if (consecutiveErrors >= 3 || budget.stepsRemaining <= 0) {
+                        return {
+                            status: 'capped',
+                            findings: [],
+                            transcript,
+                            stepsUsed: stepsTaken,
+                            costSpentUsd,
+                            summary: `Step budget exhausted after ${consecutiveErrors} consecutive malformed API responses. Last error: ${vErr}`,
+                        };
+                    }
+                    continue;
+                }
+                stepResp = stepValidation.value;
             } catch (stepErr: any) {
                 const errMsg = stepErr?.message || String(stepErr);
                 const apiCode = (stepErr as any)?.apiCode || '';
@@ -162,22 +212,23 @@ export async function runAgentScan(
                 }
 
                 // The API rejected the action (malformed, missing field, etc).
-                // Add the error to the transcript so the LLM sees it on the
-                // next step and can correct itself. Then retry — don't waste
-                // the step silently.
+                // Add a first-class system_event to the transcript so the LLM
+                // sees the error on the next step and can correct itself.
+                // Previously this piggybacked on `read_file('__ERROR__')`,
+                // which the executor would have tried to open and failed.
                 console.warn(`[Agent Scan Loop] Step ${stepsTaken + 1} error: ${errMsg}`);
                 consecutiveErrors++;
                 stepsTaken++;
                 budget.stepsRemaining--;
 
-                // Push the error into the transcript so the LLM sees it
+                const errorMsg = `ERROR: Your previous action was rejected: ${errMsg}. Please try a DIFFERENT action with ALL required fields. Set unused fields to null.`;
                 transcript.push({
                     action: {
-                        type: 'read_file',
-                        path: '__ERROR__',
-                        rationale: 'Previous action was invalid',
+                        type: 'system_event',
+                        eventType: 'error',
+                        message: errorMsg,
                     } as any,
-                    observation: `ERROR: Your previous action was rejected: ${errMsg}. Please try a DIFFERENT action with ALL required fields. Set unused fields to null.`,
+                    observation: errorMsg,
                 });
 
                 if (consecutiveErrors >= 3 || budget.stepsRemaining <= 0) {
@@ -194,6 +245,29 @@ export async function runAgentScan(
             }
             costSpentUsd += stepResp.costUsd || 0;
             consecutiveErrors = 0;
+
+            // System event (e.g., critique from the senior reviewer) — append
+            // to the transcript WITHOUT executing it, then continue the loop
+            // so the next step's prompt sees the event and re-plans. This
+            // replaces the previous `read_file('__CRITIQUE__')` pattern that
+            // lost the critique content over the wire.
+            if (stepResp.systemEvent) {
+                const ev = stepResp.systemEvent;
+                transcript.push({
+                    action: ev,
+                    observation: ev.message,
+                });
+                stepsTaken++;
+                budget.stepsRemaining = stepResp.stepsRemaining;
+                if (options.onProgress) {
+                    options.onProgress(stepsTaken, AGENT_SCAN_DEFAULTS.maxSteps, `Step ${stepsTaken}: system_event(${ev.eventType})`);
+                }
+                // Re-loop: ask the API for the next action now that the
+                // critique is in the transcript. The agent will see the
+                // critique in the next step's prompt and either re-investigate
+                // or call finish again with an updated selfCritique.
+                continue;
+            }
 
             // Null next = done (cost capped or steps exhausted)
             if (!stepResp.next) {
@@ -311,6 +385,10 @@ export async function runAgentScan(
                 consecutiveBlockedReads = 0;
             }
 
+            // The agent needs both the action it tried and the block/observation
+            // message — the original {action, observation} pair carries both.
+            // We don't need a separate system_event for blocked (unlike
+            // critique, the blocked case is tied to an action the agent took).
             transcript.push({ action, observation });
         }
     } catch (err: any) {
@@ -338,6 +416,7 @@ function describeAction(action: AgentScanAction): string {
         case 'list_files': return `list_files(${(action as any).path || 'root'})`;
         case 'call_graph': return `call_graph(${(action as any).filePath})`;
         case 'finish': return 'finish';
+        case 'system_event': return `system_event(${(action as any).eventType})`;
     }
 }
 

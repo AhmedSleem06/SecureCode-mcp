@@ -180,4 +180,73 @@ describe('runAgentScan — termination', () => {
         expect(result.transcript[1].action.type).toBe('search_code');
         expect(result.transcript[1].observation).toBe('search results');
     });
+
+    it('appends systemEvent to transcript without executing it (critique delivery fix)', async () => {
+        // The API rejected the agent's finish with a critique. The API runs
+        // the critique INSIDE the step that sees the finish action — so the
+        // systemEvent comes back in the SAME response (with next: null). The
+        // MCP loop must append the critique as a system_event (NOT try to
+        // execute a fake read_file('__CRITIQUE__')), then continue the loop.
+        // The next step's prompt will see the critique in the transcript.
+        mockPostJson([
+            { runId: 'run-1', budget: { stepsRemaining: 20, costSpentUsd: 0, costCapUsd: 0.40 }, scanCredits: 95, refundId: 'r1' },
+            // Step 1: API saw the agent's finish, ran the critique LLM, and
+            // rejected it. Returns next: null + systemEvent (the MCP must
+            // append the critique and re-loop, not treat null as "done").
+            {
+                next: null,
+                costUsd: 0.02, tokens: 200, degraded: false, costCapped: false, stepsRemaining: 19,
+                systemEvent: {
+                    type: 'system_event',
+                    eventType: 'critique',
+                    message: 'CRITIQUE: finding 0 is a false positive — remove it.',
+                    issues: [{ findingIndex: 0, reason: 'not vulnerable', severity: 'high' }],
+                },
+            },
+            // Step 2: agent re-plans (sees the critique in the transcript)
+            // and calls finish with no findings.
+            {
+                next: { type: 'finish', findings: [], summary: 'no findings after critique' },
+                costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 18,
+            },
+        ]);
+        (executeAction as any).mockResolvedValue('');
+
+        const result = await runAgentScan(ctx, target, {});
+
+        expect(result.status).toBe('completed');
+        expect(result.summary).toBe('no findings after critique');
+        // The transcript contains the critique system_event (the finish
+        // actions are not pushed — they return immediately).
+        expect(result.transcript.some(t => t.action.type === 'system_event' && (t.action as any).eventType === 'critique')).toBe(true);
+        // The critique message must be preserved verbatim in the observation.
+        const critiqueStep = result.transcript.find(t => t.action.type === 'system_event');
+        expect(critiqueStep?.observation).toContain('CRITIQUE: finding 0 is a false positive');
+        // The agent must NOT have called executeAction on the system_event.
+        // (executeAction is only called for read_file/search_code/etc.)
+        expect(executeAction).not.toHaveBeenCalled();
+    });
+
+    it('emits a system_event on API rejection instead of read_file(__ERROR__)', async () => {
+        const mockFn = vi.fn();
+        // First call: start succeeds.
+        mockFn.mockResolvedValueOnce({ runId: 'run-1', budget: { stepsRemaining: 20, costSpentUsd: 0, costCapUsd: 0.40 }, scanCredits: 95, refundId: 'r1' });
+        // Second call: /step throws (API rejected).
+        mockFn.mockRejectedValueOnce(new Error('actionType is required'));
+        // Third call: agent retries successfully with finish.
+        mockFn.mockResolvedValueOnce({
+            next: { type: 'finish', findings: [], summary: 'done' },
+            costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 18,
+        });
+        (ApiClient as any).mockImplementation(() => ({ postJson: mockFn }));
+
+        const result = await runAgentScan(ctx, target, {});
+
+        expect(result.status).toBe('completed');
+        // The error must appear as a system_event, NOT as read_file('__ERROR__').
+        const errorStep = result.transcript.find(t => t.action.type === 'system_event' && (t.action as any).eventType === 'error');
+        expect(errorStep).toBeDefined();
+        expect(errorStep!.observation).toContain('actionType is required');
+        expect(result.transcript.some(t => t.action.type === 'read_file' && (t.action as any).path === '__ERROR__')).toBe(false);
+    });
 });

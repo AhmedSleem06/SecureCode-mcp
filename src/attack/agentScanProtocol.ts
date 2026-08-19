@@ -116,6 +116,35 @@ export interface AgentScanFinishAction {
     selfCritique?: string | null;
 }
 
+// ── System events ───────────────────────────────────────────────────────────
+//
+// First-class protocol events for things that are NOT tool calls:
+//   - critique: the senior-reviewer LLM rejected the agent's finish; the
+//     agent must address the issues before calling finish again.
+//   - error: the API rejected the agent's previous action; the agent must
+//     try a different action with all required fields.
+//   - blocked: the MCP loop blocked the action (read cap, dedup cap);
+//     the agent must use a different tool.
+//
+// These were previously piggybacked on `read_file` via magic paths like
+// `__CRITIQUE__` and `__ERROR__` — a design gap that caused the critique
+// delivery bug (the API mutated its local transcript copy but never sent
+// the critique content over the wire). A real action type fixes the bug
+// and prevents the next synthetic event from reintroducing the same class.
+
+export type AgentScanSystemEventType = 'critique' | 'error' | 'blocked' | 'budget';
+
+export interface AgentScanSystemEventAction {
+    type: 'system_event';
+    eventType: AgentScanSystemEventType;
+    /** Human-readable event payload — shown to the agent in the transcript. */
+    message: string;
+    /** Optional structured issues (used by critique). */
+    issues?: Array<{ findingIndex: number; reason: string; severity: 'high' | 'medium' | 'low' }>;
+    /** Optional missed concerns (used by critique). */
+    missedConcerns?: string | null;
+}
+
 export type AgentScanAction =
     | AgentScanReadFileAction
     | AgentScanSearchCodeAction
@@ -127,7 +156,8 @@ export type AgentScanAction =
     | AgentScanListImportsAction
     | AgentScanListFilesAction
     | AgentScanCallGraphAction
-    | AgentScanFinishAction;
+    | AgentScanFinishAction
+    | AgentScanSystemEventAction;
 
 export type AgentScanActionType =
     | 'read_file'
@@ -140,7 +170,8 @@ export type AgentScanActionType =
     | 'list_imports'
     | 'list_files'
     | 'call_graph'
-    | 'finish';
+    | 'finish'
+    | 'system_event';
 
 export type AttackType =
     | 'sql_injection'
@@ -201,6 +232,33 @@ export interface AgentScanStepResponse {
     degraded: boolean;
     costCapped: boolean;
     stepsRemaining: number;
+    /**
+     * Optional system event the MCP loop must append to its transcript
+     * BEFORE requesting the next step. Used by the critique loop: when
+     * the API runs the senior-reviewer LLM and it rejects the finish, the
+     * API returns `next: <original finish action>` is NOT used — instead
+     * the API returns `next: null` and `systemEvent: { eventType: 'critique',
+     * message: ..., issues: [...] }`. The MCP loop appends the event to
+     * its transcript as a `system_event` step (without executing it) and
+     * immediately requests the next step.
+     *
+     * This replaces the previous pattern of mutating `req.transcript` on
+     * the API side (which had no effect on the MCP's transcript, since the
+     * request body is a deserialized copy) and returning a fake
+     * `read_file('__CRITIQUE__')` action (which the MCP would try to
+     * execute and get ENOENT).
+     */
+    systemEvent?: AgentScanSystemEventAction;
+    /**
+     * Per-step LLM call breakdown — decision, retry, critique counts.
+     * Lets the MCP and user see when a step used multiple calls.
+     * Mirror: api/src/attacker/agentScanProtocol.ts.
+     */
+    callBreakdown?: {
+        decision: number;
+        retry: number;
+        critique: number;
+    };
 }
 
 export interface AgentScanToolRequest {
@@ -230,4 +288,85 @@ export interface AgentScanResult {
     stepsUsed: number;
     costSpentUsd: number;
     error?: string;
+}
+
+// ── Verify budget ───────────────────────────────────────────────────────────
+//
+// Phase 2 (verification) runs after the agent loop and can spawn up to
+// MAX_ROUNDS × N findings × 2 LLM calls per scan with no aggregate cap.
+// This budget enforces hard ceilings across the whole scan so a single
+// scan cannot run unbounded verification rounds. The MCP loop owns it
+// (server-side credit draws are a separate, softer cap that returns 402
+// when credits exhaust — not a deliberate ceiling).
+
+export interface VerifyBudget {
+    /** Max number of findings to even attempt to verify. */
+    maxFindings: number;
+    /** Max rounds per single finding. */
+    maxRoundsPerFinding: number;
+    /** Aggregate LLM-call cap across all findings (generate + analyze). */
+    maxLlmCalls: number;
+    /** Aggregate wall-clock cap across all findings, in ms. */
+    maxWallClockMs: number;
+    /** Aggregate cost cap across all findings, in USD. */
+    costCapUsd: number;
+}
+
+export const VERIFY_DEFAULTS = {
+    maxFindings: 10,
+    maxRoundsPerFinding: 8,
+    maxLlmCalls: 40,         // 5 findings × 8 rounds × 2 calls = 80 max; default to ~half
+    maxWallClockMs: 5 * 60_000, // 5 minutes
+    costCapUsd: 0.50,
+} as const;
+
+export function defaultVerifyBudget(overrides?: Partial<VerifyBudget>): VerifyBudget {
+    return {
+        maxFindings: overrides?.maxFindings ?? VERIFY_DEFAULTS.maxFindings,
+        maxRoundsPerFinding: overrides?.maxRoundsPerFinding ?? VERIFY_DEFAULTS.maxRoundsPerFinding,
+        maxLlmCalls: overrides?.maxLlmCalls ?? VERIFY_DEFAULTS.maxLlmCalls,
+        maxWallClockMs: overrides?.maxWallClockMs ?? VERIFY_DEFAULTS.maxWallClockMs,
+        costCapUsd: overrides?.costCapUsd ?? VERIFY_DEFAULTS.costCapUsd,
+    };
+}
+
+/** Mutable tracker used by the verify loop to enforce a VerifyBudget. */
+export class VerifyBudgetTracker {
+    findingsAttempted = 0;
+    roundsUsed = 0;
+    llmCallsUsed = 0;
+    costSpentUsd = 0;
+    readonly startedAtMs: number = Date.now();
+    readonly budget: VerifyBudget;
+
+    constructor(budget: VerifyBudget) {
+        this.budget = budget;
+    }
+
+    get wallClockElapsedMs(): number { return Date.now() - this.startedAtMs; }
+
+    canAttemptFinding(): boolean {
+        if (this.findingsAttempted >= this.budget.maxFindings) return false;
+        if (this.llmCallsUsed >= this.budget.maxLlmCalls) return false;
+        if (this.wallClockElapsedMs >= this.budget.maxWallClockMs) return false;
+        if (this.costSpentUsd >= this.budget.costCapUsd) return false;
+        return true;
+    }
+
+    canAttemptRound(): boolean {
+        if (this.llmCallsUsed + 2 > this.budget.maxLlmCalls) return false; // need generate + analyze
+        if (this.wallClockElapsedMs >= this.budget.maxWallClockMs) return false;
+        if (this.costSpentUsd >= this.budget.costCapUsd) return false;
+        return true;
+    }
+
+    /** Remaining wall-clock in ms; floored at 1000 to avoid zero-timeout spawns. */
+    remainingWallClockMs(): number {
+        return Math.max(1000, this.budget.maxWallClockMs - this.wallClockElapsedMs);
+    }
+
+    recordLlmCall(costUsd: number): void {
+        this.llmCallsUsed += 1;
+        this.costSpentUsd += costUsd;
+    }
 }
