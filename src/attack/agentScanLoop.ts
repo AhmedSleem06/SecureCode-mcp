@@ -374,6 +374,15 @@ export async function runAgentScan(
                     toolKey = `find_references:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
                 } else if (action.type === 'find_tests') {
                     toolKey = `find_tests:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
+                } else if (action.type === 'run_tests') {
+                    const a = action as any;
+                    if (a.mode === 'existing') {
+                        toolKey = `run_tests:existing:${(a.testFiles || []).join(',')}:${a.testPattern || ''}:${a.packageManager || ''}`;
+                    } else {
+                        const crypto = require('crypto');
+                        const scriptHash = a.script ? crypto.createHash('sha256').update(a.script).digest('hex').substring(0, 16) : '';
+                        toolKey = `run_tests:generated:${a.runner || ''}:${scriptHash}`;
+                    }
                 }
 
                 if (toolKey) {
@@ -450,6 +459,7 @@ function describeAction(action: AgentScanAction): string {
         case 'find_definition': return `find_definition(${(action as any).symbol})`;
         case 'find_references': return `find_references(${(action as any).symbol})`;
         case 'find_tests': return `find_tests(${(action as any).filePath}${(action as any).symbol ? ':' + (action as any).symbol : ''})`;
+        case 'run_tests': return `run_tests(${(action as any).mode}${(action as any).testFiles?.length ? ':' + (action as any).testFiles.length + ' files' : ''})`;
         case 'finish': return 'finish';
         case 'system_event': return `system_event(${(action as any).eventType})`;
     }

@@ -42,10 +42,16 @@ import { spawn, spawnSync, type ChildProcess } from 'child_process';
 // ── Public interface ────────────────────────────────────────────────────────
 
 export interface SandboxExecuteOptions {
-    /** Test script source code. */
-    script: string;
-    /** Runner: 'node' | 'tsx' | 'bun' | 'python' | 'python3' | 'deno' | ... */
-    runner: string;
+    /** Execution mode: 'script' (default) runs a script via runner; 'command' runs a validated executable+args. */
+    mode?: 'script' | 'command';
+    /** Test script source code (required for mode='script'). */
+    script?: string;
+    /** Runner: 'node' | 'tsx' | 'bun' | 'python' | 'python3' | 'deno' | ... (required for mode='script'). */
+    runner?: string;
+    /** Validated executable (required for mode='command'). Passed as argv[0] — never via shell. */
+    executable?: string;
+    /** Validated args array (required for mode='command'). Each arg passed as a separate argv element. */
+    args?: string[];
     /** Workspace root — mounted read-only into the sandbox. */
     workspaceRoot: string;
     /** Optional setup script run before the test (same sandbox). */
@@ -81,6 +87,47 @@ function parseVerdict(output: string, exitCode: number, timedOut: boolean): Sand
     if (FAIL_PATTERN.test(output)) return 'fail';
     if (exitCode === 0) return 'error'; // ran but didn't print a marker
     return 'error';
+}
+
+/**
+ * Command-mode verdict: no PASS:/FAIL: markers. Exit code 0 = pass, nonzero = fail.
+ * This is the standard semantics for `npm test`, `pytest`, etc.
+ */
+function parseVerdictCommandMode(exitCode: number, timedOut: boolean): SandboxExecuteResult['verdict'] {
+    if (timedOut) return 'timeout';
+    return exitCode === 0 ? 'pass' : 'fail';
+}
+
+/**
+ * Pick the Docker image for a command-mode executable. Returns null if no
+ * suitable image is configured — the caller returns sandbox-unavailable.
+ */
+function pickImageForCommand(executable: string): { image: string | null; reason?: string } {
+    if (executable === 'npm' || executable === 'npx') {
+        return { image: process.env.SECURECODE_SANDBOX_IMAGE || 'node:20-alpine' };
+    }
+    if (executable === 'pnpm') {
+        const img = process.env.SECURECODE_SANDBOX_PNPM_IMAGE;
+        return img
+            ? { image: img }
+            : { image: null, reason: 'pnpm is not available in the default sandbox image. Set SECURECODE_SANDBOX_PNPM_IMAGE to a pnpm-enabled image to enable pnpm test execution.' };
+    }
+    if (executable === 'yarn') {
+        const img = process.env.SECURECODE_SANDBOX_YARN_IMAGE;
+        return img
+            ? { image: img }
+            : { image: null, reason: 'yarn is not available in the default sandbox image. Set SECURECODE_SANDBOX_YARN_IMAGE to a yarn-enabled image to enable yarn test execution.' };
+    }
+    if (executable === 'bun') {
+        const img = process.env.SECURECODE_SANDBOX_BUN_IMAGE;
+        return img
+            ? { image: img }
+            : { image: null, reason: 'bun is not available in the default sandbox image. Set SECURECODE_SANDBOX_BUN_IMAGE to a bun-enabled image to enable bun test execution.' };
+    }
+    if (executable === 'pytest') {
+        return { image: process.env.SECURECODE_SANDBOX_PY_IMAGE || 'python:3.11-slim' };
+    }
+    return { image: null, reason: `No sandbox image configured for executable: ${executable}` };
 }
 
 // ── Probe caching ───────────────────────────────────────────────────────────
@@ -158,15 +205,65 @@ class DockerSandbox implements SandboxBackend {
     }
 
     async execute(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
+        // ── Command mode: run a validated executable + args in the sandbox ──
+        if (opts.mode === 'command') {
+            return this.executeCommand(opts);
+        }
+        // ── Script mode (default): write script to temp file and run via runner ──
+        return this.executeScript(opts);
+    }
+
+    private async executeCommand(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
+        const executable = opts.executable;
+        const cmdArgs = opts.args || [];
+        if (!executable) {
+            return { verdict: 'error', output: 'Command mode requires "executable"', exitCode: -1, backend: this.name };
+        }
+
+        const imageInfo = pickImageForCommand(executable);
+        if (!imageInfo.image) {
+            return {
+                verdict: 'sandbox-unavailable',
+                output: imageInfo.reason || `No sandbox image for ${executable}`,
+                exitCode: -1,
+                backend: this.name,
+            };
+        }
+
+        const dockerArgs: string[] = [
+            'run', '--rm', '-i',
+            '--network=none',
+            '--read-only',
+            '--tmpfs', '/tmp:rw,noexec,nosuid,size=128m,uid=1000,gid=1000',
+            '--cpus=1',
+            '--memory=512m',
+            '--memory-swap=512m',
+            '--pids-limit=128',
+            '--user', '1000:1000',
+            '--workdir', '/workspace',
+            '--env', 'NODE_ENV=test',
+            '--env', 'CI=1',
+            '--env', 'HOME=/tmp',
+            '--env', 'npm_config_cache=/tmp/npm-cache',
+            '-v', `${opts.workspaceRoot}:/workspace:ro`,
+            imageInfo.image,
+            executable,
+            ...cmdArgs,
+        ];
+
+        return await runSandboxedProcess('docker', dockerArgs, opts, this.name);
+    }
+
+    private async executeScript(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
         const sandboxDir = ensureSandboxDir(opts.workspaceRoot);
-        const ext = fileExtFor(opts.runner);
+        const ext = fileExtFor(opts.runner || 'node');
         const testFile = path.join(sandboxDir, `verify-test-${uniqueSuffix()}${ext}`);
         const setupFile = opts.setupScript
             ? path.join(sandboxDir, `verify-setup-${uniqueSuffix()}${ext}`)
             : null;
 
         try {
-            fs.writeFileSync(testFile, opts.script, 'utf8');
+            fs.writeFileSync(testFile, opts.script || '', 'utf8');
             if (setupFile && opts.setupScript) {
                 fs.writeFileSync(setupFile, opts.setupScript, 'utf8');
             }
@@ -252,7 +349,7 @@ class DenoSandbox implements SandboxBackend {
         const tmpDir = path.join(sandboxDir, `verify-tmp-${uniqueSuffix()}`);
 
         try {
-            fs.writeFileSync(testFile, opts.script, 'utf8');
+            fs.writeFileSync(testFile, opts.script || '', 'utf8');
             fs.mkdirSync(tmpDir, { recursive: true });
 
             // Run setup first (if any) in the same sandbox.
@@ -313,6 +410,7 @@ function runSandboxedProcess(
     opts: SandboxExecuteOptions,
     backendLabel: string,
 ): Promise<SandboxExecuteResult> {
+    const isCommandMode = opts.mode === 'command';
     return new Promise((resolve) => {
         let stdout = '';
         let stderr = '';
@@ -363,7 +461,9 @@ function runSandboxedProcess(
 
             const output = (stdout + '\n' + stderr).trim();
             const exitCode = code ?? -1;
-            const verdict = parseVerdict(output, exitCode, timedOut);
+            const verdict = isCommandMode
+                ? parseVerdictCommandMode(exitCode, timedOut)
+                : parseVerdict(output, exitCode, timedOut);
 
             if (timedOut && verdict === 'error') {
                 resolve({
@@ -446,14 +546,20 @@ export class __UnsafeHostSandboxForTests implements SandboxBackend {
     get available(): boolean { return true; }
 
     async execute(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
+        if (opts.mode === 'command') {
+            const executable = opts.executable || 'echo';
+            const cmdArgs = opts.args || [];
+            return await runSandboxedProcess(executable, cmdArgs, opts, this.name);
+        }
+
         const sandboxDir = ensureSandboxDir(opts.workspaceRoot);
-        const ext = fileExtFor(opts.runner);
+        const ext = fileExtFor(opts.runner || 'node');
         const testFile = path.join(sandboxDir, `verify-test-${uniqueSuffix()}${ext}`);
 
         try {
-            fs.writeFileSync(testFile, opts.script, 'utf8');
+            fs.writeFileSync(testFile, opts.script || '', 'utf8');
 
-            let runnerBin = opts.runner;
+            let runnerBin = opts.runner || 'node';
             let runnerArgs: string[] = [testFile];
             if (opts.runner === 'tsx') {
                 runnerBin = 'npx';

@@ -127,3 +127,50 @@ export async function runLocalTest(
         backend: result.backend,
     };
 }
+
+/**
+ * Run a validated test command (npm test, pytest, etc.) inside the sandbox.
+ * Uses command mode — no script file is written; the executable + args are
+ * passed directly to the sandbox backend. The sandbox enforces network=none,
+ * read-only workspace, and resource limits.
+ *
+ * Returns the same LocalTestResult shape as runLocalTest, with exit-code-based
+ * verdicts (0 = pass, nonzero = fail).
+ */
+export async function runTestCommand(
+    executable: string,
+    args: string[],
+    workspaceRoot: string,
+    options?: {
+        timeoutMs?: number;
+        signal?: AbortSignal;
+        sandboxBackend?: SandboxBackend;
+    },
+): Promise<LocalTestResult> {
+    const backend = options?.sandboxBackend ?? detectSandbox();
+    if (!backend) {
+        return {
+            verdict: 'sandbox-unavailable',
+            output: SANDBOX_UNAVAILABLE_MESSAGE,
+            exitCode: -1,
+        };
+    }
+
+    const execOpts: SandboxExecuteOptions = {
+        mode: 'command',
+        executable,
+        args,
+        workspaceRoot,
+        timeoutMs: options?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        signal: options?.signal,
+    };
+
+    const result: SandboxExecuteResult = await backend.execute(execOpts);
+
+    return {
+        verdict: result.verdict,
+        output: result.output,
+        exitCode: result.exitCode,
+        backend: result.backend,
+    };
+}

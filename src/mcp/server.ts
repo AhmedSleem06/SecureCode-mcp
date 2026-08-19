@@ -11,6 +11,7 @@ import { toolScanDependencies } from '../tools/scanDependencies';
 import { toolScanBatch } from '../tools/scanBatch';
 import { toolScanSecrets } from '../tools/scanSecrets';
 import { toolAgentScan } from '../tools/agentScan';
+import { toolRunTests } from '../tools/runTests';
 import { toolRecordFalsePositive, toolGetAgentMemory, toolClearAgentMemory, toolAddKnownFact } from '../tools/agentMemoryTools';
 
 const PROTOCOL_VERSION = '2025-03-26';
@@ -53,6 +54,7 @@ const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<u
     'securecode.scan-batch': toolScanBatch,
     'securecode.scan-secrets': toolScanSecrets,
     'securecode.agent-scan': toolAgentScan,
+    'securecode.run-tests': toolRunTests,
     'securecode.record-false-positive': toolRecordFalsePositive,
     'securecode.get-agent-memory': toolGetAgentMemory,
     'securecode.clear-agent-memory': toolClearAgentMemory,

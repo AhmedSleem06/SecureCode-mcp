@@ -286,4 +286,51 @@ export const TOOLS: ToolDef[] = [
             required: ['fact', 'source'],
         },
     },
+    {
+        name: 'securecode.run-tests',
+        description:
+            'Run tests in a sandbox with human approval. Two modes: "existing" runs the workspace test suite (npm/pnpm/yarn/bun test, pytest) with a strict command allowlist — no shell operators, no install/build/publish, only the test lifecycle. "generated" runs an inline test script (node/tsx/bun/deno/python) through the verification sandbox with safety checks. Every execution requires human approval; tests run inside a Docker/Deno sandbox with network disabled, read-only workspace, and resource limits. Does NOT install dependencies. Use securecode.find-tests or the find_tests agent action to discover test files first.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                mode: {
+                    type: 'string',
+                    enum: ['existing', 'generated'],
+                    description: 'Execution mode: "existing" runs the workspace test suite via package manager; "generated" runs an inline test script via a runner.',
+                },
+                testFiles: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Existing mode: workspace-relative test file paths to run (e.g. ["tests/auth.test.ts"]). Max 50 files.',
+                },
+                testPattern: {
+                    type: 'string',
+                    description: 'Existing mode: test name pattern passed to the runner (e.g. "auth" for -k auth in pytest, or a grep pattern). Max 200 chars.',
+                },
+                packageManager: {
+                    type: 'string',
+                    enum: ['npm', 'pnpm', 'yarn', 'bun', 'pytest'],
+                    description: 'Existing mode: package manager to use. Auto-detected if omitted (defaults to npm).',
+                },
+                script: {
+                    type: 'string',
+                    description: 'Generated mode: inline test script source code. Max 64KB. Must print PASS: or FAIL: markers for verdict parsing.',
+                },
+                runner: {
+                    type: 'string',
+                    enum: ['node', 'tsx', 'bun', 'deno', 'python', 'python3'],
+                    description: 'Generated mode: runner to execute the script.',
+                },
+                setupScript: {
+                    type: 'string',
+                    description: 'Generated mode: optional setup script run before the test in the same sandbox. Max 32KB.',
+                },
+                timeoutMs: {
+                    type: 'number',
+                    description: 'Hard timeout in milliseconds. Default: 60000 (existing), 30000 (generated). Max: 300000.',
+                },
+            },
+            required: ['mode'],
+        },
+    },
 ];

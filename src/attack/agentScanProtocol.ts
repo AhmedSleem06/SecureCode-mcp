@@ -32,7 +32,7 @@ export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
     'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
     'list_files', 'call_graph', 'git_blame', 'git_history',
-    'check_dependencies', 'read_config', 'find_definition', 'find_references', 'find_tests',
+    'check_dependencies', 'read_config', 'find_definition', 'find_references', 'find_tests', 'run_tests',
     'finish',
 ];
 
@@ -191,6 +191,30 @@ export interface AgentScanFindTestsAction {
     rationale: string;
 }
 
+export interface AgentScanRunTestsAction {
+    type: 'run_tests';
+    /** Execution mode: "existing" runs the workspace test suite; "generated" runs an inline script. */
+    mode: 'existing' | 'generated';
+
+    /** Existing mode: workspace-relative test file paths to run. */
+    testFiles?: string[];
+    /** Existing mode: test name pattern passed to the runner. */
+    testPattern?: string;
+    /** Existing mode: package manager to use. Auto-detected if omitted. */
+    packageManager?: 'npm' | 'pnpm' | 'yarn' | 'bun' | 'pytest';
+
+    /** Generated mode: inline test script source code. */
+    script?: string;
+    /** Generated mode: optional setup script run before the test. */
+    setupScript?: string;
+    /** Generated mode: runner to execute the script. */
+    runner?: string;
+
+    /** Hard timeout in ms. Default: 60000 (existing), 30000 (generated). */
+    timeoutMs?: number;
+    rationale: string;
+}
+
 export interface AgentScanFinding {
     line: number;
     lineEnd?: number;
@@ -264,6 +288,7 @@ export type AgentScanAction =
     | AgentScanFindDefinitionAction
     | AgentScanFindReferencesAction
     | AgentScanFindTestsAction
+    | AgentScanRunTestsAction
     | AgentScanFinishAction
     | AgentScanSystemEventAction;
 
@@ -285,6 +310,7 @@ export type AgentScanActionType =
     | 'find_definition'
     | 'find_references'
     | 'find_tests'
+    | 'run_tests'
     | 'finish'
     | 'system_event';
 

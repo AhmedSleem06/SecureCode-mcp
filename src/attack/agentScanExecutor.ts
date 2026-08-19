@@ -28,6 +28,7 @@ import { FileCacheStore } from '../dependency/depCache';
 import { readSecurityConfig } from '../utils/securityConfig';
 import { findDefinition, findReferences } from '../project-map/symbolIndex';
 import { findTests } from '../project-map/findTests';
+import { runTests, type RunTestsRequest } from '../utils/testRunner';
 import { validateToolResponse } from './protocolValidator';
 import type {
     AgentScanAction,
@@ -481,6 +482,39 @@ export async function executeAction(
                 return redact(result);
             } catch (e: any) {
                 return `Error finding tests for "${(action as any).filePath}": ${e.message || e}`;
+            }
+        }
+
+        case 'run_tests': {
+            try {
+                const a = action as any;
+                const req: RunTestsRequest = {
+                    mode: a.mode,
+                    testFiles: a.testFiles,
+                    testPattern: a.testPattern,
+                    packageManager: a.packageManager,
+                    script: a.script,
+                    runner: a.runner,
+                    setupScript: a.setupScript,
+                    timeoutMs: a.timeoutMs,
+                };
+                const result = await runTests(req, ctx.workspaceRoot);
+                const lines: string[] = [
+                    `run_tests ${a.mode}: ${result.status}`,
+                ];
+                if (result.backend) lines.push(`Backend: ${result.backend}`);
+                if (result.command) lines.push(`Command: ${result.command.executable} ${result.command.args.join(' ')}`);
+                lines.push(`Exit code: ${result.exitCode}`);
+                lines.push(`Duration: ${result.durationMs}ms`);
+                if (!result.approved) {
+                    lines.push(`Note: ${result.output}`);
+                }
+                if (result.output) {
+                    lines.push('', 'Output:', result.output);
+                }
+                return redact(lines.join('\n'));
+            } catch (e: any) {
+                return `Error running tests: ${e.message || e}`;
             }
         }
 

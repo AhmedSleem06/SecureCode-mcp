@@ -53,7 +53,10 @@ function isOptionalNumber(x: unknown): x is number | undefined { return x === un
 const VALID_ACTION_TYPES = new Set([
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
     'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
-    'list_files', 'call_graph', 'finish', 'system_event',
+    'list_files', 'call_graph', 'git_blame', 'git_history',
+    'check_dependencies', 'read_config', 'find_definition',
+    'find_references', 'find_tests', 'run_tests',
+    'finish', 'system_event',
 ]);
 
 const VALID_ATTACK_TYPES = new Set([
@@ -136,6 +139,61 @@ export function validateAction(raw: unknown): ValidationResult<AgentScanAction> 
         case 'call_graph': {
             if (!isString(raw.filePath) || raw.filePath.length === 0) return err('call_graph requires "filePath"');
             if (!isOptionalString(raw.functionName)) return err('call_graph functionName must be string or null');
+            return ok(raw as unknown as AgentScanAction);
+        }
+        case 'git_blame': {
+            if (!isString(raw.filePath) || raw.filePath.length === 0) return err('git_blame requires "filePath"');
+            if (!isOptionalNumber(raw.startLine)) return err('git_blame startLine must be number or null');
+            if (!isOptionalNumber(raw.endLine)) return err('git_blame endLine must be number or null');
+            return ok(raw as unknown as AgentScanAction);
+        }
+        case 'git_history': {
+            if (!isOptionalString(raw.filePath)) return err('git_history filePath must be string or null');
+            if (!isOptionalString(raw.functionName)) return err('git_history functionName must be string or null');
+            if (!isOptionalNumber(raw.limit)) return err('git_history limit must be number or null');
+            return ok(raw as unknown as AgentScanAction);
+        }
+        case 'check_dependencies':
+            return ok(raw as unknown as AgentScanAction);
+        case 'read_config': {
+            if (!isString(raw.configKind) || !['auth','cors','rate_limit','headers','env','all'].includes(raw.configKind)) {
+                return err('read_config requires "configKind" (auth, cors, rate_limit, headers, env, all)');
+            }
+            return ok(raw as unknown as AgentScanAction);
+        }
+        case 'find_definition': {
+            if (!isString(raw.filePath) || raw.filePath.length === 0) return err('find_definition requires "filePath"');
+            if (!isString(raw.symbol) || raw.symbol.length === 0) return err('find_definition requires "symbol"');
+            if (!isOptionalNumber(raw.line)) return err('find_definition line must be number or null');
+            return ok(raw as unknown as AgentScanAction);
+        }
+        case 'find_references': {
+            if (!isString(raw.filePath) || raw.filePath.length === 0) return err('find_references requires "filePath"');
+            if (!isString(raw.symbol) || raw.symbol.length === 0) return err('find_references requires "symbol"');
+            if (!isOptionalNumber(raw.line)) return err('find_references line must be number or null');
+            return ok(raw as unknown as AgentScanAction);
+        }
+        case 'find_tests': {
+            if (!isString(raw.filePath) || raw.filePath.length === 0) return err('find_tests requires "filePath"');
+            if (!isOptionalString(raw.symbol)) return err('find_tests symbol must be string or null');
+            return ok(raw as unknown as AgentScanAction);
+        }
+        case 'run_tests': {
+            if (!isString(raw.mode) || (raw.mode !== 'existing' && raw.mode !== 'generated')) {
+                return err('run_tests requires "mode" (existing or generated)');
+            }
+            if (raw.mode === 'existing') {
+                if (raw.testFiles !== undefined && raw.testFiles !== null) {
+                    if (!Array.isArray(raw.testFiles)) return err('run_tests testFiles must be an array');
+                }
+                if (!isOptionalString(raw.testPattern)) return err('run_tests testPattern must be string or null');
+                if (!isOptionalString(raw.packageManager)) return err('run_tests packageManager must be string or null');
+            } else {
+                if (!isString(raw.script) || raw.script.length === 0) return err('run_tests generated mode requires "script"');
+                if (!isString(raw.runner) || raw.runner.length === 0) return err('run_tests generated mode requires "runner"');
+                if (!isOptionalString(raw.setupScript)) return err('run_tests setupScript must be string or null');
+            }
+            if (!isOptionalNumber(raw.timeoutMs)) return err('run_tests timeoutMs must be number or null');
             return ok(raw as unknown as AgentScanAction);
         }
         case 'finish': {

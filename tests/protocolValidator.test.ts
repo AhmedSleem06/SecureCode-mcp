@@ -195,4 +195,38 @@ describe('protocolValidator', () => {
         if (r.ok) expect(r.value.observation.length).toBeLessThan(huge.length);
         if (r.ok) expect(r.value.observation).toContain('truncated');
     });
+
+    // ── run_tests validation ──────────────────────────────────────────────
+
+    it('accepts run_tests existing mode', () => {
+        const r = validateAction({
+            type: 'run_tests', mode: 'existing', testFiles: ['tests/auth.test.ts'], rationale: 'r',
+        });
+        expect(r.ok).toBe(true);
+    });
+
+    it('accepts run_tests generated mode', () => {
+        const r = validateAction({
+            type: 'run_tests', mode: 'generated', script: "console.log('PASS')", runner: 'node', rationale: 'r',
+        });
+        expect(r.ok).toBe(true);
+    });
+
+    it('rejects run_tests with invalid mode', () => {
+        const r = validateAction({ type: 'run_tests', mode: 'invalid', rationale: 'r' });
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.error).toContain('mode');
+    });
+
+    it('rejects run_tests generated mode without script', () => {
+        const r = validateAction({ type: 'run_tests', mode: 'generated', runner: 'node', rationale: 'r' });
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.error).toContain('script');
+    });
+
+    it('rejects run_tests generated mode without runner', () => {
+        const r = validateAction({ type: 'run_tests', mode: 'generated', script: "console.log('x')", rationale: 'r' });
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.error).toContain('runner');
+    });
 });
