@@ -218,4 +218,96 @@ describe('runVerifyLoop', () => {
         expect(result.verdict).toBe('INCONCLUSIVE');
         expect(result.subVerdict).toBe('budget-exhausted');
     });
+
+    it('returns subVerdict=blocked when static safety check rejects the script', async () => {
+        vi.mocked(runLocalTest).mockResolvedValueOnce({
+            verdict: 'blocked',
+            output: 'Test script blocked: eval() executes arbitrary strings as code',
+            exitCode: -1,
+        });
+
+        const client = makeMockClient(
+            { canTest: true, testScript: 'eval("x")', runner: 'node', description: 'test' },
+            { verdict: 'UNPROVEN', reason: 'guard held', shouldRetry: false },
+        );
+
+        const result = await runVerifyLoop({
+            finding: { type: 'command_injection', line: 10, evidence: 'exec(input)', why: 'user input', severity: 'high' },
+            filePath: 'src/foo.ts',
+            code: 'const x = 1;',
+            relatedFiles: [],
+            workspaceRoot: '/tmp/workspace',
+            language: 'javascript',
+            client,
+        });
+
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.subVerdict).toBe('blocked');
+        expect(result.reason).toContain('blocked');
+    });
+
+    it('returns subVerdict=aborted when AbortSignal fires', async () => {
+        const ac = new AbortController();
+        ac.abort();
+
+        const client = makeMockClient(
+            { canTest: true, testScript: 'console.log("PASS")', runner: 'node', description: 'test' },
+        );
+
+        const result = await runVerifyLoop({
+            finding: { type: 'xss', line: 5, evidence: 'innerHTML', why: 'tainted', severity: 'high' },
+            filePath: 'src/foo.ts',
+            code: 'const x = 1;',
+            relatedFiles: [],
+            workspaceRoot: '/tmp/workspace',
+            language: 'javascript',
+            client,
+            signal: ac.signal,
+        });
+
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.subVerdict).toBe('aborted');
+        expect(result.reason).toContain('Cancelled');
+    });
+
+    it('retries on timeout and returns INCONCLUSIVE after exhausting rounds', async () => {
+        // Each round: generate → runLocalTest(timeout) → no analyze (timeout is retryable)
+        // The loop feeds the timeout error back to generate on the next round.
+        vi.mocked(runLocalTest).mockResolvedValue({
+            verdict: 'timeout',
+            output: 'timed out',
+            exitCode: -1,
+        });
+
+        const postJson = vi.fn();
+        // Every generate call returns canTest:true
+        postJson.mockResolvedValue({
+            canTest: true,
+            testScript: 'console.log("x")',
+            runner: 'node',
+            description: 'test',
+        });
+
+        // Use a budget with maxRoundsPerFinding: 2 to limit iterations
+        const { VerifyBudgetTracker, defaultVerifyBudget } = await import('../src/attack/agentScanProtocol');
+        const budget = defaultVerifyBudget();
+        budget.maxRoundsPerFinding = 2;
+        budget.maxLlmCalls = 100; // plenty
+        const tracker = new VerifyBudgetTracker(budget);
+
+        const result = await runVerifyLoop({
+            finding: { type: 'xss', line: 5, evidence: 'innerHTML', why: 'tainted', severity: 'high' },
+            filePath: 'src/foo.ts',
+            code: 'const x = 1;',
+            relatedFiles: [],
+            workspaceRoot: '/tmp/workspace',
+            language: 'javascript',
+            client: { postJson } as unknown as ApiClient,
+            budgetTracker: tracker,
+        });
+
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.roundsUsed).toBeGreaterThanOrEqual(2);
+        expect(result.reason.toLowerCase()).toContain('timed out');
+    });
 });

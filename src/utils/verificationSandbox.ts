@@ -93,7 +93,7 @@ function parseVerdict(output: string, exitCode: number, timedOut: boolean): Sand
  * Command-mode verdict: no PASS:/FAIL: markers. Exit code 0 = pass, nonzero = fail.
  * This is the standard semantics for `npm test`, `pytest`, etc.
  */
-function parseVerdictCommandMode(exitCode: number, timedOut: boolean): SandboxExecuteResult['verdict'] {
+export function parseVerdictCommandMode(exitCode: number, timedOut: boolean): SandboxExecuteResult['verdict'] {
     if (timedOut) return 'timeout';
     return exitCode === 0 ? 'pass' : 'fail';
 }
@@ -102,7 +102,7 @@ function parseVerdictCommandMode(exitCode: number, timedOut: boolean): SandboxEx
  * Pick the Docker image for a command-mode executable. Returns null if no
  * suitable image is configured — the caller returns sandbox-unavailable.
  */
-function pickImageForCommand(executable: string): { image: string | null; reason?: string } {
+export function pickImageForCommand(executable: string): { image: string | null; reason?: string } {
     if (executable === 'npm' || executable === 'npx') {
         return { image: process.env.SECURECODE_SANDBOX_IMAGE || 'node:20-alpine' };
     }
@@ -333,6 +333,17 @@ class DenoSandbox implements SandboxBackend {
     }
 
     async execute(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
+        // Command mode: Deno can't run package-manager test commands (npm, pytest, etc.)
+        // Return sandbox-unavailable so the caller surfaces the right message.
+        if (opts.mode === 'command') {
+            return {
+                verdict: 'sandbox-unavailable',
+                output: 'Deno sandbox cannot execute command-mode tests (npm/pnpm/yarn/bun/pytest). Docker is required for existing-test execution.',
+                exitCode: -1,
+                backend: this.name,
+            };
+        }
+
         if (opts.runner === 'python' || opts.runner === 'python3') {
             // Deno can't run Python.
             return {
