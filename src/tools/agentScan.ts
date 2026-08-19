@@ -36,6 +36,7 @@ import type { AgentScanFinding, AgentScanTarget } from '../attack/agentScanProto
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
 import { getGitChangedFiles } from '../utils/gitContext';
 import { computeBlastRadius } from '../project-map/blastRadius';
+import { recordScanAuditSample } from '../audit/scanAuditLog';
 import type { SandboxProveResponse, FixResponse } from '../api/types';
 
 interface ProvenFinding extends AgentScanFinding {
@@ -193,6 +194,22 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     filteredFindings = filterCachedFindingsAgainstMemory(cached.findings, falsePositives);
                 }
                 if (progress) progress(1, 1, 'Cached result — file unchanged since last scan.');
+                try {
+                    const fileHash = require('crypto').createHash('sha256').update(code).digest('hex').substring(0, 16);
+                    recordScanAuditSample(ctx.workspaceRoot, {
+                        filePath: filePath!,
+                        fileHash,
+                        language,
+                        scanStatus: cached.status,
+                        stepsUsed: cached.stepsUsed,
+                        costSpentUsd: 0,
+                        agentFindings: filteredFindings,
+                        transcript: [],
+                        cached: true,
+                    });
+                } catch {
+                    // best-effort
+                }
                 return {
                     status: cached.status,
                     summary: cached.summary || 'Agent completed (cached).',
@@ -429,6 +446,32 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         verifyHint = `Exploit verification was skipped for ${sandboxUnavailableCount} finding(s) because no isolation backend (Docker or Deno) was detected. Without it, high/medium findings are reported as INCONCLUSIVE with confidence capped at 75%.\n${SANDBOX_UNAVAILABLE_MESSAGE}`;
     } else if (budgetExhaustedCount > 0) {
         verifyHint = `Exploit verification was skipped for ${budgetExhaustedCount} finding(s) because the per-scan verification budget (${verifyBudget.maxFindings} findings, ${verifyBudget.maxLlmCalls} LLM calls, ${Math.round(verifyBudget.maxWallClockMs / 1000)}s) was exhausted. Re-run the scan to verify the remaining findings, or raise the budget via the VerifyBudget config.`;
+    }
+
+    // 6a. Record metadata-only audit sample (no source code, no evidence strings)
+    try {
+        const fileHash = require('crypto').createHash('sha256').update(code).digest('hex').substring(0, 16);
+        recordScanAuditSample(ctx.workspaceRoot, {
+            filePath: filePath || 'inline-code',
+            fileHash,
+            language,
+            scanStatus: agentResult.status,
+            stepsUsed: agentResult.stepsUsed,
+            costSpentUsd: agentResult.costSpentUsd,
+            agentFindings: provenFindings,
+            transcript: agentResult.transcript,
+            cached: false,
+            verifyUsage: {
+                findingsAttempted: verifyTracker.findingsAttempted,
+                roundsUsed: verifyTracker.roundsUsed,
+                llmCallsUsed: verifyTracker.llmCallsUsed,
+                costSpentUsd: verifyTracker.costSpentUsd,
+                wallClockMs: verifyTracker.wallClockElapsedMs,
+            },
+            scope,
+        });
+    } catch {
+        // best-effort — audit failure must not block scan results
     }
 
     return {
