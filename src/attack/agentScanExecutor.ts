@@ -22,6 +22,7 @@ import { discoverEndpoints, formatEndpoints } from '../project-map/endpointDisco
 import { listImports, formatImports } from '../utils/listImports';
 import { listFiles, formatFileList } from '../utils/listFiles';
 import { getCallGraph } from '../project-map/callGraphExtractor';
+import { getGitBlame, getGitHistory } from '../utils/gitContext';
 import { validateToolResponse } from './protocolValidator';
 import type {
     AgentScanAction,
@@ -358,6 +359,34 @@ export async function executeAction(
                 return redact(result);
             } catch (e: any) {
                 return `Error extracting call graph for "${(action as any).filePath}": ${e.message || e}`;
+            }
+        }
+
+        case 'git_blame': {
+            try {
+                const result = await getGitBlame(
+                    ctx.workspaceRoot,
+                    (action as any).filePath,
+                    (action as any).startLine,
+                    (action as any).endLine,
+                );
+                return truncate(result);
+            } catch (e: any) {
+                return `Error running git blame on "${(action as any).filePath}": ${e.message || e}`;
+            }
+        }
+
+        case 'git_history': {
+            try {
+                const result = await getGitHistory(
+                    ctx.workspaceRoot,
+                    (action as any).filePath,
+                    (action as any).functionName,
+                    (action as any).limit,
+                );
+                return truncate(result);
+            } catch (e: any) {
+                return `Error running git history: ${e.message || e}`;
             }
         }
 

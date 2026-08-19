@@ -31,7 +31,7 @@ export const AGENT_SCAN_PROTOCOL_VERSION = 2;
 export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
     'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
-    'list_files', 'call_graph', 'finish',
+    'list_files', 'call_graph', 'git_blame', 'git_history', 'finish',
 ];
 
 export interface AgentScanClientCapabilities {
@@ -119,8 +119,30 @@ export interface AgentScanCallGraphAction {
     type: 'call_graph';
     /** Workspace-relative path to the file to analyze. */
     filePath: string;
-    /** Optional function name — if given, returns forward + reverse call graph for that function. */
+    /** Optional function name — if given, returns forward + reverse call graph. */
     functionName?: string;
+    rationale: string;
+}
+
+export interface AgentScanGitBlameAction {
+    type: 'git_blame';
+    /** Workspace-relative path to the file. */
+    filePath: string;
+    /** Optional 1-indexed start line. */
+    startLine?: number;
+    /** Optional 1-indexed end line (inclusive). */
+    endLine?: number;
+    rationale: string;
+}
+
+export interface AgentScanGitHistoryAction {
+    type: 'git_history';
+    /** Optional workspace-relative path — if omitted, returns repo history. */
+    filePath?: string;
+    /** Optional function name to search for in history (git log -S). */
+    functionName?: string;
+    /** Max commits to return (hard cap 20, default 10). */
+    limit?: number;
     rationale: string;
 }
 
@@ -190,6 +212,8 @@ export type AgentScanAction =
     | AgentScanListImportsAction
     | AgentScanListFilesAction
     | AgentScanCallGraphAction
+    | AgentScanGitBlameAction
+    | AgentScanGitHistoryAction
     | AgentScanFinishAction
     | AgentScanSystemEventAction;
 
@@ -204,6 +228,8 @@ export type AgentScanActionType =
     | 'list_imports'
     | 'list_files'
     | 'call_graph'
+    | 'git_blame'
+    | 'git_history'
     | 'finish'
     | 'system_event';
 
