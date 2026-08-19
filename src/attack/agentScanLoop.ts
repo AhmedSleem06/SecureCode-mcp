@@ -20,6 +20,7 @@
 import { ApiClient } from '../api/client';
 import type { ServerContext } from '../mcp/types';
 import { executeAction } from './agentScanExecutor';
+import { AgentTraceLogger } from './agentTrace';
 import {
     validateStartResponse,
     validateStepResponse,
@@ -77,6 +78,9 @@ export async function runAgentScan(
             };
         }
         const startResp = startValidation.value;
+
+        const trace = new AgentTraceLogger(ctx.workspaceRoot, startResp.runId);
+        trace.logRunStarted();
 
         const transcript: AgentScanTranscriptStep[] = [];
         const readFiles = new Set<string>();
@@ -247,6 +251,7 @@ export async function runAgentScan(
             }
             costSpentUsd += stepResp.costUsd || 0;
             consecutiveErrors = 0;
+            trace.logStepRequested(undefined, stepResp.tokens, stepResp.costUsd, undefined);
 
             // System event (e.g., critique from the senior reviewer) — append
             // to the transcript WITHOUT executing it, then continue the loop
@@ -276,6 +281,7 @@ export async function runAgentScan(
                 const status: AgentScanRunStatus = stepResp.costCapped
                     ? 'capped'
                     : (stepResp.degraded ? 'degraded' : 'completed');
+                trace.logRunCompleted(status);
                 return {
                     status,
                     findings: [],
@@ -291,6 +297,8 @@ export async function runAgentScan(
             const action: AgentScanAction = stepResp.next;
             stepsTaken++;
             budget.stepsRemaining = stepResp.stepsRemaining;
+            trace.nextStep();
+            trace.logActionSelected(action.type, undefined, stepResp.degraded);
 
             // Progress callback
             if (options.onProgress) {
@@ -300,6 +308,7 @@ export async function runAgentScan(
 
             // Finish = done with findings
             if (action.type === 'finish') {
+                trace.logRunCompleted('completed');
                 return {
                     status: 'completed',
                     findings: action.findings,
@@ -378,10 +387,12 @@ export async function runAgentScan(
             // Track consecutive blocked reads — if the agent keeps requesting
             // read_file on blocked files, force-finish to stop wasting steps.
             if (wasBlocked) {
+                trace.logToolBlocked(action.type, observation.slice(0, 200));
                 consecutiveBlockedReads++;
                 if (consecutiveBlockedReads >= 8) {
                     console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — force-finishing to stop wasting steps.`);
                     transcript.push({ action, observation });
+                    trace.logRunCompleted('completed');
                     return {
                         status: 'completed',
                         findings: [],
@@ -392,6 +403,7 @@ export async function runAgentScan(
                     };
                 }
             } else {
+                trace.logToolCompleted(action.type, observation);
                 consecutiveBlockedReads = 0;
             }
 
