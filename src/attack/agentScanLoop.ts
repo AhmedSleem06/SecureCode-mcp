@@ -273,6 +273,8 @@ export async function runAgentScan(
                     toolKey = `check_guard:${(action as any).guardName || ''}:${(action as any).attackType || ''}`;
                 } else if (action.type === 'check_policy') {
                     toolKey = `check_policy:${(action as any).filePath || ''}`;
+                } else if (action.type === 'call_graph') {
+                    toolKey = `call_graph:${(action as any).filePath || ''}:${(action as any).functionName || ''}`;
                 }
 
                 if (toolKey) {
@@ -334,6 +336,7 @@ function describeAction(action: AgentScanAction): string {
         case 'get_endpoints': return `get_endpoints(${(action as any).glob || 'all'})`;
         case 'list_imports': return `list_imports(${action.filePath})`;
         case 'list_files': return `list_files(${(action as any).path || 'root'})`;
+        case 'call_graph': return `call_graph(${(action as any).filePath})`;
         case 'finish': return 'finish';
     }
 }

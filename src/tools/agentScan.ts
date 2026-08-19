@@ -23,6 +23,7 @@ import { readFileFromWorkspace } from '../utils/files';
 import { getEndpointContextForFile, getRelatedFilesForFile } from '../project-map/mapContext';
 import { getCachedScan, writeCachedScan } from '../project-map/scanCache';
 import { loadAgentMemory, formatMemoryForPrompt } from '../project-map/agentMemory';
+import { getCapability, evidenceLevelTag } from '../project-map/capabilityRegistry';
 import { runAgentScan } from '../attack/agentScanLoop';
 import { runVerifyLoop } from '../attack/verifyLoop';
 import type { AgentScanFinding, AgentScanTarget } from '../attack/agentScanProtocol';
@@ -31,6 +32,8 @@ import type { SandboxProveResponse, FixResponse } from '../api/types';
 interface ProvenFinding extends AgentScanFinding {
     proven: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'NOT_REPRODUCIBLE' | 'SKIPPED';
     provenReason?: string;
+    evidenceLevel?: string;
+    originalConfidence?: number;
 }
 
 /** Prove high/critical/medium findings — skip only low. */
@@ -241,6 +244,16 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         }
     }
 
+    // 4a. Capability-based confidence clamping
+    // Confidence must reflect what was actually proven, not what the LLM believes.
+    // A finding with no structural evidence (no taint trace, no guard check, no
+    // verify) cannot be reported at 95% confidence — that's how false positives
+    // erode trust in a security tool. The clamp is deterministic and based on:
+    //   1. What tools the agent actually used (transcript scan)
+    //   2. What tools were available for this language (capability registry)
+    //   3. The verify subagent's verdict (PROVEN/UNPROVEN/INCONCLUSIVE)
+    clampConfidenceByCapability(provenFindings, agentResult.transcript, language);
+
     // 4b. Generate fixes for proven/suspected findings
     const fixableFindings = provenFindings.filter(f =>
         f.proven === 'PROVEN' || (f.proven !== 'UNPROVEN' && f.confidence >= 60)
@@ -315,4 +328,59 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         notReproducibleCount: provenFindings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
         skippedCount: provenFindings.filter(f => f.proven === 'SKIPPED').length,
     };
+}
+
+function clampConfidenceByCapability(
+    findings: ProvenFinding[],
+    transcript: { action: { type: string }; observation: string }[],
+    language: string,
+): void {
+    const cap = getCapability(language);
+
+    let usedTaint = false;
+    let usedGuard = false;
+    let usedPolicy = false;
+    for (const step of transcript) {
+        const t = step.action.type;
+        if (t === 'trace_flow' || t === 'trace_flow_cross_file') usedTaint = true;
+        if (t === 'check_guard') usedGuard = true;
+        if (t === 'check_policy') usedPolicy = true;
+    }
+
+    let evidenceTools = 0;
+    if (usedTaint) evidenceTools++;
+    if (usedGuard) evidenceTools++;
+    if (usedPolicy) evidenceTools++;
+
+    for (const f of findings) {
+        const original = f.confidence;
+        let clamped = original;
+
+        if (f.proven === 'PROVEN') {
+            clamped = Math.max(clamped, 80);
+        } else if (f.proven === 'UNPROVEN') {
+            clamped = Math.min(clamped, 25);
+        }
+
+        if (cap.tier === 'fallback') {
+            if (f.proven !== 'PROVEN') {
+                clamped = Math.min(clamped, 55);
+            }
+        } else {
+            if (evidenceTools === 0 && f.proven !== 'PROVEN') {
+                clamped = Math.min(clamped, 40);
+            } else if (evidenceTools === 1 && f.proven !== 'PROVEN') {
+                clamped = Math.min(clamped, 60);
+            } else if (evidenceTools >= 2 && f.proven !== 'PROVEN') {
+                clamped = Math.min(clamped, 75);
+            }
+        }
+
+        clamped = Math.round(clamped);
+        f.evidenceLevel = evidenceLevelTag(usedTaint, usedGuard, usedPolicy, f.proven);
+        if (clamped !== original) {
+            f.originalConfidence = original;
+            f.confidence = clamped;
+        }
+    }
 }

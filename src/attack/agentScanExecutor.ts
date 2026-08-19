@@ -21,6 +21,7 @@ import { redactText } from './report';
 import { discoverEndpoints, formatEndpoints } from '../project-map/endpointDiscovery';
 import { listImports, formatImports } from '../utils/listImports';
 import { listFiles, formatFileList } from '../utils/listFiles';
+import { getCallGraph } from '../project-map/callGraphExtractor';
 import type {
     AgentScanAction,
     AgentScanToolRequest,
@@ -339,6 +340,19 @@ export async function executeAction(
                 return truncate(formatFileList(files));
             } catch (e: any) {
                 return `Error listing files: ${e.message || e}`;
+            }
+        }
+
+        case 'call_graph': {
+            try {
+                const result = await getCallGraph(
+                    ctx.workspaceRoot,
+                    (action as any).filePath,
+                    (action as any).functionName,
+                );
+                return redact(result);
+            } catch (e: any) {
+                return `Error extracting call graph for "${(action as any).filePath}": ${e.message || e}`;
             }
         }
 

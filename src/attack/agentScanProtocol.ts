@@ -81,6 +81,15 @@ export interface AgentScanListFilesAction {
     rationale: string;
 }
 
+export interface AgentScanCallGraphAction {
+    type: 'call_graph';
+    /** Workspace-relative path to the file to analyze. */
+    filePath: string;
+    /** Optional function name — if given, returns forward + reverse call graph for that function. */
+    functionName?: string;
+    rationale: string;
+}
+
 export interface AgentScanFinding {
     line: number;
     lineEnd?: number;
@@ -117,6 +126,7 @@ export type AgentScanAction =
     | AgentScanGetEndpointsAction
     | AgentScanListImportsAction
     | AgentScanListFilesAction
+    | AgentScanCallGraphAction
     | AgentScanFinishAction;
 
 export type AgentScanActionType =
@@ -129,6 +139,7 @@ export type AgentScanActionType =
     | 'get_endpoints'
     | 'list_imports'
     | 'list_files'
+    | 'call_graph'
     | 'finish';
 
 export type AttackType =
