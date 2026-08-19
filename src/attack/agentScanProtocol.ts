@@ -6,9 +6,9 @@
  */
 
 export const AGENT_SCAN_DEFAULTS = {
-    maxSteps: 30,
-    costCapUsd: 0.50,
-    wallClockMs: 300_000,
+    maxSteps: 40,
+    costCapUsd: 0.60,
+    wallClockMs: 420_000,
     perStepEstimateUsd: 0.08,
     creditsPerRun: 5,
     dailyRunLimit: 20,
