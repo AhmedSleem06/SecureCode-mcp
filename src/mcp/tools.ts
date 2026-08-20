@@ -1,6 +1,8 @@
 import type { ToolDef } from './types';
 
-export const TOOLS: ToolDef[] = [
+export const ATTACK_ENABLED = process.env.SECURECODE_ATTACK_ENABLED === '1';
+
+const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.scan',
         description:
@@ -342,3 +344,7 @@ export const TOOLS: ToolDef[] = [
         },
     },
 ];
+
+export const TOOLS: ToolDef[] = ATTACK_ENABLED
+    ? ALL_TOOLS
+    : ALL_TOOLS.filter(t => t.name !== 'securecode.attack');

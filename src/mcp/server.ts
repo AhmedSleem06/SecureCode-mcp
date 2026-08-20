@@ -2,7 +2,7 @@ import * as readline from 'readline';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { JsonRpcRequest, JsonRpcResponse, ToolDef, ServerContext } from './types';
-import { TOOLS } from './tools';
+import { TOOLS, ATTACK_ENABLED } from './tools';
 import { toolScan } from '../tools/scan';
 import { toolMap } from '../tools/map';
 import { toolFix } from '../tools/fix';
@@ -49,7 +49,7 @@ const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<u
     'securecode.scan': toolScan,
     'securecode.map': toolMap,
     'securecode.fix': toolFix,
-    'securecode.attack': toolAttack,
+    ...(ATTACK_ENABLED ? { 'securecode.attack': toolAttack } : {}),
     'securecode.scan-dependencies': toolScanDependencies,
     'securecode.scan-batch': toolScanBatch,
     'securecode.scan-secrets': toolScanSecrets,
