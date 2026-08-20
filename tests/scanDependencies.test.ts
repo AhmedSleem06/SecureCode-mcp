@@ -214,8 +214,11 @@ describe('securecode.scan-dependencies — full pipeline', () => {
         // The finding should have a severity based on real CVSS (7.2 → ERROR since >= 7)
         const lodashFinding = result.findings.find((f: any) => f.dependency?.name === 'lodash');
         if (lodashFinding) {
-            // CVSS 7.2 should map to ERROR (>= 7 threshold in dependencyChecker.ts)
-            expect(lodashFinding.severity).toBe('ERROR');
+            // CVSS 7.2 with no exploit evidence → priority ~29 → WARNING
+            expect(lodashFinding.severity).toBe('WARNING');
+            expect(lodashFinding.dependency?.exploitPriority).toBeDefined();
+            expect(lodashFinding.dependency?.exploitPriority).toBeGreaterThanOrEqual(20);
+            expect(lodashFinding.dependency?.exploitPriority).toBeLessThan(50);
         }
     });
 
@@ -245,6 +248,10 @@ describe('securecode.scan-dependencies — full pipeline', () => {
             if (matches) {
                 expect(matches.length).toBe(1);
             }
+            // Multi-source provenance: the vuln should be confirmed by both OSV and GHSA
+            expect(lodashFinding.dependency?.sourceCount).toBeGreaterThanOrEqual(2);
+            expect(lodashFinding.dependency?.confirmedBy).toContain('osv');
+            expect(lodashFinding.dependency?.confirmedBy).toContain('ghsa');
         }
     });
 

@@ -3,6 +3,7 @@ import { ResolvedPackage, Vulnerability, Ecosystem } from './types';
 import { findLockfiles, parseLockfile, resolveAll, WorkspaceLockfiles } from './resolver';
 import { queryOsvBatch, queryGhsaViaCli, enrichWithNvd, ghCliAvailable } from './osvClient';
 import { computeMinSafeVersion, upgradeSuggestion } from './minSafeVersion';
+import { computeExploitPriority, priorityLabel } from './exploitPriority';
 import {
     checkLicenses,
     LicensePolicyMode,
@@ -110,21 +111,32 @@ export async function scanDependencies(opts: DependencyScanOptions): Promise<Dep
         }
     }
 
-    // 6. Merge OSV + GHSA per package key, dedupe by vuln id.
+    // 6. Merge OSV + GHSA per package key, dedupe by vuln id, track provenance.
     const matches = new Map<string, Vulnerability[]>();
     const allKeys = new Set<string>([...osvMap.keys(), ...ghsaMap.keys()]);
     for (const key of allKeys) {
         const osvList = osvMap.get(key) || [];
         const ghsaList = ghsaMap.get(key) || [];
         const merged: Vulnerability[] = [];
-        const seenIds = new Set<string>();
+        const seenIds = new Map<string, Set<string>>();
         for (const v of [...osvList, ...ghsaList]) {
-            if (seenIds.has(v.id)) continue;
-            seenIds.add(v.id);
-            merged.push(v);
+            const existing = seenIds.get(v.id);
+            if (existing) {
+                existing.add(v.source);
+                continue;
+            }
+            const sources = new Set<string>([v.source]);
+            seenIds.set(v.id, sources);
+            merged.push({ ...v, sources: [v.source] });
         }
-        // NVD enrichment (cached).
+        for (const v of merged) {
+            const srcs = seenIds.get(v.id);
+            if (srcs) v.sources = Array.from(srcs) as any;
+        }
         await enrichWithNvd(merged, opts.state);
+        for (const v of merged) {
+            if (!v.sources || v.sources.length === 0) v.sources = [v.source];
+        }
         matches.set(key, merged);
     }
 
@@ -147,12 +159,18 @@ export async function scanDependencies(opts: DependencyScanOptions): Promise<Dep
         const worst = sortedVulns[0];
         const minSafe = computeMinSafeVersion(pkg, sortedVulns);
 
-        const severity: 'ERROR' | 'WARNING' = (worst.cvssScore ?? 0) >= 7 ? 'ERROR' : 'WARNING';
+        const priority = computeExploitPriority(sortedVulns, pkg);
+        const sevLabel = priorityLabel(priority.score);
+        const severity: 'ERROR' | 'WARNING' = priority.score >= 50 ? 'ERROR' : 'WARNING';
+
         const vulnCount = sortedVulns.length;
         const cveList = sortedVulns.map(v => v.id).slice(0, 5).join(', ');
+        const sourceTag = priority.sourceCount >= 2 ? ` [confirmed by ${priority.sourceCount} sources]` : '';
+        const exploitTag = priority.knownExploited ? ' [KEV — known exploited]' : priority.exploitAvailable ? ' [exploit available]' : '';
+        const priorityTag = ` [priority: ${sevLabel}]`;
         const message = minSafe
-            ? `${upgradeSuggestion(pkg, minSafe)} — ${vulnCount} vulnerable ${vulnCount === 1 ? 'advisory' : 'advisories'}: ${cveList}`
-            : `${pkg.name}@${pkg.version} has ${vulnCount} vulnerable ${vulnCount === 1 ? 'advisory' : 'advisories'} with NO known fix: ${cveList}`;
+            ? `${upgradeSuggestion(pkg, minSafe)} — ${vulnCount} vulnerable ${vulnCount === 1 ? 'advisory' : 'advisories'}: ${cveList}${sourceTag}${exploitTag}${priorityTag}`
+            : `${pkg.name}@${pkg.version} has ${vulnCount} vulnerable ${vulnCount === 1 ? 'advisory' : 'advisories'} with NO known fix: ${cveList}${sourceTag}${exploitTag}${priorityTag}`;
 
         findings.push({
             check_id: `dep.${worst.id}`,
@@ -169,6 +187,14 @@ export async function scanDependencies(opts: DependencyScanOptions): Promise<Dep
                 license: pkg.license,
                 manifestPath: pkg.manifestPath,
                 unresolved: pkg.unresolved,
+                sourceCount: priority.sourceCount,
+                confirmedBy: priority.confirmedBy,
+                exploitPriority: priority.score,
+                knownExploited: priority.knownExploited,
+                exploitAvailable: priority.exploitAvailable,
+                epssPercentile: priority.epssPercentile,
+                isDirect: priority.isDirect,
+                advisoryCount: vulnCount,
             },
         });
     }

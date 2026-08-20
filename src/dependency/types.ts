@@ -69,8 +69,11 @@ export interface AffectedRange {
 export interface Vulnerability {
     /** OSV id (OSV-...) or GHSA id (GHSA-...) or CVE id (CVE-...). */
     id: string;
-    /** Source the record came from. */
+    /** Source the record came from. Kept for backward compat; `sources` is the
+     *  authoritative provenance list (may contain multiple entries after merge). */
     source: 'osv' | 'ghsa' | 'nvd';
+    /** All sources that confirmed this vulnerability (after merge). */
+    sources: Array<'osv' | 'ghsa' | 'nvd'>;
     /** One-line summary. */
     summary: string;
     /** List of affected version ranges. */
@@ -79,6 +82,14 @@ export interface Vulnerability {
     cvssScore?: number;
     /** URLs for the user to read more. */
     references?: string[];
+    /** EPSS percentile 0-100 when available (exploit probability). */
+    epssPercentile?: number;
+    /** True if listed in CISA Known Exploited Vulnerabilities catalog. */
+    knownExploited?: boolean;
+    /** True when a public proof-of-concept or exploit is referenced. */
+    exploitAvailable?: boolean;
+    /** Published date (ISO) when available. */
+    published?: string;
 }
 
 /** A vulnerability matched to a resolved package. */

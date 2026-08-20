@@ -168,6 +168,7 @@ export async function queryOsvBatch(
                 list.push({
                     id: v.id,
                     source: 'osv',
+                    sources: ['osv'],
                     summary: v.summary || '',
                     affected,
                     cvssScore,
@@ -268,6 +269,7 @@ export async function queryGhsaViaCli(
             list.push({
                 id: adv.ghsa_id,
                 source: 'ghsa',
+                sources: ['ghsa'],
                 summary: adv.summary || '',
                 affected,
                 cvssScore,

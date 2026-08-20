@@ -426,21 +426,28 @@ export async function executeAction(
                     '',
                 ];
                 const vulnFindings = result.findings.filter(f => !f.check_id.startsWith('dep.license.') && !f.check_id.startsWith('dep.unresolved.'));
-                const sortedBySeverity = vulnFindings.sort((a, b) => {
-                    const rank = (s: string) => s === 'ERROR' ? 0 : 1;
-                    return rank(a.severity) - rank(b.severity);
+                const sortedByPriority = vulnFindings.sort((a, b) => {
+                    const pa = (a as any).dependency?.exploitPriority ?? 0;
+                    const pb = (b as any).dependency?.exploitPriority ?? 0;
+                    return pb - pa;
                 });
-                for (const f of sortedBySeverity.slice(0, 20)) {
+                for (const f of sortedByPriority.slice(0, 20)) {
                     const dep = (f as any).dependency;
-                    const sev = f.severity === 'ERROR' ? 'CRITICAL' : 'HIGH';
-                    lines.push(`  [${sev}] ${dep?.name || 'unknown'}@${dep?.installedVersion || '?'} — ${f.message}`);
+                    const priority = dep?.exploitPriority ?? 0;
+                    const priorityLabel = priority >= 75 ? 'CRITICAL' : priority >= 50 ? 'HIGH' : priority >= 25 ? 'MEDIUM' : 'LOW';
+                    const sourceInfo = dep?.sourceCount >= 2 ? ` (${dep.sourceCount} sources: ${dep.confirmedBy})` : '';
+                    const kevTag = dep?.knownExploited ? ' [KEV]' : '';
+                    const exploitTag = dep?.exploitAvailable && !dep?.knownExploited ? ' [exploit available]' : '';
+                    const directTag = dep?.isDirect ? ' [direct dep]' : '';
+                    lines.push(`  [${priorityLabel}] ${dep?.name || 'unknown'}@${dep?.installedVersion || '?'} — ${f.message}${sourceInfo}${kevTag}${exploitTag}${directTag}`);
                     if (dep?.fixedVersion) lines.push(`    Fix: upgrade to ${dep.fixedVersion}`);
+                    if (dep?.epssPercentile) lines.push(`    EPSS: ${dep.epssPercentile}%`);
                 }
                 if (vulnFindings.length > 20) {
                     lines.push(`  ... and ${vulnFindings.length - 20} more (run securecode.scan-dependencies for the full list)`);
                 }
                 lines.push('');
-                lines.push('NOTE: These are known-vulnerable library versions (SCA), NOT code-level vulnerabilities. Report them separately from code-path findings. These do not need exploit verification.');
+                lines.push('NOTE: These are known-vulnerable library versions (SCA), NOT code-level vulnerabilities. Report them separately from code-path findings. The exploit-priority score (0-100) combines CVSS, EPSS, CISA KEV, exploit availability, and direct-dependency status — fix higher scores first. These do not need exploit verification.');
                 return truncate(lines.join('\n'));
             } catch (e: any) {
                 return `Error scanning dependencies: ${e.message || e}`;

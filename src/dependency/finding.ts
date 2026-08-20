@@ -24,6 +24,22 @@ export interface ScanFinding {
         license?: string;
         manifestPath?: string;
         unresolved?: boolean;
+        /** Number of advisory sources that confirmed (1-3: osv, ghsa, nvd). */
+        sourceCount?: number;
+        /** Comma-separated list of confirming sources. */
+        confirmedBy?: string;
+        /** Exploit-priority score 0-100 (higher = more urgent). */
+        exploitPriority?: number;
+        /** True if listed in CISA KEV catalog. */
+        knownExploited?: boolean;
+        /** True if a public exploit/PoC is referenced. */
+        exploitAvailable?: boolean;
+        /** EPSS percentile 0-100. */
+        epssPercentile?: number;
+        /** True if the package is a direct (not transitive) dependency. */
+        isDirect?: boolean;
+        /** Total number of distinct advisories for this package. */
+        advisoryCount?: number;
     };
 }
 
