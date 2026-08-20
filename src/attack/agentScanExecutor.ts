@@ -37,15 +37,15 @@ import type {
     AgentScanTarget,
 } from './agentScanProtocol';
 
-const MAX_OBSERVATION_CHARS = 16000;
-const LARGE_FILE_THRESHOLD = 300;
+export const MAX_OBSERVATION_CHARS = 16000;
+export const LARGE_FILE_THRESHOLD = 300;
 
-function truncate(text: string): string {
+export function truncate(text: string): string {
     if (text.length <= MAX_OBSERVATION_CHARS) return text;
     return text.slice(0, MAX_OBSERVATION_CHARS) + '\n… [truncated]';
 }
 
-function redact(text: string): string {
+export function redact(text: string): string {
     return truncate(redactText(text));
 }
 
@@ -99,16 +99,7 @@ function escapeRegex(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/**
- * Extract a function map from source code using tree-sitter.
- * Returns a string like:
- *   Function map:
- *     L1-20   requireAuth (function_declaration)
- *     L22-50  requireMembership (function_declaration)
- *     ...
- * Returns null if tree-sitter parsing fails.
- */
-async function extractFunctionMap(content: string, relPath: string): Promise<string | null> {
+export async function extractFunctionMap(content: string, relPath: string): Promise<string | null> {
     try {
         const { parseSource } = await import('../project-map/parserLoader');
         const { walk } = await import('../project-map/astHelpers');

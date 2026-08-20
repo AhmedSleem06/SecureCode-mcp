@@ -375,6 +375,10 @@ export interface AgentScanTarget {
     /** Diff-aware blast radius scope. When present, the agent should focus
      *  its investigation on files within this scope. */
     scope?: AgentScanScope;
+    /** Formatted architecture context string from a prior architecture-scout
+     *  run. Gives the agent project-wide context (important files, trust
+     *  boundaries, security controls) so it doesn't re-discover them. */
+    architectureContext?: string;
 }
 
 export interface AgentScanStartResponse {

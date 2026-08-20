@@ -33,14 +33,19 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.map',
         description:
-            'Get or build the Project Map for the workspace — extracted endpoints, middleware, auth scheme, and ORM. Read-only: no approval needed. Actions: "endpoints" (default, returns the endpoint list), "status" (map metadata), "build" (rebuild the map from source).',
+            'Get or build the Project Map for the workspace — extracted endpoints, middleware, auth scheme, and ORM. Read-only: no approval needed. Actions: "endpoints" (default, returns the endpoint list), "status" (map metadata), "build" (rebuild the map from source), "architecture" (run the architecture-scout subagent to survey the project and extract important files, trust boundaries, security controls, and a recommended scan order — uses AI credits).',
         inputSchema: {
             type: 'object',
             properties: {
                 action: {
                     type: 'string',
-                    enum: ['status', 'endpoints', 'build'],
-                    description: 'What to do: "status" for map metadata, "endpoints" for the endpoint list (default), "build" to rebuild the map from source.',
+                    enum: ['status', 'endpoints', 'build', 'architecture'],
+                    description: 'What to do: "status" for map metadata, "endpoints" for the endpoint list (default), "build" to rebuild the map from source, "architecture" to run the architecture-scout subagent (surveys the project, extracts important files, uses AI credits).',
+                },
+                depth: {
+                    type: 'string',
+                    enum: ['quick', 'standard', 'deep'],
+                    description: 'Architecture scout depth: "quick" (12 steps, ~5 credits, 20 important files), "standard" (25 steps, ~10 credits, 50 important files, default), "deep" (50 steps, ~20 credits, 100 important files). Only applies when action is "architecture".',
                 },
             },
         },

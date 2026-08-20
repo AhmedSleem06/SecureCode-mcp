@@ -29,6 +29,11 @@ import {
 } from '../project-map/scanCache';
 import { loadAgentMemory, formatMemoryForPrompt } from '../project-map/agentMemory';
 import { getCapability, evidenceLevelTag } from '../project-map/capabilityRegistry';
+import { readCache } from '../project-map/cache';
+import {
+    getCachedArchitectureContext,
+    formatArchitectureContextForPrompt,
+} from '../project-map/architectureContext';
 import { runAgentScan } from '../attack/agentScanLoop';
 import { runVerifyLoop } from '../attack/verifyLoop';
 import { VerifyBudgetTracker, defaultVerifyBudget, type VerifyBudget, type AgentScanScope } from '../attack/agentScanProtocol';
@@ -232,6 +237,35 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     // 3. Run the agent loop
     // (workspaceMemory was loaded above)
 
+    // 3b. Auto-load a cached architecture context (if present and valid)
+    // so the vulnerability investigator starts with project-wide context
+    // instead of having to discover "where is auth?", "what's the data
+    // layer?" from scratch. The architecture context is produced by
+    // `securecode.map action:architecture` and cached in
+    // .securecode/architecture-context.json. If it's stale or absent, the
+    // agent proceeds without it (no extra cost).
+    let architectureContextStr: string | undefined;
+    if (filePath) {
+        try {
+            const map = readCache(ctx.workspaceRoot);
+            if (map) {
+                // Try each depth; 'standard' is the most common. The cache
+                // returns null if the entry is stale or missing.
+                for (const d of ['standard', 'deep', 'quick'] as const) {
+                    const cached = getCachedArchitectureContext(
+                        ctx.workspaceRoot, d, map.builtAt, map.version,
+                    );
+                    if (cached) {
+                        architectureContextStr = formatArchitectureContextForPrompt(cached);
+                        break;
+                    }
+                }
+            }
+        } catch {
+            // best-effort — proceed without architecture context
+        }
+    }
+
     const target: AgentScanTarget = {
         filePath: filePath || 'inline-code',
         language,
@@ -239,6 +273,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         endpointContext,
         workspaceMemory,
         scope,
+        architectureContext: architectureContextStr,
     };
 
     const agentResult = await runAgentScan(ctx, target, {
