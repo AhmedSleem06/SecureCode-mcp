@@ -30,6 +30,8 @@ export async function toolFix(ctx: ServerContext, args: any): Promise<unknown> {
             summary,
             [code, language, args.vulnerabilityType, args.lineStart, args.lineEnd, args.evidenceSnippet],
             60_000,
+            'paid-generation',
+            ctx.workspaceRoot,
         );
 
         if (!result.approved) {

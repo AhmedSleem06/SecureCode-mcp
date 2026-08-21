@@ -39,6 +39,7 @@ import { runVerifyLoop } from '../attack/verifyLoop';
 import { VerifyBudgetTracker, defaultVerifyBudget, type VerifyBudget, type AgentScanScope } from '../attack/agentScanProtocol';
 import type { AgentScanFinding, AgentScanTarget } from '../attack/agentScanProtocol';
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
+import { ApprovalBroker } from '../approval/broker';
 import { getGitChangedFiles } from '../utils/gitContext';
 import { computeBlastRadius } from '../project-map/blastRadius';
 import { recordScanAuditSample } from '../audit/scanAuditLog';
@@ -49,6 +50,9 @@ interface ProvenFinding extends AgentScanFinding {
     provenReason?: string;
     evidenceLevel?: string;
     originalConfidence?: number;
+    fixStatus?: 'fix-generated' | 'fix-denied' | 'fix-error';
+    fixDeniedReason?: string;
+    fixApprovalId?: string;
 }
 
 /** Prove high/critical/medium findings — skip only low. */
@@ -456,7 +460,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     //   3. The verify subagent's verdict (PROVEN/UNPROVEN/INCONCLUSIVE)
     clampConfidenceByCapability(provenFindings, agentResult.transcript, language);
 
-    // 4b. Generate fixes for proven/suspected findings
+    // 4b. Generate fixes for proven/suspected findings (requires approval)
     const fixableFindings = provenFindings.filter(f =>
         f.proven === 'PROVEN' || (f.proven !== 'UNPROVEN' && f.confidence >= 60)
     );
@@ -466,37 +470,64 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     }
 
     let fixIdx = 0;
-    for (const finding of fixableFindings) {
-        if (progress) {
-            fixIdx++;
-            progress(fixIdx, fixableFindings.length, `Fixing ${finding.type} at line ${finding.line}...`);
-        }
+    const fixBroker = fixableFindings.length > 0 ? new ApprovalBroker() : null;
+    if (fixBroker) await fixBroker.start();
 
-        try {
-            const fixResp = await client.postJson<FixResponse>('/fix', {
-                code,
-                language,
-                vulnerability: {
-                    type: finding.type,
-                    line_start: finding.line,
-                    line_end: finding.lineEnd || finding.line,
-                    evidence_snippet: finding.evidence,
-                },
-            });
-
-            if (fixResp.fixed_code) {
-                finding.fix = {
-                    fixedCode: fixResp.fixed_code,
-                    replaceRange: { start_line: finding.line, end_line: finding.lineEnd || finding.line },
-                    fixSummary: fixResp.fix_summary || '',
-                    importsNeeded: fixResp.imports_needed,
-                    confidence: fixResp.confidence,
-                };
+    try {
+        for (const finding of fixableFindings) {
+            if (progress) {
+                fixIdx++;
+                progress(fixIdx, fixableFindings.length, `Fixing ${finding.type} at line ${finding.line}...`);
             }
-        } catch (err: any) {
-            // Best-effort — finding stays without fix
-            console.warn(`[Agent Scan] Fix generation failed for ${finding.type} at L${finding.line}: ${err.message}`);
+
+            const fixSummary = `Generate fix for ${finding.type} at line ${finding.line}${finding.lineEnd ? `-${finding.lineEnd}` : ''}\nSeverity: ${finding.severity} | Confidence: ${finding.confidence}%\nEvidence: ${finding.evidence?.substring(0, 200) || '(none)'}`;
+
+            try {
+                const approval = await fixBroker!.requestApproval(
+                    'securecode.agent-scan (fix generation)',
+                    fixSummary,
+                    [code, language, finding.type, finding.line, finding.lineEnd, finding.evidence, finding.severity, finding.confidence],
+                    60_000,
+                    'paid-generation',
+                    ctx.workspaceRoot,
+                );
+
+                if (!approval.approved) {
+                    finding.fixStatus = 'fix-denied';
+                    finding.fixDeniedReason = approval.reason;
+                    continue;
+                }
+
+                const fixResp = await client.postJson<FixResponse>('/fix', {
+                    code,
+                    language,
+                    vulnerability: {
+                        type: finding.type,
+                        line_start: finding.line,
+                        line_end: finding.lineEnd || finding.line,
+                        evidence_snippet: finding.evidence,
+                    },
+                });
+
+                if (fixResp.fixed_code) {
+                    finding.fix = {
+                        fixedCode: fixResp.fixed_code,
+                        replaceRange: { start_line: finding.line, end_line: finding.lineEnd || finding.line },
+                        fixSummary: fixResp.fix_summary || '',
+                        importsNeeded: fixResp.imports_needed,
+                        confidence: fixResp.confidence,
+                    };
+                    finding.fixStatus = 'fix-generated';
+                    finding.fixApprovalId = approval.requestId;
+                }
+            } catch (err: any) {
+                finding.fixStatus = 'fix-error';
+                finding.fixDeniedReason = err.message;
+                console.warn(`[Agent Scan] Fix generation failed for ${finding.type} at L${finding.line}: ${err.message}`);
+            }
         }
+    } finally {
+        if (fixBroker) await fixBroker.stop();
     }
 
     // 5. Write to cache before returning

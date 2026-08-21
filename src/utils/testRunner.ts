@@ -14,6 +14,8 @@
  */
 
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import { ApprovalBroker } from '../approval/broker';
 import { runLocalTest, runTestCommand, type LocalTestResult } from './localTestRunner';
 import { validateTestCommand, type ValidatedTestCommand, formatValidatedCommand } from './testCommandPolicy';
@@ -65,6 +67,29 @@ export interface RunTestsResult {
 
 function sha256Prefix(s: string): string {
     return crypto.createHash('sha256').update(s).digest('hex').substring(0, 16);
+}
+
+function hashWorkspaceFile(workspaceRoot: string, relPath: string): string | null {
+    try {
+        const p = path.join(workspaceRoot, relPath);
+        if (!fs.existsSync(p)) return null;
+        const content = fs.readFileSync(p, 'utf8').slice(0, 65536);
+        return sha256Prefix(content);
+    } catch {
+        return null;
+    }
+}
+
+function workspaceContentHash(workspaceRoot: string): string | null {
+    const pkg = hashWorkspaceFile(workspaceRoot, 'package.json');
+    const lock = hashWorkspaceFile(workspaceRoot, 'package-lock.json')
+        || hashWorkspaceFile(workspaceRoot, 'pnpm-lock.yaml')
+        || hashWorkspaceFile(workspaceRoot, 'yarn.lock')
+        || hashWorkspaceFile(workspaceRoot, 'bun.lock')
+        || hashWorkspaceFile(workspaceRoot, 'requirements.txt')
+        || hashWorkspaceFile(workspaceRoot, 'pyproject.toml');
+    if (!pkg && !lock) return null;
+    return `${pkg || 'none'}:${lock || 'none'}`;
 }
 
 function truncateOutput(s: string): string {
@@ -145,7 +170,8 @@ function buildApprovalSummary(req: RunTestsRequest, command?: ValidatedTestComma
     return `Run generated test script in sandbox\nRunner: ${req.runner}\nScript: ${req.script!.length} bytes (hash ${sha256Prefix(req.script!)})${setupInfo}\nTimeout: ${req.timeoutMs || DEFAULT_TIMEOUT_MS}ms`;
 }
 
-function buildOperationParts(req: RunTestsRequest, command?: ValidatedTestCommand): unknown[] {
+function buildOperationParts(req: RunTestsRequest, command: ValidatedTestCommand | undefined, workspaceRoot: string): unknown[] {
+    const wsHash = workspaceContentHash(workspaceRoot);
     if (req.mode === 'existing' && command) {
         return [
             req.mode,
@@ -154,6 +180,7 @@ function buildOperationParts(req: RunTestsRequest, command?: ValidatedTestComman
             command.selectedFiles,
             req.testPattern,
             command.timeoutMs,
+            wsHash,
         ];
     }
     return [
@@ -162,6 +189,7 @@ function buildOperationParts(req: RunTestsRequest, command?: ValidatedTestComman
         req.script ? sha256Prefix(req.script) : null,
         req.setupScript ? sha256Prefix(req.setupScript) : null,
         req.timeoutMs || DEFAULT_TIMEOUT_MS,
+        wsHash,
     ];
 }
 
@@ -190,7 +218,7 @@ export async function runTests(
 
     const command = validation.command;
     const summary = buildApprovalSummary(req, command);
-    const operationParts = buildOperationParts(req, command);
+        const operationParts = buildOperationParts(req, command, workspaceRoot);
 
     const ownsBroker = !options?.broker;
     const broker = options?.broker ?? new ApprovalBroker();
@@ -202,6 +230,8 @@ export async function runTests(
             summary,
             operationParts,
             60_000,
+            'paid-generation',
+            workspaceRoot,
         );
 
         if (!approval.approved) {

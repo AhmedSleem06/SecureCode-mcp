@@ -27,7 +27,7 @@ const CACHE_FILE = 'scan-cache.json';
  * be filtered against current agent memory (dismissed false positives).
  * Existing v21 entries are invalid (different shape + filtering semantics).
  */
-export const AGENT_SCAN_CACHE_VERSION = 22;
+export const AGENT_SCAN_CACHE_VERSION = 23;
 
 /** Cache TTL: 7 days. Findings older than this are re-scanned. */
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;

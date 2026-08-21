@@ -18,6 +18,14 @@ vi.mock('../src/api/client', () => ({
     })),
 }));
 
+vi.mock('../src/approval/broker', () => ({
+    ApprovalBroker: vi.fn().mockImplementation(() => ({
+        start: vi.fn().mockResolvedValue(0),
+        stop: vi.fn().mockResolvedValue(undefined),
+        requestApproval: vi.fn().mockResolvedValue({ approved: true, reason: 'test auto-approve', requestId: 'test-approval', duration: 0 }),
+    })),
+}));
+
 import { runVerifyLoop } from '../src/attack/verifyLoop';
 import { runAgentScan } from '../src/attack/agentScanLoop';
 import { ApiClient } from '../src/api/client';

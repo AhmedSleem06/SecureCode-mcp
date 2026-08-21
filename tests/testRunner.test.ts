@@ -37,20 +37,39 @@ function httpPost(url: string, body: any): Promise<{ status: number; data: any }
     });
 }
 
-async function approvePending(b: ApprovalBroker, p: number): Promise<void> {
+async function getDecisionToken(b: ApprovalBroker, p: number): Promise<string> {
     await new Promise((r) => setTimeout(r, 200));
     const pending = (b as any).pending as Map<string, any>;
     const reqId = [...pending.keys()][0];
     if (!reqId) throw new Error('No pending approval request');
-    await httpPost(`http://127.0.0.1:${p}/decide`, { id: reqId, approved: true });
+    return new Promise<string>((resolve, reject) => {
+        http.get(`http://127.0.0.1:${p}/details?id=${reqId}`, (res) => {
+            let raw = '';
+            res.on('data', (c) => { raw += c; });
+            res.on('end', () => {
+                try {
+                    const data = JSON.parse(raw);
+                    resolve(data.decisionToken);
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        }).on('error', reject);
+    });
+}
+
+async function approvePending(b: ApprovalBroker, p: number): Promise<void> {
+    const token = await getDecisionToken(b, p);
+    const pending = (b as any).pending as Map<string, any>;
+    const reqId = [...pending.keys()][0];
+    await httpPost(`http://127.0.0.1:${p}/decide`, { id: reqId, decisionToken: token, approved: true });
 }
 
 async function denyPending(b: ApprovalBroker, p: number): Promise<void> {
-    await new Promise((r) => setTimeout(r, 200));
+    const token = await getDecisionToken(b, p);
     const pending = (b as any).pending as Map<string, any>;
     const reqId = [...pending.keys()][0];
-    if (!reqId) throw new Error('No pending approval request');
-    await httpPost(`http://127.0.0.1:${p}/decide`, { id: reqId, approved: false });
+    await httpPost(`http://127.0.0.1:${p}/decide`, { id: reqId, decisionToken: token, approved: false });
 }
 
 describe('runTests', () => {
