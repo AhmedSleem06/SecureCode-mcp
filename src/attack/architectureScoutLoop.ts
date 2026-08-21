@@ -41,6 +41,7 @@ import {
     type ArchitectureScoutTranscriptStep,
 } from './architectureScoutProtocol';
 import type { ArchitectureContext } from '../project-map/architectureContext';
+import { ARCHITECTURE_CONTEXT_VERSION } from '../project-map/architectureContext';
 
 // Re-use the agent-scan response validator shape. The architecture scout
 // step response has the same fields as AgentScanStepResponse (minus
@@ -348,12 +349,19 @@ export async function runArchitectureScout(
                 // Stamp the context with cache/derivation metadata before
                 // returning — the LLM doesn't know these fields.
                 const ctx2 = action.architecture as ArchitectureContext;
-                ctx2.version = 1; // ARCHITECTURE_CONTEXT_VERSION — keep in sync
+                ctx2.version = ARCHITECTURE_CONTEXT_VERSION;
                 ctx2.depth = depth;
                 ctx2.derivedAt = Date.now();
                 ctx2.projectMapBuiltAt = options.projectMapBuiltAt ?? 0;
                 ctx2.projectMapVersion = options.projectMapVersion ?? 0;
                 if (!ctx2.completeness) ctx2.completeness = 'partial';
+                // Cap importantFiles at maxImportantFiles — the LLM may
+                // exceed the cap despite the prompt instruction.
+                if (ctx2.importantFiles && ctx2.importantFiles.length > target.maxImportantFiles) {
+                    ctx2.importantFiles = ctx2.importantFiles
+                        .sort((a, b) => b.importance - a.importance)
+                        .slice(0, target.maxImportantFiles);
+                }
                 return {
                     status: 'completed',
                     architecture: ctx2,
