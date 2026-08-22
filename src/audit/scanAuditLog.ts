@@ -48,6 +48,7 @@ export interface ScanAuditSample {
         confidence: number;
         proven: string;
         evidenceLevel?: string;
+        verificationLevel?: string;
     }[];
     findingCounts: {
         total: number;
@@ -56,6 +57,13 @@ export interface ScanAuditSample {
         inconclusive: number;
         notReproducible: number;
         skipped: number;
+    };
+    precisionMetrics?: {
+        investigationNotesCount: number;
+        coverageGapsCount: number;
+        verificationLevelDistribution: Record<string, number>;
+        rootCauseCount: number;
+        hasArchitectureContext: boolean;
     };
     verifyUsage?: {
         findingsAttempted: number;
@@ -115,6 +123,9 @@ export function recordScanAuditSample(
         cached: boolean;
         verifyUsage?: any;
         scope?: any;
+        investigationNotes?: any[];
+        coverageGaps?: any[];
+        hasArchitectureContext?: boolean;
     },
     options?: {
         samplingRate?: number;
@@ -134,6 +145,7 @@ export function recordScanAuditSample(
         confidence: f.confidence ?? 0,
         proven: f.proven || 'UNKNOWN',
         evidenceLevel: f.evidenceLevel,
+        verificationLevel: f.verificationLevel,
     }));
 
     const findingCounts = {
@@ -143,6 +155,25 @@ export function recordScanAuditSample(
         inconclusive: findings.filter(f => f.proven === 'INCONCLUSIVE').length,
         notReproducible: findings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
         skipped: findings.filter(f => f.proven === 'SKIPPED').length,
+    };
+
+    const verificationLevelDistribution: Record<string, number> = {};
+    for (const f of findings) {
+        const vl = f.verificationLevel || 'unspecified';
+        verificationLevelDistribution[vl] = (verificationLevelDistribution[vl] || 0) + 1;
+    }
+
+    const rootCauseIds = new Set<string>();
+    for (const f of scanResult.agentFindings || []) {
+        if (f.rootCause?.rootCauseId) rootCauseIds.add(f.rootCause.rootCauseId);
+    }
+
+    const precisionMetrics = {
+        investigationNotesCount: scanResult.investigationNotes?.length ?? 0,
+        coverageGapsCount: scanResult.coverageGaps?.length ?? 0,
+        verificationLevelDistribution,
+        rootCauseCount: rootCauseIds.size,
+        hasArchitectureContext: scanResult.hasArchitectureContext ?? false,
     };
 
     const sample: ScanAuditSample = {
@@ -155,6 +186,7 @@ export function recordScanAuditSample(
         costSpentUsd: scanResult.costSpentUsd,
         findings,
         findingCounts,
+        precisionMetrics,
         verifyUsage: scanResult.verifyUsage,
         actionHistogram: buildActionHistogram(scanResult.transcript || []),
         cached: scanResult.cached,

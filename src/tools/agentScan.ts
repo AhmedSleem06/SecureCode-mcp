@@ -825,6 +825,9 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 wallClockMs: verifyTracker.wallClockElapsedMs,
             },
             scope,
+            investigationNotes: agentResult.investigationNotes,
+            coverageGaps: agentResult.coverageGaps,
+            hasArchitectureContext: !!architectureContextStr,
         });
     } catch {
         // best-effort — audit failure must not block scan results
