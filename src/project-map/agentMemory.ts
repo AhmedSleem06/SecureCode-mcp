@@ -18,9 +18,12 @@ import * as crypto from 'crypto';
 
 const MEMORY_DIR = '.securecode';
 const MEMORY_FILE = 'agent-memory.json';
-const MEMORY_VERSION = 1;
+const MEMORY_VERSION = 2;
 const MAX_FALSE_POSITIVES = 100;  // cap to prevent unbounded growth
 const MAX_KNOWN_FACTS = 50;
+const MAX_INVESTIGATION_NOTES = 50;
+const MAX_COVERAGE_GAPS = 30;
+const MEMORY_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -47,10 +50,51 @@ export interface KnownFactEntry {
     addedAt: string;
 }
 
+export interface InvestigationMemoryEntry {
+    id: string;
+    kind: 'investigation-note';
+    title: string;
+    detail: string;
+    file: string;
+    line?: number;
+    lineEnd?: number;
+    symbol?: string;
+    verificationLevel: string;
+    rootCauseId?: string;
+    requiredEvidence: string[];
+    priority: 'high' | 'medium' | 'low';
+    sourceScanId?: string;
+    fileHash?: string;
+    createdAt: string;
+    lastSeenAt: string;
+    status: 'open' | 'resolved' | 'stale';
+}
+
+export interface CoverageGapMemoryEntry {
+    id: string;
+    kind: 'coverage-gap';
+    title: string;
+    detail: string;
+    file?: string;
+    line?: number;
+    lineEnd?: number;
+    symbol?: string;
+    requiredEvidence: string[];
+    suggestedNextAction: string;
+    priority: 'high' | 'medium' | 'low';
+    sourceScanId?: string;
+    fileHash?: string;
+    createdAt: string;
+    lastSeenAt: string;
+    status: 'open' | 'resolved' | 'stale';
+}
+
 export interface AgentMemory {
     version: number;
     falsePositives: FalsePositiveEntry[];
     knownFacts: KnownFactEntry[];
+    investigationNotes: InvestigationMemoryEntry[];
+    coverageGaps: CoverageGapMemoryEntry[];
 }
 
 // ── Path helpers ────────────────────────────────────────────────────────────
@@ -77,21 +121,22 @@ export function loadAgentMemory(workspaceRoot: string): AgentMemory {
     const p = memoryPath(workspaceRoot);
     try {
         if (!fs.existsSync(p)) {
-            return { version: MEMORY_VERSION, falsePositives: [], knownFacts: [] };
+            return { version: MEMORY_VERSION, falsePositives: [], knownFacts: [], investigationNotes: [], coverageGaps: [] };
         }
         const raw = fs.readFileSync(p, 'utf8');
-        const data = JSON.parse(raw) as AgentMemory;
+        const data = JSON.parse(raw) as Partial<AgentMemory>;
         if (!data.version || data.version > MEMORY_VERSION) {
-            // Forward-incompatible — start fresh
-            return { version: MEMORY_VERSION, falsePositives: [], knownFacts: [] };
+            return { version: MEMORY_VERSION, falsePositives: [], knownFacts: [], investigationNotes: [], coverageGaps: [] };
         }
         return {
             version: MEMORY_VERSION,
             falsePositives: data.falsePositives || [],
             knownFacts: data.knownFacts || [],
+            investigationNotes: data.investigationNotes || [],
+            coverageGaps: data.coverageGaps || [],
         };
     } catch {
-        return { version: MEMORY_VERSION, falsePositives: [], knownFacts: [] };
+        return { version: MEMORY_VERSION, falsePositives: [], knownFacts: [], investigationNotes: [], coverageGaps: [] };
     }
 }
 
@@ -209,7 +254,7 @@ export function addKnownFact(
 }
 
 /**
- * Clear all agent memory (false positives + known facts) for a workspace.
+ * Clear all agent memory (false positives + known facts + notes + gaps) for a workspace.
  */
 export function clearAgentMemory(workspaceRoot: string): boolean {
     const p = memoryPath(workspaceRoot);
@@ -224,6 +269,216 @@ export function clearAgentMemory(workspaceRoot: string): boolean {
     }
 }
 
+// ── Investigation notes and coverage gaps persistence ────────────────────────
+
+export interface SaveInvestigationNotesInput {
+    notes: Array<{
+        title: string;
+        detail: string;
+        file: string;
+        line?: number;
+        lineEnd?: number;
+        symbol?: string;
+        verificationLevel: string;
+        rootCauseId?: string;
+        requiredEvidence: string[];
+        priority: 'high' | 'medium' | 'low';
+    }>;
+    sourceScanId?: string;
+    fileHashes?: Map<string, string>;
+}
+
+export function saveInvestigationNotes(
+    workspaceRoot: string,
+    input: SaveInvestigationNotesInput,
+): void {
+    if (!input.notes || input.notes.length === 0) return;
+    const memory = loadAgentMemory(workspaceRoot);
+    const now = new Date().toISOString();
+
+    for (const note of input.notes) {
+        const fileHash = input.fileHashes?.get(note.file);
+        const existingIdx = memory.investigationNotes.findIndex(
+            n => n.file === note.file && n.title === note.title && n.status === 'open',
+        );
+        if (existingIdx >= 0) {
+            memory.investigationNotes[existingIdx].lastSeenAt = now;
+            memory.investigationNotes[existingIdx].detail = note.detail;
+            memory.investigationNotes[existingIdx].requiredEvidence = note.requiredEvidence;
+            memory.investigationNotes[existingIdx].fileHash = fileHash ?? memory.investigationNotes[existingIdx].fileHash;
+            continue;
+        }
+
+        memory.investigationNotes.push({
+            id: 'note_' + crypto.randomBytes(4).toString('hex'),
+            kind: 'investigation-note',
+            title: note.title,
+            detail: note.detail,
+            file: note.file,
+            line: note.line,
+            lineEnd: note.lineEnd,
+            symbol: note.symbol,
+            verificationLevel: note.verificationLevel,
+            rootCauseId: note.rootCauseId,
+            requiredEvidence: note.requiredEvidence,
+            priority: note.priority,
+            sourceScanId: input.sourceScanId,
+            fileHash,
+            createdAt: now,
+            lastSeenAt: now,
+            status: 'open',
+        });
+    }
+
+    pruneExpired(memory);
+    if (memory.investigationNotes.length > MAX_INVESTIGATION_NOTES) {
+        memory.investigationNotes = memory.investigationNotes.slice(-MAX_INVESTIGATION_NOTES);
+    }
+    saveAgentMemory(workspaceRoot, memory);
+}
+
+export interface SaveCoverageGapsInput {
+    gaps: Array<{
+        title: string;
+        detail: string;
+        file?: string;
+        line?: number;
+        lineEnd?: number;
+        symbol?: string;
+        requiredEvidence: string[];
+        suggestedNextAction: string;
+        priority: 'high' | 'medium' | 'low';
+    }>;
+    sourceScanId?: string;
+    fileHashes?: Map<string, string>;
+}
+
+export function saveCoverageGaps(
+    workspaceRoot: string,
+    input: SaveCoverageGapsInput,
+): void {
+    if (!input.gaps || input.gaps.length === 0) return;
+    const memory = loadAgentMemory(workspaceRoot);
+    const now = new Date().toISOString();
+
+    for (const gap of input.gaps) {
+        const file = gap.file;
+        const fileHash = file ? input.fileHashes?.get(file) : undefined;
+        const existingIdx = file
+            ? memory.coverageGaps.findIndex(
+                g => g.file === file && g.title === gap.title && g.status === 'open',
+            )
+            : -1;
+        if (existingIdx >= 0) {
+            memory.coverageGaps[existingIdx].lastSeenAt = now;
+            memory.coverageGaps[existingIdx].detail = gap.detail;
+            memory.coverageGaps[existingIdx].requiredEvidence = gap.requiredEvidence;
+            memory.coverageGaps[existingIdx].fileHash = fileHash ?? memory.coverageGaps[existingIdx].fileHash;
+            continue;
+        }
+
+        memory.coverageGaps.push({
+            id: 'gap_' + crypto.randomBytes(4).toString('hex'),
+            kind: 'coverage-gap',
+            title: gap.title,
+            detail: gap.detail,
+            file,
+            line: gap.line,
+            lineEnd: gap.lineEnd,
+            symbol: gap.symbol,
+            requiredEvidence: gap.requiredEvidence,
+            suggestedNextAction: gap.suggestedNextAction,
+            priority: gap.priority,
+            sourceScanId: input.sourceScanId,
+            fileHash,
+            createdAt: now,
+            lastSeenAt: now,
+            status: 'open',
+        });
+    }
+
+    pruneExpired(memory);
+    if (memory.coverageGaps.length > MAX_COVERAGE_GAPS) {
+        memory.coverageGaps = memory.coverageGaps.slice(-MAX_COVERAGE_GAPS);
+    }
+    saveAgentMemory(workspaceRoot, memory);
+}
+
+/**
+ * Mark investigation notes and coverage gaps as stale when their referenced
+ * file has changed (hash mismatch). Called before a new scan starts so the
+ * agent sees accurate context.
+ */
+export function invalidateStaleEntries(
+    workspaceRoot: string,
+    currentFileHashes: Map<string, string>,
+): void {
+    const memory = loadAgentMemory(workspaceRoot);
+    let changed = false;
+
+    for (const note of memory.investigationNotes) {
+        if (note.status !== 'open') continue;
+        if (!note.fileHash) continue;
+        const currentHash = currentFileHashes.get(note.file);
+        if (currentHash && currentHash !== note.fileHash) {
+            note.status = 'stale';
+            changed = true;
+        }
+    }
+
+    for (const gap of memory.coverageGaps) {
+        if (gap.status !== 'open') continue;
+        if (!gap.fileHash || !gap.file) continue;
+        const currentHash = currentFileHashes.get(gap.file);
+        if (currentHash && currentHash !== gap.fileHash) {
+            gap.status = 'stale';
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        pruneExpired(memory);
+        saveAgentMemory(workspaceRoot, memory);
+    }
+}
+
+/**
+ * Mark a note or gap as resolved (the concern was addressed in a later scan).
+ */
+export function resolveMemoryEntry(
+    workspaceRoot: string,
+    entryId: string,
+): boolean {
+    const memory = loadAgentMemory(workspaceRoot);
+    let found = false;
+    for (const note of memory.investigationNotes) {
+        if (note.id === entryId) {
+            note.status = 'resolved';
+            found = true;
+        }
+    }
+    for (const gap of memory.coverageGaps) {
+        if (gap.id === entryId) {
+            gap.status = 'resolved';
+            found = true;
+        }
+    }
+    if (found) saveAgentMemory(workspaceRoot, memory);
+    return found;
+}
+
+function pruneExpired(memory: AgentMemory): void {
+    const now = Date.now();
+    memory.investigationNotes = memory.investigationNotes.filter(n => {
+        const age = now - new Date(n.lastSeenAt).getTime();
+        return age < MEMORY_TTL_MS;
+    });
+    memory.coverageGaps = memory.coverageGaps.filter(g => {
+        const age = now - new Date(g.lastSeenAt).getTime();
+        return age < MEMORY_TTL_MS;
+    });
+}
+
 // ── Prompt formatting ───────────────────────────────────────────────────────
 
 /**
@@ -233,7 +488,11 @@ export function clearAgentMemory(workspaceRoot: string): boolean {
 export function formatMemoryForPrompt(memory: AgentMemory): string {
     const hasFps = memory.falsePositives.length > 0;
     const hasFacts = memory.knownFacts.length > 0;
-    if (!hasFps && !hasFacts) return '';
+    const openNotes = memory.investigationNotes.filter(n => n.status === 'open');
+    const openGaps = memory.coverageGaps.filter(g => g.status === 'open');
+    const staleNotes = memory.investigationNotes.filter(n => n.status === 'stale');
+    const staleGaps = memory.coverageGaps.filter(g => g.status === 'stale');
+    if (!hasFps && !hasFacts && openNotes.length === 0 && openGaps.length === 0 && staleNotes.length === 0 && staleGaps.length === 0) return '';
 
     const lines: string[] = ['Workspace memory (from previous scans in this workspace):'];
 
@@ -253,6 +512,32 @@ export function formatMemoryForPrompt(memory: AgentMemory): string {
         memory.knownFacts.forEach((f, i) => {
             lines.push(`  ${i + 1}. ${f.fact} (source: ${f.source})`);
         });
+    }
+
+    if (openNotes.length > 0) {
+        lines.push('', `Prior unresolved investigation notes — re-check against current code, do NOT assume they are still valid (${openNotes.length}):`);
+        openNotes.forEach((n, i) => {
+            lines.push(`  ${i + 1}. [${n.priority}] ${n.title}`);
+            lines.push(`     ${n.detail}`);
+            if (n.file) lines.push(`     File: ${n.file}${n.line ? `:${n.line}` : ''}`);
+            if (n.requiredEvidence.length > 0) lines.push(`     Still needed: ${n.requiredEvidence.join('; ')}`);
+        });
+    }
+
+    if (openGaps.length > 0) {
+        lines.push('', `Prior coverage gaps — investigate these if the target file is related (${openGaps.length}):`);
+        openGaps.forEach((g, i) => {
+            lines.push(`  ${i + 1}. [${g.priority}] ${g.title}`);
+            lines.push(`     ${g.detail}`);
+            if (g.file) lines.push(`     File: ${g.file}${g.line ? `:${g.line}` : ''}`);
+            lines.push(`     Next action: ${g.suggestedNextAction}`);
+        });
+    }
+
+    if (staleNotes.length > 0 || staleGaps.length > 0) {
+        lines.push('', `Stale entries (file changed since last scan — re-investigate from scratch):`);
+        staleNotes.forEach(n => lines.push(`  - [note] ${n.title} (${n.file})`));
+        staleGaps.forEach(g => lines.push(`  - [gap] ${g.title} (${g.file || 'unknown'})`));
     }
 
     return lines.join('\n');

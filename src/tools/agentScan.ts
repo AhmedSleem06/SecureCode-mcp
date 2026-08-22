@@ -27,7 +27,7 @@ import {
     computeMemoryFingerprint,
     filterCachedFindingsAgainstMemory,
 } from '../project-map/scanCache';
-import { loadAgentMemory, formatMemoryForPrompt } from '../project-map/agentMemory';
+import { loadAgentMemory, formatMemoryForPrompt, saveInvestigationNotes, saveCoverageGaps, invalidateStaleEntries } from '../project-map/agentMemory';
 import { getCapability, evidenceLevelTag } from '../project-map/capabilityRegistry';
 import { readCache } from '../project-map/cache';
 import {
@@ -297,6 +297,10 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         workspaceMemory = formatMemoryForPrompt(memory) || undefined;
         falsePositives = memory.falsePositives.map(fp => ({ findingType: fp.findingType, evidenceHash: fp.evidenceHash }));
         memoryFingerprint = computeMemoryFingerprint(falsePositives);
+        if (filePath) {
+            const fileHash = require('crypto').createHash('sha256').update(code).digest('hex').substring(0, 16);
+            invalidateStaleEntries(ctx.workspaceRoot, new Map([[filePath, fileHash]]));
+        }
     } catch {
         // best-effort — proceed without memory
     }
@@ -818,6 +822,30 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         });
     } catch {
         // best-effort — audit failure must not block scan results
+    }
+
+    // 6b. Persist investigation notes and coverage gaps to workspace memory
+    // so future scans can use them as context. These are NOT findings —
+    // they guide future investigation without suppressing new discoveries.
+    try {
+        const fileHashes = new Map<string, string>();
+        if (filePath) {
+            fileHashes.set(filePath, require('crypto').createHash('sha256').update(code).digest('hex').substring(0, 16));
+        }
+        if (agentResult.investigationNotes && agentResult.investigationNotes.length > 0) {
+            saveInvestigationNotes(ctx.workspaceRoot, {
+                notes: agentResult.investigationNotes,
+                fileHashes,
+            });
+        }
+        if (agentResult.coverageGaps && agentResult.coverageGaps.length > 0) {
+            saveCoverageGaps(ctx.workspaceRoot, {
+                gaps: agentResult.coverageGaps,
+                fileHashes,
+            });
+        }
+    } catch {
+        // best-effort — memory persistence failure must not block results
     }
 
     return {
