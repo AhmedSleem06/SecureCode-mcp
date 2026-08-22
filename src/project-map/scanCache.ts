@@ -27,8 +27,11 @@ const CACHE_FILE = 'scan-cache.json';
  * v23 → v24: Added fix re-verification (fixVerification field, new fixStatus
  * values) + human review queue (reviewStatus, reviewId fields). Cached
  * findings from v23 lack these fields and must be re-scanned.
+ * v24 → v25: Precision evidence model — investigationNotes, coverageGaps,
+ * evidenceChain, rootCause, verificationLevel on findings. Cached results
+ * from v24 lack these fields and must be re-scanned.
  */
-export const AGENT_SCAN_CACHE_VERSION = 24;
+export const AGENT_SCAN_CACHE_VERSION = 25;
 
 /** Cache TTL: 7 days. Findings older than this are re-scanned. */
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -42,6 +45,10 @@ export interface ScanCacheEntry {
     timestamp: number;
     /** The findings from the scan. */
     findings: any[];
+    /** Investigated but unproven concerns. */
+    investigationNotes?: any[];
+    /** Areas that were not sufficiently investigated. */
+    coverageGaps?: any[];
     /** Scan status (completed, capped, etc.). */
     status: string;
     /** Summary from the agent. */
@@ -130,6 +137,8 @@ export function writeCachedScan(
     content: string,
     result: {
         findings: any[];
+        investigationNotes?: any[];
+        coverageGaps?: any[];
         status: string;
         summary?: string;
         stepsUsed: number;
@@ -168,6 +177,8 @@ export function writeCachedScan(
         version: AGENT_SCAN_CACHE_VERSION,
         timestamp: now,
         findings: result.findings,
+        investigationNotes: result.investigationNotes,
+        coverageGaps: result.coverageGaps,
         status: result.status,
         summary: result.summary,
         stepsUsed: result.stepsUsed,

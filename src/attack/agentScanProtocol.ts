@@ -26,7 +26,7 @@ export const AGENT_SCAN_DEFAULTS = {
 // new optional action type only requires adding it to SUPPORTED_ACTIONS
 // and bumping the MCP version — the API filters its schema accordingly.
 
-export const AGENT_SCAN_PROTOCOL_VERSION = 2;
+export const AGENT_SCAN_PROTOCOL_VERSION = 3;
 
 export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
@@ -224,6 +224,94 @@ export interface AgentScanRunTestsAction {
     rationale: string;
 }
 
+// ── Precision Evidence Model ────────────────────────────────────────────────
+//
+// Distinguishes "the code branch exists" from "the security impact is proven."
+// A pure-function or logic test proves behavior, not vulnerability. The
+// scanner must separately establish threat model, reachability, missing
+// control, and impact before classifying a candidate as a finding.
+//
+// Mirror: api/src/attacker/agentScanProtocol.ts — keep in step.
+
+export type VerificationLevel =
+    | 'logic-confirmed'
+    | 'path-confirmed'
+    | 'impact-confirmed'
+    | 'exploit-confirmed';
+
+export type ThreatModelApplicability = 'confirmed' | 'rejected' | 'unknown';
+
+export interface EvidenceLocation {
+    file: string;
+    line: number;
+    lineEnd?: number;
+    description: string;
+}
+
+export interface ControlAssessment {
+    expected: string;
+    actual: string;
+    status: 'missing' | 'ineffective' | 'bypassed' | 'present';
+}
+
+export interface ImpactAssessment {
+    description: string;
+    confirmed: boolean;
+}
+
+export interface VerificationAssessment {
+    level: VerificationLevel;
+    method: string;
+}
+
+export interface ThreatModelAssessment {
+    attacker: string;
+    boundary: string;
+    applicable: ThreatModelApplicability;
+    evidence: EvidenceLocation[];
+}
+
+export interface EvidenceChain {
+    source?: EvidenceLocation;
+    flow: EvidenceLocation[];
+    sink?: EvidenceLocation;
+    control?: ControlAssessment;
+    impact?: ImpactAssessment;
+    verification?: VerificationAssessment;
+    threatModel?: ThreatModelAssessment;
+}
+
+export interface RootCauseReference {
+    rootCauseId: string;
+    description: string;
+    affectedSurfaces: EvidenceLocation[];
+}
+
+export interface InvestigationNote {
+    title: string;
+    detail: string;
+    file: string;
+    line?: number;
+    lineEnd?: number;
+    symbol?: string;
+    verificationLevel: VerificationLevel;
+    rootCauseId?: string;
+    requiredEvidence: string[];
+    priority: 'high' | 'medium' | 'low';
+}
+
+export interface CoverageGap {
+    title: string;
+    detail: string;
+    file?: string;
+    line?: number;
+    lineEnd?: number;
+    symbol?: string;
+    requiredEvidence: string[];
+    suggestedNextAction: string;
+    priority: 'high' | 'medium' | 'low';
+}
+
 export interface AgentScanFinding {
     line: number;
     lineEnd?: number;
@@ -240,6 +328,9 @@ export interface AgentScanFinding {
         importsNeeded?: string[];
         confidence?: number;
     };
+    evidenceChain?: EvidenceChain;
+    rootCause?: RootCauseReference;
+    verificationLevel?: VerificationLevel;
 }
 
 export interface AgentScanFinishAction {
@@ -248,6 +339,10 @@ export interface AgentScanFinishAction {
     summary: string;
     /** Self-critique the agent writes before reporting — visible to the user. */
     selfCritique?: string | null;
+    /** Investigated but unproven concerns — never treated as vulnerabilities. */
+    investigationNotes?: InvestigationNote[];
+    /** Areas that were not sufficiently investigated — guides future scans. */
+    coverageGaps?: CoverageGap[];
 }
 
 // ── System events ───────────────────────────────────────────────────────────
@@ -460,6 +555,8 @@ export type AgentScanRunStatus =
 export interface AgentScanResult {
     status: AgentScanRunStatus;
     findings: AgentScanFinding[];
+    investigationNotes: InvestigationNote[];
+    coverageGaps: CoverageGap[];
     summary?: string;
     transcript: AgentScanTranscriptStep[];
     stepsUsed: number;

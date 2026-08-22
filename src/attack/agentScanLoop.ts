@@ -75,6 +75,8 @@ export async function runAgentScan(
                 stepsUsed: 0,
                 costSpentUsd: 0,
                 error: `API returned an invalid start response: ${startValidation.error}`,
+                investigationNotes: [],
+                coverageGaps: [],
             };
         }
         const startResp = startValidation.value;
@@ -126,6 +128,8 @@ export async function runAgentScan(
                     stepsUsed: stepsTaken,
                     costSpentUsd,
                     summary: `Wall clock limit (${wallClockMs}ms) exceeded.`,
+                    investigationNotes: [],
+                    coverageGaps: [],
                 };
             }
 
@@ -138,6 +142,8 @@ export async function runAgentScan(
                     stepsUsed: stepsTaken,
                     costSpentUsd,
                     summary: 'Cancelled by user.',
+                    investigationNotes: [],
+                    coverageGaps: [],
                 };
             }
 
@@ -184,6 +190,8 @@ export async function runAgentScan(
                             stepsUsed: stepsTaken,
                             costSpentUsd,
                             summary: `Step budget exhausted after ${consecutiveErrors} consecutive malformed API responses. Last error: ${vErr}`,
+                            investigationNotes: [],
+                            coverageGaps: [],
                         };
                     }
                     continue;
@@ -204,6 +212,8 @@ export async function runAgentScan(
                         stepsUsed: stepsTaken,
                         costSpentUsd,
                         error: 'API server restarted mid-scan — the run was lost. Please retry the scan.',
+                        investigationNotes: [],
+                        coverageGaps: [],
                     };
                 }
 
@@ -216,6 +226,8 @@ export async function runAgentScan(
                         stepsUsed: stepsTaken,
                         costSpentUsd,
                         summary: 'Cancelled by user.',
+                        investigationNotes: [],
+                        coverageGaps: [],
                     };
                 }
 
@@ -247,6 +259,8 @@ export async function runAgentScan(
                         stepsUsed: stepsTaken,
                         costSpentUsd,
                         summary: `Step budget exhausted after ${consecutiveErrors} consecutive API errors. Last error: ${errMsg}`,
+                        investigationNotes: [],
+                        coverageGaps: [],
                     };
                 }
                 continue;
@@ -293,6 +307,8 @@ export async function runAgentScan(
                     summary: stepResp.costCapped
                         ? `Cost cap ($${budget.costCapUsd.toFixed(2)}) reached.`
                         : 'Agent completed without explicit finish.',
+                    investigationNotes: [],
+                    coverageGaps: [],
                 };
             }
 
@@ -314,6 +330,8 @@ export async function runAgentScan(
                 return {
                     status: 'completed',
                     findings: action.findings,
+                    investigationNotes: action.investigationNotes ?? [],
+                    coverageGaps: action.coverageGaps ?? [],
                     transcript,
                     stepsUsed: stepsTaken,
                     costSpentUsd,
@@ -425,6 +443,8 @@ export async function runAgentScan(
                         stepsUsed: stepsTaken,
                         costSpentUsd,
                         summary: `Investigation cut short — agent was stuck re-reading files. No findings reported.`,
+                        investigationNotes: [],
+                        coverageGaps: [],
                     };
                 }
             } else {
@@ -446,6 +466,8 @@ export async function runAgentScan(
             stepsUsed: stepsTaken,
             costSpentUsd,
             error: err.message || String(err),
+            investigationNotes: [],
+            coverageGaps: [],
         };
     }
 }

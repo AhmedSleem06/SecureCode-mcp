@@ -303,6 +303,8 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     summary: cached.summary || 'Agent completed (cached).',
                     agentFindings: filteredFindings,
                     findings: [],
+                    investigationNotes: cached.investigationNotes ?? [],
+                    coverageGaps: cached.coverageGaps ?? [],
                     stepsUsed: cached.stepsUsed,
                     costSpentUsd: 0,
                     transcript: [],
@@ -725,6 +727,8 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         try {
             writeCachedScan(ctx.workspaceRoot, filePath!, code, {
                 findings: provenFindings,
+                investigationNotes: agentResult.investigationNotes,
+                coverageGaps: agentResult.coverageGaps,
                 status: agentResult.status,
                 summary: agentResult.summary,
                 stepsUsed: agentResult.stepsUsed,
@@ -782,6 +786,8 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         agentFindings: provenFindings,
         verifiedFindings: provenFindings.filter(f => f.proven === 'PROVEN'),
         allFindings: [],
+        investigationNotes: agentResult.investigationNotes ?? [],
+        coverageGaps: agentResult.coverageGaps ?? [],
         stepsUsed: agentResult.stepsUsed,
         costSpentUsd: agentResult.costSpentUsd,
         transcript: agentResult.transcript,
