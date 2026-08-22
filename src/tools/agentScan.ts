@@ -74,6 +74,8 @@ interface ProvenFinding extends AgentScanFinding {
     proofEvidence?: import('../attack/proofTypes').ProofEvidence;
     /** Result of the deterministic proof gate evaluation. */
     proofGateResult?: import('../attack/proofTypes').ProofGateResult;
+    /** Whether human review is required before acting on this finding. */
+    humanReviewRequired?: boolean;
 }
 
 export interface FixVerificationResult {
@@ -611,6 +613,18 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     //   2. What tools were available for this language (capability registry)
     //   3. The verify subagent's verdict (PROVEN/UNPROVEN/INCONCLUSIVE)
     clampConfidenceByCapability(provenFindings, agentResult.transcript, language);
+
+    // 4a-ter. Mark findings requiring human review based on proof quality.
+    for (const finding of provenFindings) {
+        if (finding.proven !== 'PROVEN') continue;
+        const needsReview =
+            finding.severity === 'critical' ||
+            (finding.proofEvidence && finding.proofEvidence.assumptions.length > 0) ||
+            !finding.proofEvidence ||
+            !finding.proofGateResult ||
+            !finding.proofGateResult.eligibleForProven;
+        finding.humanReviewRequired = needsReview;
+    }
 
     // 4a-bis. Queue INCONCLUSIVE findings for non-blocking human review.
     //

@@ -67,6 +67,13 @@ export interface ScanAuditSample {
         stepsGranted?: number;
         extensionsGranted?: number;
         terminationReason?: string;
+        provenStrictCount?: number;
+        provenRejectedByGate?: number;
+        proofGateFailures?: Record<string, number>;
+        syntheticProofCount?: number;
+        realImportProofCount?: number;
+        flakyProofCount?: number;
+        mutationDiscriminationRate?: number;
     };
     verifyUsage?: {
         findingsAttempted: number;
@@ -174,6 +181,26 @@ export function recordScanAuditSample(
         if (f.rootCause?.rootCauseId) rootCauseIds.add(f.rootCause.rootCauseId);
     }
 
+    const proofGateFailures: Record<string, number> = {};
+    let provenStrictCount = 0;
+    let provenRejectedByGate = 0;
+    let syntheticProofCount = 0;
+    let realImportProofCount = 0;
+    let flakyProofCount = 0;
+
+    for (const f of scanResult.agentFindings || []) {
+        if (f.proven === 'PROVEN' && f.proofGateResult?.eligibleForProven) provenStrictCount++;
+        if (f.proofGateResult && !f.proofGateResult.eligibleForProven && f.proven !== 'PROVEN') provenRejectedByGate++;
+        if (f.proofEvidence?.sourceMode === 'synthetic') syntheticProofCount++;
+        if (f.proofEvidence?.sourceMode === 'real-import') realImportProofCount++;
+        if (f.proofGateResult?.failedGates.includes('flaky-proof')) flakyProofCount++;
+        if (f.proofGateResult) {
+            for (const gate of f.proofGateResult.failedGates) {
+                proofGateFailures[gate] = (proofGateFailures[gate] || 0) + 1;
+            }
+        }
+    }
+
     const precisionMetrics = {
         investigationNotesCount: scanResult.investigationNotes?.length ?? 0,
         coverageGapsCount: scanResult.coverageGaps?.length ?? 0,
@@ -183,6 +210,12 @@ export function recordScanAuditSample(
         stepsGranted: scanResult.stepsGranted,
         extensionsGranted: scanResult.extensionsGranted,
         terminationReason: scanResult.terminationReason,
+        provenStrictCount,
+        provenRejectedByGate,
+        proofGateFailures,
+        syntheticProofCount,
+        realImportProofCount,
+        flakyProofCount,
     };
 
     const sample: ScanAuditSample = {
