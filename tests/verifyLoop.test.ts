@@ -20,6 +20,8 @@ vi.mock('../src/utils/localTestRunner', () => ({
 
 import { runLocalTest } from '../src/utils/localTestRunner';
 
+const VALID_PROOF_MARKER = 'SECURECODE_PROOF_RESULT:{"baseline":"pass","exploit":"pass","impact":"observed","targetReached":true,"assertion":"deterministic","mockedVulnerablePath":false,"sourceMode":"real-import"}:SECURECODE_PROOF_END';
+
 describe('runVerifyLoop', () => {
     beforeEach(() => {
         vi.mocked(runLocalTest).mockReset();
@@ -28,7 +30,7 @@ describe('runVerifyLoop', () => {
     it('returns PROVEN when test passes on first round', async () => {
         vi.mocked(runLocalTest).mockResolvedValueOnce({
             verdict: 'pass',
-            output: 'PASS: exploit worked',
+            output: `PASS: exploit worked\n${VALID_PROOF_MARKER}`,
             exitCode: 0,
         });
 
@@ -96,7 +98,7 @@ describe('runVerifyLoop', () => {
     it('retries on INCONCLUSIVE with shouldRetry=true', async () => {
         vi.mocked(runLocalTest)
             .mockResolvedValueOnce({ verdict: 'error', output: 'Cannot find module', exitCode: 1 })
-            .mockResolvedValueOnce({ verdict: 'pass', output: 'PASS: exploit worked', exitCode: 0 });
+            .mockResolvedValueOnce({ verdict: 'pass', output: `PASS: exploit worked\n${VALID_PROOF_MARKER}`, exitCode: 0 });
 
         const client = makeMockClient(
             { canTest: true, testScript: 'console.log("PASS: test")', runner: 'node', description: 'test' },

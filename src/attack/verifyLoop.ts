@@ -9,6 +9,8 @@ import {
     type VerifyBudget,
 } from './agentScanProtocol';
 import { validateVerifyGenerateResponse, validateVerifyAnalyzeResponse } from './protocolValidator';
+import { parseProofMarker } from './proofTypes';
+import { evaluateProofGate, buildProofEvidence } from './proofGate';
 
 export interface VerifyFinding {
     type: string;
@@ -51,6 +53,12 @@ export interface VerifyLoopResult {
     budgetExhaustedReason?: string;
     /** Backend that executed the test (docker, deno, etc.). Empty when none ran. */
     backend?: string;
+    /** Structured proof evidence from the proof marker, if present. */
+    proofEvidence?: import('./proofTypes').ProofEvidence;
+    /** Result of the deterministic proof gate evaluation. */
+    proofGateResult?: import('./proofTypes').ProofGateResult;
+    /** Proof-specific sub-verdict for strict gate failures. */
+    proofSubVerdict?: import('./proofTypes').ProofSubVerdict;
     /**
      * Machine-readable sub-verdict so callers (toolAgentScan) can detect the
      * INCONCLUSIVE reason without string-matching `reason`. Distinct from
@@ -315,15 +323,61 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         }
         const analyzeResp = analyzeValidation.value;
 
+        const proofMarker = parseProofMarker(lastTestOutput);
+        const gateResult = evaluateProofGate(proofMarker, {
+            sandboxBackend: testResult.backend || 'unknown',
+            targetFile: filePath || '',
+            targetLine: finding.line,
+            repeatedRuns: 1,
+            repeatPasses: proofMarker.found && proofMarker.exploit === 'pass' ? 1 : 0,
+            llmVerdict: analyzeResp.verdict,
+            sourceMode: proofMarker.sourceMode,
+        });
+
+        const proofEvidence = proofMarker.found
+            ? buildProofEvidence(proofMarker, {
+                  sandboxBackend: testResult.backend || 'unknown',
+                  targetFile: filePath || '',
+                  targetLine: finding.line,
+                  repeatedRuns: 1,
+                  repeatPasses: proofMarker.found && proofMarker.exploit === 'pass' ? 1 : 0,
+              })
+            : undefined;
+
         if (analyzeResp.verdict === 'PROVEN') {
-            return { verdict: 'PROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '' };
+            if (gateResult.eligibleForProven) {
+                return {
+                    verdict: 'PROVEN',
+                    reason: analyzeResp.reason,
+                    roundsUsed: round,
+                    testScript: lastTestScript,
+                    testOutput: lastTestOutput,
+                    backend: testResult.backend || '',
+                    proofEvidence,
+                    proofGateResult: gateResult,
+                    proofSubVerdict: 'gate-passed',
+                };
+            }
+            console.warn(`[Verify Loop] LLM said PROVEN but proof gate rejected: ${gateResult.failedGates.join(', ')}`);
+            return {
+                verdict: gateResult.downgradedVerdict === 'UNPROVEN' ? 'UNPROVEN' : 'INCONCLUSIVE',
+                reason: `Proof gate rejected: ${gateResult.failedGates.join(', ')}. ${gateResult.warnings.join(' ')}. LLM reason: ${analyzeResp.reason}`,
+                roundsUsed: round,
+                testScript: lastTestScript,
+                testOutput: lastTestOutput,
+                backend: testResult.backend || '',
+                proofEvidence,
+                proofGateResult: gateResult,
+                proofSubVerdict: 'gate-rejected',
+                subVerdict: gateResult.downgradedVerdict === 'UNPROVEN' ? undefined : 'analyzed',
+            };
         }
         if (analyzeResp.verdict === 'UNPROVEN') {
-            return { verdict: 'UNPROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '' };
+            return { verdict: 'UNPROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', proofEvidence, proofGateResult: gateResult };
         }
 
         if (!analyzeResp.shouldRetry || round >= maxRounds) {
-            return { verdict: 'INCONCLUSIVE', reason: analyzeResp.reason || `Could not verify after ${round} round(s).`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed' };
+            return { verdict: 'INCONCLUSIVE', reason: analyzeResp.reason || `Could not verify after ${round} round(s).`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed', proofEvidence, proofGateResult: gateResult };
         }
 
         previousErrors.push(`Round ${round}: ${testResult.verdict} — ${testResult.output.slice(0, 500)}`);

@@ -169,6 +169,8 @@ export interface SandboxProveResponse {
         exploitStatus?: number;
     };
     scanCredits?: number;
+    proofEvidence?: import('../attack/proofTypes').ProofEvidence;
+    proofGateResult?: import('../attack/proofTypes').ProofGateResult;
 }
 
 export interface VerifyGenerateResponse {

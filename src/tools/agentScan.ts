@@ -70,6 +70,10 @@ interface ProvenFinding extends AgentScanFinding {
     reviewId?: string;
     /** Result of re-verifying the exploit against the fixed code. */
     fixVerification?: FixVerificationResult;
+    /** Structured proof evidence from the proof gate, if the finding was verified. */
+    proofEvidence?: import('../attack/proofTypes').ProofEvidence;
+    /** Result of the deterministic proof gate evaluation. */
+    proofGateResult?: import('../attack/proofTypes').ProofGateResult;
 }
 
 export interface FixVerificationResult {

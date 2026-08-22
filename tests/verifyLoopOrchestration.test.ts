@@ -12,6 +12,8 @@ vi.mock('../src/utils/localTestRunner', () => ({
 
 import { runLocalTest } from '../src/utils/localTestRunner';
 
+const VALID_PROOF_MARKER = 'SECURECODE_PROOF_RESULT:{"baseline":"pass","exploit":"pass","impact":"observed","targetReached":true,"assertion":"deterministic","mockedVulnerablePath":false,"sourceMode":"real-import"}:SECURECODE_PROOF_END';
+
 const FINDING = {
     type: 'command_injection',
     line: 10,
@@ -96,7 +98,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
 
     it('returns INCONCLUSIVE when analyze response has invalid verdict', async () => {
         vi.mocked(runLocalTest).mockResolvedValueOnce({
-            verdict: 'pass', output: 'PASS: ok', exitCode: 0,
+            verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
         queueResponses(
@@ -118,7 +120,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
 
     it('returns INCONCLUSIVE when analyze response has PROVEN+shouldRetry=true', async () => {
         vi.mocked(runLocalTest).mockResolvedValueOnce({
-            verdict: 'pass', output: 'PASS: ok', exitCode: 0,
+            verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
         queueResponses(
@@ -140,7 +142,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
 
     it('returns INCONCLUSIVE when analyze response has empty reason', async () => {
         vi.mocked(runLocalTest).mockResolvedValueOnce({
-            verdict: 'pass', output: 'PASS: ok', exitCode: 0,
+            verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
         queueResponses(
@@ -216,7 +218,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
 
     it('records costUsd from generate + analyze responses into the budget tracker', async () => {
         vi.mocked(runLocalTest).mockResolvedValueOnce({
-            verdict: 'pass', output: 'PASS: ok', exitCode: 0,
+            verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
         queueResponses(
@@ -241,7 +243,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
 
     it('records $0 cost when costUsd is absent (backward compatible)', async () => {
         vi.mocked(runLocalTest).mockResolvedValueOnce({
-            verdict: 'pass', output: 'PASS: ok', exitCode: 0,
+            verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
         queueResponses(
@@ -286,7 +288,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
 
     it('passes python3 runner through to runLocalTest when API returns it', async () => {
         vi.mocked(runLocalTest).mockResolvedValueOnce({
-            verdict: 'pass', output: 'PASS: ok', exitCode: 0,
+            verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
         queueResponses(
@@ -308,7 +310,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
 
     it('passes deno runner through to runLocalTest when API returns it', async () => {
         vi.mocked(runLocalTest).mockResolvedValueOnce({
-            verdict: 'pass', output: 'PASS: ok', exitCode: 0,
+            verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
         queueResponses(

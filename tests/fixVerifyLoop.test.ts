@@ -10,6 +10,8 @@ vi.mock('../src/utils/localTestRunner', () => ({
 
 import { runLocalTest } from '../src/utils/localTestRunner';
 
+const VALID_PROOF_MARKER = 'SECURECODE_PROOF_RESULT:{"baseline":"pass","exploit":"pass","impact":"observed","targetReached":true,"assertion":"deterministic","mockedVulnerablePath":false,"sourceMode":"real-import"}:SECURECODE_PROOF_END';
+
 function makeMockClient(): ApiClient {
     const postJson = vi.fn();
     return { postJson } as unknown as ApiClient;
@@ -134,7 +136,7 @@ describe('runFixVerifyLoop', () => {
     it('returns still-vulnerable when original PROVEN + fixed PROVEN', async () => {
         vi.mocked(runLocalTest).mockResolvedValueOnce({
             verdict: 'pass',
-            output: 'PASS: exploit worked',
+            output: `PASS: exploit worked\n${VALID_PROOF_MARKER}`,
             exitCode: 0,
         });
 
