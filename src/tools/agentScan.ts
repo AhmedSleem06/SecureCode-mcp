@@ -38,7 +38,7 @@ import { runAgentScan } from '../attack/agentScanLoop';
 import { runVerifyLoop } from '../attack/verifyLoop';
 import { runFixVerifyLoop } from '../attack/fixVerifyLoop';
 import { VerifyBudgetTracker, defaultVerifyBudget, defaultFixVerifyBudget, type VerifyBudget, type AgentScanScope, type FixVerificationStatus } from '../attack/agentScanProtocol';
-import type { AgentScanFinding, AgentScanTarget } from '../attack/agentScanProtocol';
+import type { AgentScanFinding, AgentScanTarget, VerificationLevel } from '../attack/agentScanProtocol';
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
 import { ApprovalBroker } from '../approval/broker';
 import { getGitChangedFiles } from '../utils/gitContext';
@@ -56,6 +56,7 @@ interface ProvenFinding extends AgentScanFinding {
     provenReason?: string;
     evidenceLevel?: string;
     originalConfidence?: number;
+    verificationLevel?: VerificationLevel;
     fixStatus?: 'fix-generated' | 'fix-denied' | 'fix-error'
         | 'fix-verified-closed' | 'fix-still-vulnerable'
         | 'fix-verification-inconclusive' | 'fix-syntax-invalid';
@@ -83,6 +84,40 @@ export interface FixVerificationResult {
 /** Prove high/critical/medium findings — skip only low. */
 function shouldProve(finding: AgentScanFinding): boolean {
     return finding.severity === 'critical' || finding.severity === 'high' || finding.severity === 'medium';
+}
+
+/**
+ * Map a verification verdict to a precision verification level.
+ *
+ * PROVEN via local sandbox → exploit-confirmed (end-to-end test ran)
+ * PROVEN via API sandbox → impact-confirmed (server-side test ran)
+ * UNPROVEN → logic-confirmed (test proved behavior is safe)
+ * INCONCLUSIVE/SKIPPED → logic-confirmed (couldn't determine)
+ *
+ * If the finding already has a verificationLevel from the agent, keep the
+ * higher of the two (agent's level vs verify-mapped level).
+ */
+function mapVerificationLevel(
+    proven: string,
+    viaApiSandbox: boolean,
+    agentLevel?: VerificationLevel,
+): VerificationLevel {
+    let mapped: VerificationLevel;
+    if (proven === 'PROVEN') {
+        mapped = viaApiSandbox ? 'impact-confirmed' : 'exploit-confirmed';
+    } else if (proven === 'UNPROVEN') {
+        mapped = 'logic-confirmed';
+    } else {
+        mapped = 'logic-confirmed';
+    }
+
+    const order: VerificationLevel[] = ['logic-confirmed', 'path-confirmed', 'impact-confirmed', 'exploit-confirmed'];
+    if (agentLevel) {
+        const agentIdx = order.indexOf(agentLevel);
+        const mappedIdx = order.indexOf(mapped);
+        return agentIdx > mappedIdx ? agentLevel : mapped;
+    }
+    return mapped;
 }
 
 /**
@@ -494,6 +529,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                         proven: proveResp.proven,
                         provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
                         verifySubVerdict: result.subVerdict,
+                        verificationLevel: mapVerificationLevel(proveResp.proven, true, finding.verificationLevel),
                     });
                 } catch (proveErr: any) {
                     sandboxUnavailableCount++;
@@ -502,6 +538,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                         proven: 'INCONCLUSIVE',
                         provenReason: result.reason,
                         verifySubVerdict: result.subVerdict,
+                        verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
                     });
                 }
                 continue;
@@ -512,6 +549,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 proven: result.verdict,
                 provenReason: result.reason,
                 verifySubVerdict: result.subVerdict,
+                verificationLevel: mapVerificationLevel(result.verdict, false, finding.verificationLevel),
             });
         } catch (err: any) {
             console.warn(`[Agent Scan] Verify loop failed: ${err.message}. Falling back to sandbox prove.`);
@@ -529,12 +567,14 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     ...finding,
                     proven: proveResp.proven,
                     provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
+                    verificationLevel: mapVerificationLevel(proveResp.proven, true, finding.verificationLevel),
                 });
             } catch (err2: any) {
                 provenFindings.push({
                     ...finding,
                     proven: 'INCONCLUSIVE',
                     provenReason: `Verify failed: ${err.message}; Sandbox fallback also failed: ${err2.message}`,
+                    verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
                 });
             }
         }
