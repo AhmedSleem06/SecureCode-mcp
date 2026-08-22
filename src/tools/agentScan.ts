@@ -33,6 +33,7 @@ import { readCache } from '../project-map/cache';
 import {
     getCachedArchitectureContext,
     formatArchitectureContextForPrompt,
+    formatArchitectureRiskTasksForTarget,
 } from '../project-map/architectureContext';
 import { runAgentScan } from '../attack/agentScanLoop';
 import { runVerifyLoop } from '../attack/verifyLoop';
@@ -385,6 +386,11 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     );
                     if (cached) {
                         architectureContextStr = formatArchitectureContextForPrompt(cached);
+                        // Append architecture risk tasks specific to this target file
+                        const riskTasks = formatArchitectureRiskTasksForTarget(cached, filePath);
+                        if (riskTasks) {
+                            architectureContextStr = (architectureContextStr || '') + '\n\n' + riskTasks;
+                        }
                         break;
                     }
                 }

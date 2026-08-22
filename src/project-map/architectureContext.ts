@@ -343,3 +343,62 @@ export function formatArchitectureContextForPrompt(ctx: ArchitectureContext): st
 
     return lines.join('\n');
 }
+
+/**
+ * Extract architecture risks that are relevant to a specific target file and
+ * format them as explicit investigation tasks the agent must address.
+ *
+ * A risk is relevant if:
+ *   - The target file is listed in the risk's files[]
+ *   - The target file's path is a substring of any file in the risk's files[]
+ *   - The risk has no specific files (project-wide)
+ *
+ * Each task tells the agent:
+ *   - What the risk is
+ *   - Which evidence is needed to resolve it
+ *   - What tool to use
+ *   - That unresolved risks must go in coverageGaps[]
+ */
+export function formatArchitectureRiskTasksForTarget(
+    ctx: ArchitectureContext,
+    targetFilePath: string,
+): string {
+    if (!ctx || !ctx.architectureRisks || ctx.architectureRisks.length === 0) return '';
+
+    const normalizedTarget = targetFilePath.replace(/\\/g, '/').toLowerCase();
+    const relevant = ctx.architectureRisks.filter(r => {
+        if (!r.files || r.files.length === 0) return true;
+        return r.files.some(f => {
+            const nf = f.replace(/\\/g, '/').toLowerCase();
+            return nf === normalizedTarget ||
+                nf.includes(normalizedTarget) ||
+                normalizedTarget.includes(nf);
+        });
+    });
+
+    if (relevant.length === 0) return '';
+
+    const lines: string[] = [
+        `[Architecture risk investigation tasks — you MUST address these before finishing:`,
+        `  These are structural concerns from the architecture scout that apply to this file.`,
+        `  For each: investigate, collect evidence, and either resolve (prove safe) or`,
+        `  report as a finding (if proven) or coverage gap (if unresolved).]`,
+        '',
+    ];
+
+    relevant.forEach((r, i) => {
+        lines.push(`  Task ${i + 1}: [${r.severity}] ${r.title}`);
+        lines.push(`    Risk: ${r.description}`);
+        if (r.files.length > 0) {
+            lines.push(`    Files: ${r.files.join(', ')}`);
+        }
+        lines.push(`    Required evidence:`);
+        lines.push(`      - Trace the code path from input to the sensitive operation`);
+        lines.push(`      - Determine whether the control is present, bypassed, or missing`);
+        lines.push(`      - Establish the threat model (is the attacker in scope?)`);
+        lines.push(`      - If you cannot resolve this risk, put it in coverageGaps[]`);
+        lines.push('');
+    });
+
+    return lines.join('\n');
+}
