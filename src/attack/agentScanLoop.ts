@@ -21,6 +21,7 @@ import { ApiClient } from '../api/client';
 import type { ServerContext } from '../mcp/types';
 import { executeAction } from './agentScanExecutor';
 import { AgentTraceLogger } from './agentTrace';
+import { InvestigationState } from './investigationState';
 import {
     validateStartResponse,
     validateStepResponse,
@@ -85,6 +86,7 @@ export async function runAgentScan(
         trace.logRunStarted();
 
         const transcript: AgentScanTranscriptStep[] = [];
+        const investigationState = new InvestigationState();
         const readFiles = new Set<string>();
         const readFileCounts = new Map<string, number>();
         // Dynamic read cap based on file size:
@@ -327,11 +329,33 @@ export async function runAgentScan(
             // Finish = done with findings
             if (action.type === 'finish') {
                 trace.logRunCompleted('completed');
+                // Auto-generate coverage gaps for incomplete investigation steps
+                // when the agent finishes with 0 findings
+                let coverageGaps = action.coverageGaps ?? [];
+                if (action.findings.length === 0) {
+                    const incompleteSteps = investigationState.getIncompleteSteps();
+                    if (incompleteSteps.length > 0) {
+                        const autoGaps = incompleteSteps.map(step => ({
+                            title: `Investigation step not completed: ${step}`,
+                            detail: `The agent finished without completing this required investigation step: ${step}. This means the investigation was incomplete and vulnerabilities may have been missed.`,
+                            file: target.filePath,
+                            requiredEvidence: [`Complete the ${step} step before concluding no vulnerabilities exist`],
+                            suggestedNextAction: step === 'config-inspection' ? 'read_config'
+                                : step === 'policy-check' ? 'check_policy'
+                                : step === 'cross-file-flow' ? 'trace_flow_cross_file'
+                                : step === 'route-discovery' ? 'get_endpoints'
+                                : step === 'auth-symbol-search' ? 'search_code'
+                                : 'continue investigation',
+                            priority: 'high' as const,
+                        }));
+                        coverageGaps = [...coverageGaps, ...autoGaps];
+                    }
+                }
                 return {
                     status: 'completed',
                     findings: action.findings,
                     investigationNotes: action.investigationNotes ?? [],
-                    coverageGaps: action.coverageGaps ?? [],
+                    coverageGaps,
                     transcript,
                     stepsUsed: stepsTaken,
                     costSpentUsd,
@@ -345,19 +369,42 @@ export async function runAgentScan(
 
             if (action.type === 'read_file') {
                 const normalizedPath = action.path.replace(/\\/g, '/').toLowerCase();
-                // Track by (path, startLine, endLine) — allow re-reading with different ranges
+                // Get total lines for proper overlap calculation
+                let totalLines: number | undefined;
+                try {
+                    const fs = require('fs');
+                    const abs = require('path').resolve(ctx.workspaceRoot, action.path);
+                    const content = fs.readFileSync(abs, 'utf8');
+                    totalLines = content.split('\n').length;
+                } catch { /* best-effort */ }
+
+                // Overlap-aware coverage check: if >50% of the requested range
+                // was already read, block and tell the agent what's covered.
+                const readResult = investigationState.recordRead(
+                    action.path, action.startLine, action.endLine, totalLines,
+                );
+
+                // Exact-range dedup (fast path for identical re-reads)
                 const rangeKey = `${normalizedPath}:${action.startLine || 0}:${action.endLine || 0}`;
                 if (readFiles.has(rangeKey)) {
                     observation = `File "${action.path}" (lines ${action.startLine || 'all'}-${action.endLine || 'all'}) was already read. The content is in the transcript above. Use a DIFFERENT line range or a different tool.`;
                     wasBlocked = true;
+                } else if (readResult.overlapping && readResult.overlapFraction > 0.5) {
+                    const coveredRanges = readResult.coverageAfter
+                        .filter(r => InvestigationState.rangesOverlap(
+                            r,
+                            InvestigationState.parseRange(action.startLine, action.endLine, totalLines),
+                        ))
+                        .map(r => `L${r.start}-${r.end}`)
+                        .join(', ');
+                    observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" substantially overlap already-read ranges (${coveredRanges}). The content is in the transcript above. Read a DIFFERENT section, use search_code to find specific patterns, or use trace_flow/check_guard/check_policy to analyze what you've already read.`;
+                    wasBlocked = true;
                 } else {
                     // Per-file read cap: dynamic based on file size.
                     const fileMax = maxReadsForFile(action.path);
-                    const count = (readFileCounts.get(normalizedPath) || 0) + 1;
+                    const count = investigationState.getReadCount(action.path);
                     // Circuit breaker: if the agent has spent >40% of ALL steps
                     // reading the same file, force it to switch to analysis tools.
-                    // This prevents the "read every section of a 2000-line file"
-                    // anti-pattern that wastes the entire step budget on reading.
                     const stepFraction = count / Math.max(stepsTaken, 1);
                     if (count > fileMax) {
                         observation = `BLOCKED: You have already read "${action.path}" ${fileMax} times. Further read_file calls on this file will also be blocked. You MUST use a different tool (search_code, trace_flow, check_guard, check_policy, list_imports, or finish) to proceed.`;
@@ -366,9 +413,9 @@ export async function runAgentScan(
                         observation = `BLOCKED: You have spent ${count} of ${stepsTaken} steps reading "${action.path}". That's too much — switch to search_code, trace_flow, check_guard, or check_policy to analyze the code you've already read. If you have enough evidence, call finish to report your findings.`;
                         wasBlocked = true;
                     } else {
-                        readFileCounts.set(normalizedPath, count);
                         readFiles.add(rangeKey);
                         observation = await executeAction(action, ctx, startResp.runId, client, target);
+                        investigationState.recordToolUse('read_file');
                     }
                 }
             } else {
@@ -421,9 +468,14 @@ export async function runAgentScan(
                         wasBlocked = true;
                     } else {
                         observation = await executeAction(action, ctx, startResp.runId, client, target);
+                        investigationState.recordToolUse(action.type);
+                        if (action.type === 'search_code') {
+                            investigationState.recordSymbolSearch((action as any).pattern || '');
+                        }
                     }
                 } else {
                     observation = await executeAction(action, ctx, startResp.runId, client, target);
+                    investigationState.recordToolUse(action.type);
                 }
             }
 
