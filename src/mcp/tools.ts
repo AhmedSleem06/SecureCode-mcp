@@ -302,6 +302,67 @@ const ALL_TOOLS: ToolDef[] = [
         },
     },
     {
+        name: 'securecode.review-findings',
+        description:
+            'List uncertain findings queued for human review. When the verify subagent cannot prove or disprove a finding (INCONCLUSIVE), it is added to a non-blocking review queue. Use this to list pending or previously decided items. Read-only: no approval needed. Stored per-workspace in .securecode/finding-review-queue.json.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                decision: {
+                    type: 'string',
+                    enum: ['pending', 'confirmed', 'rejected', 'deferred'],
+                    description: 'Filter by decision status. "pending" shows only unresolved items. Omit to list all.',
+                },
+                filePath: {
+                    type: 'string',
+                    description: 'Optional: filter by workspace-relative file path.',
+                },
+            },
+        },
+    },
+    {
+        name: 'securecode.decide-finding',
+        description:
+            'Mark an uncertain finding from the review queue as confirmed, rejected, or deferred. Rejecting a finding also records it as a false positive in agent memory so future scans skip similar patterns. No approval needed — this only changes local review metadata.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'The review item ID (e.g. "review-abc123").',
+                },
+                decision: {
+                    type: 'string',
+                    enum: ['confirmed', 'rejected', 'deferred'],
+                    description: 'The adjudication: "confirmed" = real vulnerability, "rejected" = false positive (added to agent memory), "deferred" = leave for later.',
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Optional explanation for the decision.',
+                },
+            },
+            required: ['id', 'decision'],
+        },
+    },
+    {
+        name: 'securecode.clear-finding-reviews',
+        description:
+            'Delete review items from the finding review queue. If "id" is provided, removes only that item. If "resolvedOnly" is true, removes only items with a decision. Otherwise clears ALL items. No approval needed — this only changes local review metadata.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Optional: ID of a specific review item to remove. If omitted, clears items based on resolvedOnly.',
+                },
+                resolvedOnly: {
+                    type: 'boolean',
+                    description: 'If true, removes only resolved items (confirmed/rejected/deferred). Default: false (clears all when id is omitted).',
+                },
+            },
+        },
+    },
+    {
         name: 'securecode.run-tests',
         description:
             'Run tests in a sandbox with human approval. Two modes: "existing" runs the workspace test suite (npm/pnpm/yarn/bun test, pytest) with a strict command allowlist — no shell operators, no install/build/publish, only the test lifecycle. "generated" runs an inline test script (node/tsx/bun/deno/python) through the verification sandbox with safety checks. Every execution requires human approval; tests run inside a Docker/Deno sandbox with network disabled, read-only workspace, and resource limits. Does NOT install dependencies. Use securecode.find-tests or the find_tests agent action to discover test files first.',

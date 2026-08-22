@@ -36,13 +36,19 @@ import {
 } from '../project-map/architectureContext';
 import { runAgentScan } from '../attack/agentScanLoop';
 import { runVerifyLoop } from '../attack/verifyLoop';
-import { VerifyBudgetTracker, defaultVerifyBudget, type VerifyBudget, type AgentScanScope } from '../attack/agentScanProtocol';
+import { runFixVerifyLoop } from '../attack/fixVerifyLoop';
+import { VerifyBudgetTracker, defaultVerifyBudget, defaultFixVerifyBudget, type VerifyBudget, type AgentScanScope, type FixVerificationStatus } from '../attack/agentScanProtocol';
 import type { AgentScanFinding, AgentScanTarget } from '../attack/agentScanProtocol';
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
 import { ApprovalBroker } from '../approval/broker';
 import { getGitChangedFiles } from '../utils/gitContext';
 import { computeBlastRadius } from '../project-map/blastRadius';
 import { recordScanAuditSample } from '../audit/scanAuditLog';
+import {
+    enqueueFindingReview,
+    type ReviewReason,
+    type FindingReviewItem,
+} from '../audit/findingReviewQueue';
 import type { SandboxProveResponse, FixResponse } from '../api/types';
 
 interface ProvenFinding extends AgentScanFinding {
@@ -50,14 +56,87 @@ interface ProvenFinding extends AgentScanFinding {
     provenReason?: string;
     evidenceLevel?: string;
     originalConfidence?: number;
-    fixStatus?: 'fix-generated' | 'fix-denied' | 'fix-error';
+    fixStatus?: 'fix-generated' | 'fix-denied' | 'fix-error'
+        | 'fix-verified-closed' | 'fix-still-vulnerable'
+        | 'fix-verification-inconclusive' | 'fix-syntax-invalid';
     fixDeniedReason?: string;
     fixApprovalId?: string;
+    /** Sub-verdict from the verify loop — used to map to a review reason. */
+    verifySubVerdict?: string;
+    /** Human review queue status for INCONCLUSIVE findings. */
+    reviewStatus?: 'pending' | 'confirmed' | 'rejected' | 'deferred';
+    reviewId?: string;
+    /** Result of re-verifying the exploit against the fixed code. */
+    fixVerification?: FixVerificationResult;
+}
+
+export interface FixVerificationResult {
+    status: 'not-run' | 'closed' | 'still-vulnerable' | 'inconclusive'
+        | 'syntax-invalid' | 'sandbox-unavailable' | 'cancelled';
+    reason: string;
+    originalVerdict: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'SKIPPED';
+    fixedVerdict?: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE';
+    roundsUsed: number;
+    fixedCodeHash: string;
 }
 
 /** Prove high/critical/medium findings — skip only low. */
 function shouldProve(finding: AgentScanFinding): boolean {
     return finding.severity === 'critical' || finding.severity === 'high' || finding.severity === 'medium';
+}
+
+/**
+ * Map a verify loop sub-verdict to a human-readable review reason.
+ * Falls back to 'inconclusive-verification' when no specific reason is known.
+ */
+function mapToReviewReason(finding: ProvenFinding): ReviewReason {
+    const sv = finding.verifySubVerdict;
+    switch (sv) {
+        case 'sandbox-unavailable': return 'sandbox-unavailable';
+        case 'budget-exhausted': return 'verification-budget-exhausted';
+        case 'runtime-blocked': return 'runtime-blocked';
+        case 'cannot-test': return 'test-generation-failed';
+        case 'blocked': return 'runtime-blocked';
+        default: return 'inconclusive-verification';
+    }
+}
+
+/**
+ * Determine whether a finding should be queued for human review.
+ *
+ * Queue when:
+ *   - proven === 'INCONCLUSIVE' (verification couldn't decide)
+ *   - proven === 'SKIPPED' for medium/high/critical (intentionally skipped but
+ *     still potentially real)
+ *   - proven === 'UNPROVEN' but confidence remains high (≥60) — the LLM still
+ *     believes it's real despite the verify test not reproducing
+ *
+ * Do NOT queue:
+ *   - Low-severity SKIPPED findings (intentionally not verified)
+ *   - PROVEN findings (already confirmed by exploit)
+ *   - UNPROVEN findings with low confidence (likely false positive)
+ *   - Cancelled/aborted findings (user ended the scan)
+ */
+function shouldQueueForHumanReview(finding: ProvenFinding): boolean {
+    if (finding.proven === 'PROVEN') return false;
+    if (finding.proven === 'NOT_REPRODUCIBLE') return false;
+
+    // Don't queue aborted/cancelled findings.
+    if (finding.verifySubVerdict === 'cancelled' || finding.verifySubVerdict === 'aborted') {
+        return false;
+    }
+
+    if (finding.proven === 'INCONCLUSIVE') return true;
+
+    // SKIPPED: queue medium/high/critical, skip low.
+    if (finding.proven === 'SKIPPED') {
+        return finding.severity === 'critical' || finding.severity === 'high' || finding.severity === 'medium';
+    }
+
+    // UNPROVEN: queue only if high confidence remains after clamping.
+    if (finding.proven === 'UNPROVEN' && finding.confidence >= 60) return true;
+
+    return false;
 }
 
 export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unknown> {
@@ -229,6 +308,10 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     transcript: [],
                     cached: true,
                     provenCount: (filteredFindings as any[]).filter((f: any) => f.proven === 'PROVEN').length,
+                    reviewQueue: {
+                        added: [],
+                        pendingCount: (filteredFindings as any[]).filter((f: any) => f.reviewStatus === 'pending').length,
+                    },
                 };
             }
         } catch (err: any) {
@@ -332,6 +415,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 ...finding,
                 proven: 'INCONCLUSIVE',
                 provenReason: `Verification budget exhausted (${verifyTracker.findingsAttempted}/${verifyBudget.maxFindings} findings, ${verifyTracker.llmCallsUsed}/${verifyBudget.maxLlmCalls} LLM calls, ${Math.round(verifyTracker.wallClockElapsedMs / 1000)}s/${Math.round(verifyBudget.maxWallClockMs / 1000)}s).`,
+                verifySubVerdict: 'budget-exhausted',
             });
             continue;
         }
@@ -377,6 +461,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     ...finding,
                     proven: result.verdict,
                     provenReason: result.reason,
+                    verifySubVerdict: result.subVerdict,
                 });
                 for (const remaining of agentResult.findings.slice(agentResult.findings.indexOf(finding) + 1)) {
                     provenFindings.push({
@@ -406,6 +491,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                         ...finding,
                         proven: proveResp.proven,
                         provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
+                        verifySubVerdict: result.subVerdict,
                     });
                 } catch (proveErr: any) {
                     sandboxUnavailableCount++;
@@ -413,6 +499,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                         ...finding,
                         proven: 'INCONCLUSIVE',
                         provenReason: result.reason,
+                        verifySubVerdict: result.subVerdict,
                     });
                 }
                 continue;
@@ -422,6 +509,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 ...finding,
                 proven: result.verdict,
                 provenReason: result.reason,
+                verifySubVerdict: result.subVerdict,
             });
         } catch (err: any) {
             console.warn(`[Agent Scan] Verify loop failed: ${err.message}. Falling back to sandbox prove.`);
@@ -459,6 +547,42 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     //   2. What tools were available for this language (capability registry)
     //   3. The verify subagent's verdict (PROVEN/UNPROVEN/INCONCLUSIVE)
     clampConfidenceByCapability(provenFindings, agentResult.transcript, language);
+
+    // 4a-bis. Queue INCONCLUSIVE findings for non-blocking human review.
+    //
+    // Findings the verify subagent couldn't prove or disprove are added to a
+    // local review queue (.securecode/finding-review-queue.json). The scan
+    // does NOT block — the user can later adjudicate each item via the
+    // securecode.review-findings and securecode.decide-finding MCP tools.
+    // Only findings with a real file path are queued (inline-code scans have
+    // no persistent location to review).
+    const reviewQueueAdded: string[] = [];
+    if (filePath) {
+        for (const finding of provenFindings) {
+            if (!shouldQueueForHumanReview(finding)) continue;
+            try {
+                const reviewItem = enqueueFindingReview(ctx.workspaceRoot, {
+                    workspaceRelativePath: filePath,
+                    fileContent: code,
+                    line: finding.line,
+                    lineEnd: finding.lineEnd,
+                    findingType: finding.type,
+                    severity: finding.severity,
+                    confidence: finding.confidence,
+                    proven: finding.proven as 'INCONCLUSIVE' | 'SKIPPED' | 'UNPROVEN',
+                    reviewReason: mapToReviewReason(finding),
+                    verificationReason: finding.provenReason,
+                    evidence: finding.evidence || '',
+                });
+                finding.reviewStatus = 'pending';
+                finding.reviewId = reviewItem.id;
+                reviewQueueAdded.push(reviewItem.id);
+            } catch (reviewErr: any) {
+                // Review queue persistence failure must not block the scan.
+                console.warn(`[Agent Scan] Review queue enqueue failed: ${reviewErr?.message || reviewErr}`);
+            }
+        }
+    }
 
     // 4b. Generate fixes for proven/suspected findings (requires approval)
     const fixableFindings = provenFindings.filter(f =>
@@ -519,6 +643,72 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     };
                     finding.fixStatus = 'fix-generated';
                     finding.fixApprovalId = approval.requestId;
+
+                    // 4c. Re-verify the fix — re-run the exploit against the
+                    // merged fixed code to prove the fix actually closed the
+                    // vulnerability. Uses a separate, smaller budget so a
+                    // single fix verification cannot consume the entire
+                    // original scan verification budget. No second approval
+                    // needed: the user already approved fix generation, and
+                    // this runs inside the existing sandbox without modifying
+                    // any workspace files.
+                    try {
+                        if (progress) {
+                            progress(fixIdx, fixableFindings.length, `Verifying fix for ${finding.type} at line ${finding.line}...`);
+                        }
+                        const fixVerifyBudget = defaultFixVerifyBudget();
+                        const fixVerifyTracker = new VerifyBudgetTracker(fixVerifyBudget);
+                        const fixVerifyResult = await runFixVerifyLoop({
+                            finding: {
+                                type: finding.type,
+                                line: finding.line,
+                                lineEnd: finding.lineEnd,
+                                evidence: finding.evidence,
+                                why: finding.why,
+                                severity: finding.severity,
+                            },
+                            originalCode: code,
+                            fixedCode: fixResp.fixed_code,
+                            replaceRange: { start_line: finding.line, end_line: finding.lineEnd || finding.line },
+                            filePath: filePath || '',
+                            relatedFiles: relatedFiles.map(rf => ({
+                                filePath: rf.filePath,
+                                content: rf.content,
+                                relationship: rf.relationship,
+                            })),
+                            workspaceRoot: ctx.workspaceRoot,
+                            language,
+                            client,
+                            originalVerdict: finding.proven as 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'SKIPPED',
+                            budgetTracker: fixVerifyTracker,
+                            signal: abortSignal,
+                            onProgress: (round, maxR, msg) => {
+                                if (progress) progress(fixIdx, fixableFindings.length, `Fix verify round ${round}/${maxR}: ${msg}`);
+                            },
+                        });
+
+                        finding.fixVerification = fixVerifyResult;
+                        // Map the fix verification status to the fixStatus field.
+                        switch (fixVerifyResult.status) {
+                            case 'closed':
+                                finding.fixStatus = 'fix-verified-closed';
+                                break;
+                            case 'still-vulnerable':
+                                finding.fixStatus = 'fix-still-vulnerable';
+                                break;
+                            case 'inconclusive':
+                                finding.fixStatus = 'fix-verification-inconclusive';
+                                break;
+                            case 'syntax-invalid':
+                                finding.fixStatus = 'fix-syntax-invalid';
+                                break;
+                            // sandbox-unavailable and cancelled leave fixStatus as 'fix-generated'
+                        }
+                    } catch (fixVerifyErr: any) {
+                        // Fix verification failure must not block the scan — the
+                        // fix is still generated, just not re-verified.
+                        console.warn(`[Agent Scan] Fix verification failed for ${finding.type} at L${finding.line}: ${fixVerifyErr?.message || fixVerifyErr}`);
+                    }
                 }
             } catch (err: any) {
                 finding.fixStatus = 'fix-error';
@@ -608,6 +798,10 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
             costSpentUsd: verifyTracker.costSpentUsd,
             wallClockMs: verifyTracker.wallClockElapsedMs,
             budget: verifyBudget,
+        },
+        reviewQueue: {
+            added: reviewQueueAdded,
+            pendingCount: provenFindings.filter(f => f.reviewStatus === 'pending').length,
         },
     };
 }

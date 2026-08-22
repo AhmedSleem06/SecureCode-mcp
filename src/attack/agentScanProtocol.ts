@@ -547,3 +547,38 @@ export class VerifyBudgetTracker {
         this.costSpentUsd += costUsd;
     }
 }
+
+// ── Fix verification budget ──────────────────────────────────────────────────
+//
+// After a fix is generated and approved, the pipeline re-runs the exploit
+// verification loop against the merged fixed code to prove the fix actually
+// closed the vulnerability. This is a SEPARATE, smaller budget so a single
+// fix verification cannot consume the entire original scan verification
+// budget.
+
+export type FixVerificationStatus =
+    | 'not-run'
+    | 'closed'
+    | 'still-vulnerable'
+    | 'inconclusive'
+    | 'syntax-invalid'
+    | 'sandbox-unavailable'
+    | 'cancelled';
+
+export const FIX_VERIFY_DEFAULTS = {
+    maxFindings: 1,
+    maxRoundsPerFinding: 3,
+    maxLlmCalls: 6,
+    maxWallClockMs: 120_000,
+    costCapUsd: 0.20,
+} as const;
+
+export function defaultFixVerifyBudget(overrides?: Partial<VerifyBudget>): VerifyBudget {
+    return {
+        maxFindings: overrides?.maxFindings ?? FIX_VERIFY_DEFAULTS.maxFindings,
+        maxRoundsPerFinding: overrides?.maxRoundsPerFinding ?? FIX_VERIFY_DEFAULTS.maxRoundsPerFinding,
+        maxLlmCalls: overrides?.maxLlmCalls ?? FIX_VERIFY_DEFAULTS.maxLlmCalls,
+        maxWallClockMs: overrides?.maxWallClockMs ?? FIX_VERIFY_DEFAULTS.maxWallClockMs,
+        costCapUsd: overrides?.costCapUsd ?? FIX_VERIFY_DEFAULTS.costCapUsd,
+    };
+}

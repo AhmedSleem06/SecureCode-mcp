@@ -13,6 +13,7 @@ import { toolScanSecrets } from '../tools/scanSecrets';
 import { toolAgentScan } from '../tools/agentScan';
 import { toolRunTests } from '../tools/runTests';
 import { toolRecordFalsePositive, toolGetAgentMemory, toolClearAgentMemory, toolAddKnownFact } from '../tools/agentMemoryTools';
+import { toolReviewFindings, toolDecideFinding, toolClearFindingReviews } from '../tools/findingReviewTools';
 
 const PROTOCOL_VERSION = '2025-03-26';
 const SERVER_NAME = 'securecode-mcp';
@@ -59,6 +60,9 @@ const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<u
     'securecode.get-agent-memory': toolGetAgentMemory,
     'securecode.clear-agent-memory': toolClearAgentMemory,
     'securecode.add-known-fact': toolAddKnownFact,
+    'securecode.review-findings': toolReviewFindings,
+    'securecode.decide-finding': toolDecideFinding,
+    'securecode.clear-finding-reviews': toolClearFindingReviews,
 };
 
 function validateArgs(tool: ToolDef, args: any): string | null {

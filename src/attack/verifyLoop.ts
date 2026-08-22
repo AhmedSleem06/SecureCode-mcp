@@ -32,6 +32,13 @@ export interface VerifyLoopOptions {
     budgetTracker?: VerifyBudgetTracker;
     /** AbortSignal — aborts the loop and any running test. */
     signal?: AbortSignal;
+    /**
+     * Distinguishes initial vulnerability verification from fix re-verification.
+     * - 'original' (default): verifying the original code for a vulnerability.
+     * - 'fix': re-verifying the proposed fixed code to see if the exploit still works.
+     * Passed to the API so the verifier prompt can be adjusted accordingly.
+     */
+    verificationPhase?: 'original' | 'fix';
 }
 
 export interface VerifyLoopResult {
@@ -78,6 +85,7 @@ const PER_FINDING_MAX_ROUNDS = 12;
 export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoopResult> {
     const { finding, filePath, code, relatedFiles, workspaceRoot, language, client, onProgress } = opts;
     const tracker = opts.budgetTracker;
+    const verificationPhase = opts.verificationPhase ?? 'original';
     const previousErrors: string[] = [];
     let lastTestScript = '';
     let lastTestOutput = '';
@@ -168,6 +176,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             testFileDir: '.securecode',
             relativeImportPath,
             depsInstalled: runtimeInfo.depsInstalled,
+            verificationPhase,
         });
         if (tracker) tracker.recordLlmCall((genRespRaw as any).costUsd ?? 0);
 
@@ -288,6 +297,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             exitCode: testResult.exitCode,
             round,
             maxRounds,
+            verificationPhase,
         });
         if (tracker) tracker.recordLlmCall((analyzeRespRaw as any).costUsd ?? 0);
 

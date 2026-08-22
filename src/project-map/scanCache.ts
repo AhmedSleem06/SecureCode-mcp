@@ -23,11 +23,12 @@ const CACHE_FILE = 'scan-cache.json';
  * would produce different findings for the same file. All cached entries
  * with an older version are invalidated.
  *
- * v21 → v22: ScanCacheEntry now carries a `memoryHash` so cache hits can
- * be filtered against current agent memory (dismissed false positives).
- * Existing v21 entries are invalid (different shape + filtering semantics).
+ * v22 → v23: Architecture scout context integration.
+ * v23 → v24: Added fix re-verification (fixVerification field, new fixStatus
+ * values) + human review queue (reviewStatus, reviewId fields). Cached
+ * findings from v23 lack these fields and must be re-scanned.
  */
-export const AGENT_SCAN_CACHE_VERSION = 23;
+export const AGENT_SCAN_CACHE_VERSION = 24;
 
 /** Cache TTL: 7 days. Findings older than this are re-scanned. */
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
