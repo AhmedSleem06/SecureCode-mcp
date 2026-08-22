@@ -546,6 +546,8 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                         provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
                         verifySubVerdict: result.subVerdict,
                         verificationLevel: mapVerificationLevel(proveResp.proven, true, finding.verificationLevel),
+                        proofEvidence: proveResp.proofEvidence,
+                        proofGateResult: proveResp.proofGateResult,
                     });
                 } catch (proveErr: any) {
                     sandboxUnavailableCount++;
@@ -566,6 +568,8 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 provenReason: result.reason,
                 verifySubVerdict: result.subVerdict,
                 verificationLevel: mapVerificationLevel(result.verdict, false, finding.verificationLevel),
+                proofEvidence: result.proofEvidence,
+                proofGateResult: result.proofGateResult,
             });
         } catch (err: any) {
             console.warn(`[Agent Scan] Verify loop failed: ${err.message}. Falling back to sandbox prove.`);
@@ -584,6 +588,8 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     proven: proveResp.proven,
                     provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
                     verificationLevel: mapVerificationLevel(proveResp.proven, true, finding.verificationLevel),
+                    proofEvidence: proveResp.proofEvidence,
+                    proofGateResult: proveResp.proofGateResult,
                 });
             } catch (err2: any) {
                 provenFindings.push({
