@@ -245,6 +245,9 @@ export function validateStartResponse(raw: unknown): ValidationResult<AgentScanS
     if (!isNumber(raw.budget.stepsRemaining)) return err('budget.stepsRemaining must be a number');
     if (!isNumber(raw.budget.costSpentUsd)) return err('budget.costSpentUsd must be a number');
     if (!isNumber(raw.budget.costCapUsd)) return err('budget.costCapUsd must be a number');
+    if (raw.budget.stepsGranted !== undefined && !isNumber(raw.budget.stepsGranted)) return err('budget.stepsGranted must be a number');
+    if (raw.budget.hardMaxSteps !== undefined && !isNumber(raw.budget.hardMaxSteps)) return err('budget.hardMaxSteps must be a number');
+    if (raw.budget.extensionsGranted !== undefined && !isNumber(raw.budget.extensionsGranted)) return err('budget.extensionsGranted must be a number');
     if (!isString(raw.refundId) || raw.refundId.length === 0) return err('start response missing refundId');
     // scanCredits optional but if present must be a number
     if (raw.scanCredits !== undefined && !isNumber(raw.scanCredits)) return err('scanCredits must be a number');

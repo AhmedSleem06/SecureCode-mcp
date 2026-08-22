@@ -346,6 +346,8 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                     investigationNotes: cached.investigationNotes ?? [],
                     coverageGaps: cached.coverageGaps ?? [],
                     stepsUsed: cached.stepsUsed,
+                    stepsGranted: cached.stepsGranted ?? 40,
+                    extensionsGranted: cached.extensionsGranted ?? 0,
                     costSpentUsd: 0,
                     transcript: [],
                     cached: true,
@@ -782,6 +784,8 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 status: agentResult.status,
                 summary: agentResult.summary,
                 stepsUsed: agentResult.stepsUsed,
+                stepsGranted: agentResult.stepsGranted,
+                extensionsGranted: agentResult.extensionsGranted,
                 costSpentUsd: agentResult.costSpentUsd,
             }, memoryFingerprint);
         } catch (err: any) {
@@ -828,6 +832,9 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
             investigationNotes: agentResult.investigationNotes,
             coverageGaps: agentResult.coverageGaps,
             hasArchitectureContext: !!architectureContextStr,
+            stepsGranted: agentResult.stepsGranted,
+            extensionsGranted: agentResult.extensionsGranted,
+            terminationReason: agentResult.terminationReason,
         });
     } catch {
         // best-effort — audit failure must not block scan results
@@ -866,6 +873,9 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         investigationNotes: agentResult.investigationNotes ?? [],
         coverageGaps: agentResult.coverageGaps ?? [],
         stepsUsed: agentResult.stepsUsed,
+        stepsGranted: agentResult.stepsGranted,
+        extensionsGranted: agentResult.extensionsGranted,
+        terminationReason: agentResult.terminationReason,
         costSpentUsd: agentResult.costSpentUsd,
         transcript: agentResult.transcript,
         provenCount: provenFindings.filter(f => f.proven === 'PROVEN').length,

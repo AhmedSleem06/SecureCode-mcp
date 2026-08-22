@@ -55,15 +55,21 @@ export async function runAgentScan(
 ): Promise<AgentScanResult> {
     const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
     const budget: AgentScanBudget = {
-        stepsRemaining: options.budget?.stepsRemaining ?? AGENT_SCAN_DEFAULTS.maxSteps,
+        stepsRemaining: options.budget?.stepsRemaining ?? AGENT_SCAN_DEFAULTS.initialSteps,
         costSpentUsd: options.budget?.costSpentUsd ?? 0,
         costCapUsd: options.budget?.costCapUsd ?? AGENT_SCAN_DEFAULTS.costCapUsd,
+        stepsGranted: options.budget?.stepsGranted ?? AGENT_SCAN_DEFAULTS.initialSteps,
+        hardMaxSteps: options.budget?.hardMaxSteps ?? AGENT_SCAN_DEFAULTS.hardMaxSteps,
+        extensionsGranted: options.budget?.extensionsGranted ?? 0,
     };
 
     const startTime = Date.now();
     const wallClockMs = AGENT_SCAN_DEFAULTS.wallClockMs;
     let stepsTaken = 0;
     let costSpentUsd = 0;
+        let stepsGranted = budget.stepsGranted;
+        let extensionsGranted = budget.extensionsGranted;
+        let meaningfulProgressSinceLastExtension = false;
 
     try {
         const startRespRaw = await client.postJson<AgentScanStartResponse>('/agent/scan/start', {}, options.signal);
@@ -74,7 +80,10 @@ export async function runAgentScan(
                 findings: [],
                 transcript: [],
                 stepsUsed: 0,
+                stepsGranted: AGENT_SCAN_DEFAULTS.initialSteps,
+                extensionsGranted: 0,
                 costSpentUsd: 0,
+                terminationReason: 'api_error',
                 error: `API returned an invalid start response: ${startValidation.error}`,
                 investigationNotes: [],
                 coverageGaps: [],
@@ -128,7 +137,10 @@ export async function runAgentScan(
                     findings: [],
                     transcript,
                     stepsUsed: stepsTaken,
+                    stepsGranted,
+                    extensionsGranted,
                     costSpentUsd,
+                    terminationReason: 'wall_clock',
                     summary: `Wall clock limit (${wallClockMs}ms) exceeded.`,
                     investigationNotes: [],
                     coverageGaps: [],
@@ -142,7 +154,10 @@ export async function runAgentScan(
                     findings: [],
                     transcript,
                     stepsUsed: stepsTaken,
+                    stepsGranted,
+                    extensionsGranted,
                     costSpentUsd,
+                    terminationReason: 'cancelled',
                     summary: 'Cancelled by user.',
                     investigationNotes: [],
                     coverageGaps: [],
@@ -157,8 +172,17 @@ export async function runAgentScan(
                     stepsRemaining: budget.stepsRemaining,
                     costSpentUsd,
                     costCapUsd: budget.costCapUsd,
+                    stepsGranted,
+                    hardMaxSteps: budget.hardMaxSteps,
+                    extensionsGranted,
                 },
                 clientCapabilities: defaultClientCapabilities(),
+                investigationProgress: {
+                    completedSteps: investigationState.getCompletedSteps(),
+                    incompleteSteps: investigationState.getIncompleteSteps(),
+                    consecutiveBlockedReads,
+                    meaningfulProgressSinceLastExtension,
+                },
             };
 
             let stepResp: AgentScanStepResponse;
@@ -190,7 +214,10 @@ export async function runAgentScan(
                             findings: [],
                             transcript,
                             stepsUsed: stepsTaken,
+                            stepsGranted,
+                            extensionsGranted,
                             costSpentUsd,
+                            terminationReason: 'api_error',
                             summary: `Step budget exhausted after ${consecutiveErrors} consecutive malformed API responses. Last error: ${vErr}`,
                             investigationNotes: [],
                             coverageGaps: [],
@@ -212,7 +239,10 @@ export async function runAgentScan(
                         findings: [],
                         transcript,
                         stepsUsed: stepsTaken,
+                        stepsGranted,
+                        extensionsGranted,
                         costSpentUsd,
+                        terminationReason: 'api_error',
                         error: 'API server restarted mid-scan — the run was lost. Please retry the scan.',
                         investigationNotes: [],
                         coverageGaps: [],
@@ -226,7 +256,10 @@ export async function runAgentScan(
                         findings: [],
                         transcript,
                         stepsUsed: stepsTaken,
+                        stepsGranted,
+                        extensionsGranted,
                         costSpentUsd,
+                        terminationReason: 'cancelled',
                         summary: 'Cancelled by user.',
                         investigationNotes: [],
                         coverageGaps: [],
@@ -259,7 +292,10 @@ export async function runAgentScan(
                         findings: [],
                         transcript,
                         stepsUsed: stepsTaken,
+                        stepsGranted,
+                        extensionsGranted,
                         costSpentUsd,
+                        terminationReason: 'api_error',
                         summary: `Step budget exhausted after ${consecutiveErrors} consecutive API errors. Last error: ${errMsg}`,
                         investigationNotes: [],
                         coverageGaps: [],
@@ -270,6 +306,21 @@ export async function runAgentScan(
             costSpentUsd += stepResp.costUsd || 0;
             consecutiveErrors = 0;
             trace.logStepRequested(undefined, stepResp.tokens, stepResp.costUsd, undefined);
+
+            // Budget extension — the API may grant additional steps when the
+            // agent demonstrates meaningful progress. Update our local tracking.
+            if (stepResp.budgetExtension) {
+                const ext = stepResp.budgetExtension;
+                stepsGranted = ext.totalGranted;
+                extensionsGranted = ext.granted > 0 ? extensionsGranted + 1 : extensionsGranted;
+                budget.stepsRemaining = stepResp.stepsRemaining;
+                budget.stepsGranted = ext.totalGranted;
+                budget.extensionsGranted = extensionsGranted;
+                meaningfulProgressSinceLastExtension = false;
+                if (options.onProgress) {
+                    options.onProgress(stepsTaken, ext.hardMaxSteps, `Budget extended +${ext.granted} steps (${ext.totalGranted}/${ext.hardMaxSteps}): ${ext.reason}`);
+                }
+            }
 
             // System event (e.g., critique from the senior reviewer) — append
             // to the transcript WITHOUT executing it, then continue the loop
@@ -285,7 +336,7 @@ export async function runAgentScan(
                 stepsTaken++;
                 budget.stepsRemaining = stepResp.stepsRemaining;
                 if (options.onProgress) {
-                    options.onProgress(stepsTaken, AGENT_SCAN_DEFAULTS.maxSteps, `Step ${stepsTaken}: system_event(${ev.eventType})`);
+                    options.onProgress(stepsTaken, stepsGranted, `Step ${stepsTaken}: system_event(${ev.eventType})`);
                 }
                 // Re-loop: ask the API for the next action now that the
                 // critique is in the transcript. The agent will see the
@@ -305,7 +356,10 @@ export async function runAgentScan(
                     findings: [],
                     transcript,
                     stepsUsed: stepsTaken,
+                    stepsGranted,
+                    extensionsGranted,
                     costSpentUsd,
+                    terminationReason: stepResp.costCapped ? 'cost_cap' : 'budget_exhausted',
                     summary: stepResp.costCapped
                         ? `Cost cap ($${budget.costCapUsd.toFixed(2)}) reached.`
                         : 'Agent completed without explicit finish.',
@@ -323,7 +377,7 @@ export async function runAgentScan(
             // Progress callback
             if (options.onProgress) {
                 const actionDesc = describeAction(action);
-                options.onProgress(stepsTaken, AGENT_SCAN_DEFAULTS.maxSteps, `Step ${stepsTaken}: ${actionDesc}`);
+                options.onProgress(stepsTaken, stepsGranted, `Step ${stepsTaken}: ${actionDesc}`);
             }
 
             // Finish = done with findings
@@ -358,7 +412,10 @@ export async function runAgentScan(
                     coverageGaps,
                     transcript,
                     stepsUsed: stepsTaken,
+                    stepsGranted,
+                    extensionsGranted,
                     costSpentUsd,
+                    terminationReason: 'agent_finish',
                     summary: action.summary,
                 };
             }
@@ -369,7 +426,6 @@ export async function runAgentScan(
 
             if (action.type === 'read_file') {
                 const normalizedPath = action.path.replace(/\\/g, '/').toLowerCase();
-                // Get total lines for proper overlap calculation
                 let totalLines: number | undefined;
                 try {
                     const fs = require('fs');
@@ -378,20 +434,19 @@ export async function runAgentScan(
                     totalLines = content.split('\n').length;
                 } catch { /* best-effort */ }
 
-                // Overlap-aware coverage check: if >50% of the requested range
-                // was already read, block and tell the agent what's covered.
-                const readResult = investigationState.recordRead(
+                const checkResult = investigationState.checkRead(
                     action.path, action.startLine, action.endLine, totalLines,
                 );
-
-                // Exact-range dedup (fast path for identical re-reads)
                 const rangeKey = `${normalizedPath}:${action.startLine || 0}:${action.endLine || 0}`;
                 const checklist = investigationState.formatChecklistForPrompt();
-                if (readFiles.has(rangeKey)) {
+
+                if (checkResult.isExactDuplicate) {
+                    investigationState.recordBlockedRead(action.path);
                     observation = `File "${action.path}" (lines ${action.startLine || 'all'}-${action.endLine || 'all'}) was already read. The content is in the transcript above. Use a DIFFERENT line range or a different tool.\n\n${checklist}`;
                     wasBlocked = true;
-                } else if (readResult.overlapping && readResult.overlapFraction > 0.5) {
-                    const coveredRanges = readResult.coverageAfter
+                } else if (checkResult.overlapping && checkResult.overlapFraction > 0.5) {
+                    investigationState.recordBlockedRead(action.path);
+                    const coveredRanges = checkResult.coverageAfter
                         .filter(r => InvestigationState.rangesOverlap(
                             r,
                             InvestigationState.parseRange(action.startLine, action.endLine, totalLines),
@@ -401,22 +456,23 @@ export async function runAgentScan(
                     observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" substantially overlap already-read ranges (${coveredRanges}). The content is in the transcript above. Read a DIFFERENT section, use search_code to find specific patterns, or use trace_flow/check_guard/check_policy to analyze what you've already read.\n\n${checklist}`;
                     wasBlocked = true;
                 } else {
-                    // Per-file read cap: dynamic based on file size.
                     const fileMax = maxReadsForFile(action.path);
                     const count = investigationState.getReadCount(action.path);
-                    // Circuit breaker: if the agent has spent >40% of ALL steps
-                    // reading the same file, force it to switch to analysis tools.
                     const stepFraction = count / Math.max(stepsTaken, 1);
                     if (count > fileMax) {
+                        investigationState.recordBlockedRead(action.path);
                         observation = `BLOCKED: You have already read "${action.path}" ${fileMax} times. Further read_file calls on this file will also be blocked. You MUST use a different tool (search_code, trace_flow, check_guard, check_policy, list_imports, or finish) to proceed.\n\n${checklist}`;
                         wasBlocked = true;
                     } else if (stepFraction > 0.4 && count > 5) {
+                        investigationState.recordBlockedRead(action.path);
                         observation = `BLOCKED: You have spent ${count} of ${stepsTaken} steps reading "${action.path}". That's too much — switch to search_code, trace_flow, check_guard, or check_policy to analyze the code you've already read. If you have enough evidence, call finish to report your findings.\n\n${checklist}`;
                         wasBlocked = true;
                     } else {
+                        investigationState.recordRead(action.path, action.startLine, action.endLine, totalLines);
                         readFiles.add(rangeKey);
                         observation = await executeAction(action, ctx, startResp.runId, client, target);
                         investigationState.recordToolUse('read_file');
+                        meaningfulProgressSinceLastExtension = true;
                     }
                 }
             } else {
@@ -473,10 +529,12 @@ export async function runAgentScan(
                         if (action.type === 'search_code') {
                             investigationState.recordSymbolSearch((action as any).pattern || '');
                         }
+                        meaningfulProgressSinceLastExtension = true;
                     }
                 } else {
                     observation = await executeAction(action, ctx, startResp.runId, client, target);
                     investigationState.recordToolUse(action.type);
+                    meaningfulProgressSinceLastExtension = true;
                 }
             }
 
@@ -485,7 +543,16 @@ export async function runAgentScan(
             if (wasBlocked) {
                 trace.logToolBlocked(action.type, observation.slice(0, 200));
                 consecutiveBlockedReads++;
-                if (consecutiveBlockedReads >= 8) {
+                const recoveryLimit = AGENT_SCAN_DEFAULTS.blockedReadRecoveryLimit;
+
+                if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < recoveryLimit) {
+                    const recommendedTool = investigationState.getRecommendedRecoveryAction();
+                    if (recommendedTool) {
+                        observation += `\n\nRECOVERY REQUIRED: You have been blocked ${consecutiveBlockedReads} time(s). Do NOT call read_file again. Your next action MUST be: ${recommendedTool}. If you have enough evidence, call finish.`;
+                    }
+                }
+
+                if (consecutiveBlockedReads >= recoveryLimit) {
                     console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — force-finishing to stop wasting steps.`);
                     transcript.push({ action, observation });
                     trace.logRunCompleted('completed');
@@ -508,7 +575,10 @@ export async function runAgentScan(
                         findings: [],
                         transcript,
                         stepsUsed: stepsTaken,
+                        stepsGranted,
+                        extensionsGranted,
                         costSpentUsd,
+                        terminationReason: 'blocked_read_recovery',
                         summary: `Investigation cut short — agent was stuck re-reading files. ${autoGaps.length} coverage gaps identified.`,
                         investigationNotes: [],
                         coverageGaps: autoGaps,
@@ -531,7 +601,10 @@ export async function runAgentScan(
             findings: [],
             transcript: [],
             stepsUsed: stepsTaken,
+            stepsGranted,
+            extensionsGranted,
             costSpentUsd,
+            terminationReason: 'api_error',
             error: err.message || String(err),
             investigationNotes: [],
             coverageGaps: [],

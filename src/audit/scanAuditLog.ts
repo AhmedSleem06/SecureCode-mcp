@@ -64,6 +64,9 @@ export interface ScanAuditSample {
         verificationLevelDistribution: Record<string, number>;
         rootCauseCount: number;
         hasArchitectureContext: boolean;
+        stepsGranted?: number;
+        extensionsGranted?: number;
+        terminationReason?: string;
     };
     verifyUsage?: {
         findingsAttempted: number;
@@ -126,6 +129,9 @@ export function recordScanAuditSample(
         investigationNotes?: any[];
         coverageGaps?: any[];
         hasArchitectureContext?: boolean;
+        stepsGranted?: number;
+        extensionsGranted?: number;
+        terminationReason?: string;
     },
     options?: {
         samplingRate?: number;
@@ -174,6 +180,9 @@ export function recordScanAuditSample(
         verificationLevelDistribution,
         rootCauseCount: rootCauseIds.size,
         hasArchitectureContext: scanResult.hasArchitectureContext ?? false,
+        stepsGranted: scanResult.stepsGranted,
+        extensionsGranted: scanResult.extensionsGranted,
+        terminationReason: scanResult.terminationReason,
     };
 
     const sample: ScanAuditSample = {

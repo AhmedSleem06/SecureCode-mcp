@@ -30,6 +30,8 @@ export interface FileCoverage {
     totalLines?: number;
     /** Number of read_file calls on this file (including blocked ones). */
     readCount: number;
+    /** Number of blocked read_file attempts (did not produce content). */
+    blockedReadCount: number;
 }
 
 export type InvestigationStep =
@@ -58,6 +60,7 @@ export class InvestigationState {
     private filesRead = new Set<string>();
     private symbolsSearched = new Set<string>();
     private rootCauses = new Map<string, string>();
+    private duplicateReadKeys = new Set<string>();
 
     constructor() {
         this.checklist = {
@@ -115,6 +118,58 @@ export class InvestigationState {
         return overlapLines / (b.end - b.start + 1);
     }
 
+    /**
+     * Check if a read would be blocked (duplicate or overlapping) WITHOUT
+     * recording it. This lets the loop decide before committing coverage.
+     */
+    checkRead(filePath: string, startLine?: number, endLine?: number, totalLines?: number): {
+        isExactDuplicate: boolean;
+        overlapping: boolean;
+        overlapFraction: number;
+        coverageAfter: LineRange[];
+    } {
+        const normalized = InvestigationState.normalizePath(filePath);
+        const range = InvestigationState.parseRange(startLine, endLine, totalLines);
+        const rangeKey = `${normalized}:${startLine || 0}:${endLine || 0}`;
+        const coverage = this.fileCoverages.get(normalized);
+
+        const isExactDuplicate = this.duplicateReadKeys.has(rangeKey);
+        let maxOverlap = 0;
+        if (coverage) {
+            for (const existing of coverage.ranges) {
+                const frac = InvestigationState.overlapFraction(existing, range);
+                if (frac > maxOverlap) maxOverlap = frac;
+            }
+        }
+
+        return {
+            isExactDuplicate,
+            overlapping: maxOverlap > 0.5,
+            overlapFraction: maxOverlap,
+            coverageAfter: coverage ? [...coverage.ranges] : [],
+        };
+    }
+
+    /**
+     * Record a blocked read attempt — increments the blocked counter
+     * without merging ranges or counting it as a successful read.
+     */
+    recordBlockedRead(filePath: string): void {
+        const normalized = InvestigationState.normalizePath(filePath);
+        let coverage = this.fileCoverages.get(normalized);
+        if (!coverage) {
+            coverage = {
+                filePath: normalized,
+                ranges: [],
+                totalLines: undefined,
+                readCount: 0,
+                blockedReadCount: 0,
+            };
+            this.fileCoverages.set(normalized, coverage);
+        }
+        coverage.blockedReadCount++;
+    }
+
     recordRead(filePath: string, startLine?: number, endLine?: number, totalLines?: number): {
         overlapping: boolean;
         overlapFraction: number;
@@ -130,6 +185,7 @@ export class InvestigationState {
                 ranges: [],
                 totalLines,
                 readCount: 0,
+                blockedReadCount: 0,
             };
             this.fileCoverages.set(normalized, coverage);
         }
@@ -150,6 +206,8 @@ export class InvestigationState {
 
         coverage.ranges = InvestigationState.mergeRanges([...coverage.ranges, range]);
         this.filesRead.add(normalized);
+        const rangeKey = `${normalized}:${startLine || 0}:${endLine || 0}`;
+        this.duplicateReadKeys.add(rangeKey);
         this.markStepComplete('initial-read');
 
         return {
@@ -255,6 +313,22 @@ export class InvestigationState {
 
     getRootCauses(): Map<string, string> {
         return new Map(this.rootCauses);
+    }
+
+    getRecommendedRecoveryAction(): string | null {
+        const incomplete = this.getIncompleteSteps();
+        if (incomplete.length === 0) return null;
+        const step = incomplete[0];
+        switch (step) {
+            case 'route-discovery': return 'get_endpoints';
+            case 'policy-check': return 'check_policy';
+            case 'auth-symbol-search': return 'search_code';
+            case 'cross-file-flow': return 'trace_flow_cross_file';
+            case 'config-inspection': return 'read_config';
+            case 'ownership-analysis': return 'trace_flow_cross_file';
+            case 'tests-found': return 'find_tests';
+            default: return null;
+        }
     }
 
     formatChecklistForPrompt(): string {

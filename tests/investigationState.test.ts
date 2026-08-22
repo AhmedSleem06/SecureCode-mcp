@@ -167,4 +167,96 @@ describe('InvestigationState', () => {
             { start: 200, end: 300 },
         ]);
     });
+
+    describe('checkRead (non-recording check)', () => {
+        it('detects exact duplicate without recording', () => {
+            const state = new InvestigationState();
+            state.recordRead('src/http.ts', 1, 100, 500);
+            const check = state.checkRead('src/http.ts', 1, 100, 500);
+            expect(check.isExactDuplicate).toBe(true);
+            expect(check.overlapping).toBe(true);
+            expect(state.getReadCount('src/http.ts')).toBe(1);
+        });
+
+        it('detects overlap without recording', () => {
+            const state = new InvestigationState();
+            state.recordRead('src/http.ts', 1, 200, 500);
+            const check = state.checkRead('src/http.ts', 100, 300, 500);
+            expect(check.overlapping).toBe(true);
+            expect(check.overlapFraction).toBeGreaterThan(0.5);
+            expect(state.getReadCount('src/http.ts')).toBe(1);
+        });
+
+        it('allows non-overlapping reads without recording', () => {
+            const state = new InvestigationState();
+            state.recordRead('src/http.ts', 1, 100, 500);
+            const check = state.checkRead('src/http.ts', 200, 300, 500);
+            expect(check.isExactDuplicate).toBe(false);
+            expect(check.overlapping).toBe(false);
+        });
+
+        it('returns empty coverage for untracked file', () => {
+            const state = new InvestigationState();
+            const check = state.checkRead('src/new.ts', 1, 100, 500);
+            expect(check.isExactDuplicate).toBe(false);
+            expect(check.overlapping).toBe(false);
+            expect(check.coverageAfter).toEqual([]);
+        });
+    });
+
+    describe('recordBlockedRead', () => {
+        it('increments blockedReadCount without merging ranges', () => {
+            const state = new InvestigationState();
+            state.recordRead('src/http.ts', 1, 100, 500);
+            state.recordBlockedRead('src/http.ts');
+            state.recordBlockedRead('src/http.ts');
+            const coverage = state.getCoverage('src/http.ts');
+            expect(coverage!.blockedReadCount).toBe(2);
+            expect(coverage!.readCount).toBe(1);
+            expect(coverage!.ranges).toHaveLength(1);
+        });
+
+        it('does not mark initial-read as complete', () => {
+            const state = new InvestigationState();
+            state.recordBlockedRead('src/http.ts');
+            expect(state.getCompletedSteps()).not.toContain('initial-read');
+        });
+    });
+
+    describe('getRecommendedRecoveryAction', () => {
+        it('returns check_policy when policy-check is incomplete', () => {
+            const state = new InvestigationState();
+            state.recordRead('src/http.ts', 1, 100, 500);
+            const rec = state.getRecommendedRecoveryAction();
+            const incomplete = state.getIncompleteSteps();
+            expect(incomplete[0]).not.toBe('initial-read');
+            expect(rec).toBeTruthy();
+        });
+
+        it('returns read_config when config-inspection is the first incomplete step', () => {
+            const state = new InvestigationState();
+            state.recordRead('src/http.ts', 1, 100, 500);
+            state.recordToolUse('check_policy');
+            state.recordToolUse('search_code');
+            state.recordToolUse('get_endpoints');
+            state.recordToolUse('trace_flow_cross_file');
+            state.markAllHandlersReviewed();
+            state.markCandidatesVerified();
+            const rec = state.getRecommendedRecoveryAction();
+            expect(rec).toBe('read_config');
+        });
+
+        it('returns null when all steps complete', () => {
+            const state = new InvestigationState();
+            state.recordRead('src/http.ts', 1, 100, 500);
+            state.recordToolUse('check_policy');
+            state.recordToolUse('search_code');
+            state.recordToolUse('get_endpoints');
+            state.recordToolUse('trace_flow_cross_file');
+            state.recordToolUse('read_config');
+            state.markAllHandlersReviewed();
+            state.markCandidatesVerified();
+            expect(state.getRecommendedRecoveryAction()).toBeNull();
+        });
+    });
 });

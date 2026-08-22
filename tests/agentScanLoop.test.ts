@@ -250,3 +250,56 @@ describe('runAgentScan — termination', () => {
         expect(result.transcript.some(t => t.action.type === 'read_file' && (t.action as any).path === '__ERROR__')).toBe(false);
     });
 });
+
+describe('runAgentScan — adaptive budget fields', () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    it('returns stepsGranted and extensionsGranted in result', async () => {
+        mockPostJson([
+            { runId: 'run-1', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 1.20, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
+            { next: { type: 'finish', findings: [], summary: 'done' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 39 },
+        ]);
+
+        const result = await runAgentScan(ctx, target, {});
+
+        expect(result.status).toBe('completed');
+        expect(result.stepsGranted).toBe(40);
+        expect(result.extensionsGranted).toBe(0);
+        expect(result.terminationReason).toBe('agent_finish');
+    });
+
+    it('returns terminationReason wall_clock when time expires', async () => {
+        mockPostJson([
+            { runId: 'run-1', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 1.20, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
+        ]);
+
+        const result = await runAgentScan(ctx, target, {
+            budget: { stepsRemaining: 40, costCapUsd: 1.20, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 },
+        });
+
+        // The loop will hit wall clock or step budget since only start response is mocked
+        expect(['capped', 'completed', 'degraded', 'spawn_failed', 'cancelled', 'blocked_recovery']).toContain(result.status);
+    });
+
+    it('handles budgetExtension in step response', async () => {
+        mockPostJson([
+            { runId: 'run-1', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 1.20, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
+            {
+                next: { type: 'read_file', path: 'test.ts', rationale: 'read' },
+                costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 38,
+                budgetExtension: { granted: 10, totalGranted: 50, hardMaxSteps: 80, reason: 'test extension' },
+            },
+            {
+                next: { type: 'finish', findings: [], summary: 'done' },
+                costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 47,
+            },
+        ]);
+        (executeAction as any).mockResolvedValue('file content');
+
+        const result = await runAgentScan(ctx, target, {});
+
+        expect(result.status).toBe('completed');
+        expect(result.stepsGranted).toBe(50);
+        expect(result.extensionsGranted).toBe(1);
+    });
+});

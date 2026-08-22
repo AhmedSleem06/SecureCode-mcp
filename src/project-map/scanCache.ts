@@ -55,7 +55,8 @@ export interface ScanCacheEntry {
     summary?: string;
     /** Steps used by the agent. */
     stepsUsed: number;
-    /** Cost in USD. */
+    stepsGranted?: number;
+    extensionsGranted?: number;
     costSpentUsd: number;
     /** File path (for debugging). */
     filePath: string;
@@ -142,6 +143,8 @@ export function writeCachedScan(
         status: string;
         summary?: string;
         stepsUsed: number;
+        stepsGranted?: number;
+        extensionsGranted?: number;
         costSpentUsd: number;
     },
     memoryHash?: string,
@@ -182,6 +185,8 @@ export function writeCachedScan(
         status: result.status,
         summary: result.summary,
         stepsUsed: result.stepsUsed,
+        stepsGranted: result.stepsGranted,
+        extensionsGranted: result.extensionsGranted,
         costSpentUsd: result.costSpentUsd,
         filePath,
         memoryHash,

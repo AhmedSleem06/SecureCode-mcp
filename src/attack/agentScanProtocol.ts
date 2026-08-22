@@ -6,12 +6,16 @@
  */
 
 export const AGENT_SCAN_DEFAULTS = {
-    maxSteps: 40,
-    costCapUsd: 0.60,
-    wallClockMs: 420_000,
+    initialSteps: 40,
+    extensionSize: 10,
+    hardMaxSteps: 80,
+    maxSteps: 80,
+    costCapUsd: 1.20,
+    wallClockMs: 720_000,
     perStepEstimateUsd: 0.08,
     creditsPerRun: 5,
     dailyRunLimit: 20,
+    blockedReadRecoveryLimit: 5,
 } as const;
 
 // ── Protocol versioning + capability negotiation ─────────────────────────────
@@ -26,7 +30,7 @@ export const AGENT_SCAN_DEFAULTS = {
 // new optional action type only requires adding it to SUPPORTED_ACTIONS
 // and bumping the MCP version — the API filters its schema accordingly.
 
-export const AGENT_SCAN_PROTOCOL_VERSION = 3;
+export const AGENT_SCAN_PROTOCOL_VERSION = 4;
 
 export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
@@ -445,6 +449,9 @@ export interface AgentScanBudget {
     stepsRemaining: number;
     costSpentUsd: number;
     costCapUsd: number;
+    stepsGranted: number;
+    hardMaxSteps: number;
+    extensionsGranted: number;
 }
 
 // ── Request / Response ──────────────────────────────────────────────────────
@@ -495,6 +502,21 @@ export interface AgentScanStepRequest {
      * set (all actions the current API version knows about).
      */
     clientCapabilities?: AgentScanClientCapabilities;
+    investigationProgress?: AgentInvestigationProgress;
+}
+
+export interface AgentInvestigationProgress {
+    completedSteps: string[];
+    incompleteSteps: string[];
+    consecutiveBlockedReads: number;
+    meaningfulProgressSinceLastExtension: boolean;
+}
+
+export interface BudgetExtensionEvent {
+    granted: number;
+    totalGranted: number;
+    hardMaxSteps: number;
+    reason: string;
 }
 
 export interface AgentScanStepResponse {
@@ -504,28 +526,8 @@ export interface AgentScanStepResponse {
     degraded: boolean;
     costCapped: boolean;
     stepsRemaining: number;
-    /**
-     * Optional system event the MCP loop must append to its transcript
-     * BEFORE requesting the next step. Used by the critique loop: when
-     * the API runs the senior-reviewer LLM and it rejects the finish, the
-     * API returns `next: <original finish action>` is NOT used — instead
-     * the API returns `next: null` and `systemEvent: { eventType: 'critique',
-     * message: ..., issues: [...] }`. The MCP loop appends the event to
-     * its transcript as a `system_event` step (without executing it) and
-     * immediately requests the next step.
-     *
-     * This replaces the previous pattern of mutating `req.transcript` on
-     * the API side (which had no effect on the MCP's transcript, since the
-     * request body is a deserialized copy) and returning a fake
-     * `read_file('__CRITIQUE__')` action (which the MCP would try to
-     * execute and get ENOENT).
-     */
     systemEvent?: AgentScanSystemEventAction;
-    /**
-     * Per-step LLM call breakdown — decision, retry, critique counts.
-     * Lets the MCP and user see when a step used multiple calls.
-     * Mirror: api/src/attacker/agentScanProtocol.ts.
-     */
+    budgetExtension?: BudgetExtensionEvent;
     callBreakdown?: {
         decision: number;
         retry: number;
@@ -548,6 +550,16 @@ export type AgentScanRunStatus =
     | 'capped'
     | 'degraded'
     | 'spawn_failed'
+    | 'cancelled'
+    | 'blocked_recovery';
+
+export type TerminationReason =
+    | 'agent_finish'
+    | 'budget_exhausted'
+    | 'cost_cap'
+    | 'wall_clock'
+    | 'blocked_read_recovery'
+    | 'api_error'
     | 'cancelled';
 
 // ── Result ───────────────────────────────────────────────────────────────────
@@ -560,7 +572,10 @@ export interface AgentScanResult {
     summary?: string;
     transcript: AgentScanTranscriptStep[];
     stepsUsed: number;
+    stepsGranted: number;
+    extensionsGranted: number;
     costSpentUsd: number;
+    terminationReason?: TerminationReason;
     error?: string;
 }
 
