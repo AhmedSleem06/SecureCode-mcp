@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import type { JsonRpcRequest, JsonRpcResponse, ToolDef, ServerContext } from './types';
 import { TOOLS, ATTACK_ENABLED } from './tools';
+import { validateAllToolsHavePolicies } from '../approval/policy';
 import { toolScan } from '../tools/scan';
 import { toolMap } from '../tools/map';
 import { toolFix } from '../tools/fix';
@@ -64,6 +65,11 @@ const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<u
     'securecode.decide-finding': toolDecideFinding,
     'securecode.clear-finding-reviews': toolClearFindingReviews,
 };
+
+const _policyMissing = validateAllToolsHavePolicies(Object.keys(TOOL_HANDLERS));
+if (_policyMissing.length > 0) {
+    console.error(`[securecode-mcp] WARNING: tools without approval policy: ${_policyMissing.join(', ')}`);
+}
 
 function validateArgs(tool: ToolDef, args: any): string | null {
     const schema = tool.inputSchema as {
