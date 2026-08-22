@@ -11,6 +11,7 @@ import {
 import { validateVerifyGenerateResponse, validateVerifyAnalyzeResponse } from './protocolValidator';
 import { parseProofMarker } from './proofTypes';
 import { evaluateProofGate, buildProofEvidence } from './proofGate';
+import { runMutationTest } from './mutationTest';
 
 export interface VerifyFinding {
     type: string;
@@ -332,6 +333,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             repeatPasses: proofMarker.found && proofMarker.exploit === 'pass' ? 1 : 0,
             llmVerdict: analyzeResp.verdict,
             sourceMode: proofMarker.sourceMode,
+            minimumRepeatRuns: 1,
         });
 
         const proofEvidence = proofMarker.found
@@ -346,9 +348,97 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
 
         if (analyzeResp.verdict === 'PROVEN') {
             if (gateResult.eligibleForProven) {
+                const REPEAT_RUNS = 3;
+                let totalPasses = 1;
+                for (let rep = 2; rep <= REPEAT_RUNS; rep++) {
+                    if (opts.signal?.aborted) break;
+                    if (tracker && !tracker.canAttemptRound()) break;
+                    onProgress?.(round, maxRounds, `Round ${round}: repeatability run ${rep}/${REPEAT_RUNS}...`);
+                    const repResult = await runLocalTest(
+                        genResp.testScript,
+                        runner,
+                        opts.workspaceRoot,
+                        { setupScript: genResp.setupScript || null, timeoutMs: tracker ? Math.min(30_000, tracker.remainingWallClockMs()) : 30_000, signal: opts.signal },
+                    );
+                    if (repResult.verdict === 'pass') totalPasses++;
+                }
+
+                const repMarker = parseProofMarker(lastTestOutput);
+                const repGateResult = evaluateProofGate(repMarker, {
+                    sandboxBackend: testResult.backend || 'unknown',
+                    targetFile: filePath || '',
+                    targetLine: finding.line,
+                    repeatedRuns: REPEAT_RUNS,
+                    repeatPasses: totalPasses,
+                    llmVerdict: 'PROVEN',
+                    sourceMode: repMarker.sourceMode,
+                });
+
+                if (!repGateResult.eligibleForProven) {
+                    console.warn(`[Verify Loop] Repeatability check failed: ${totalPasses}/${REPEAT_RUNS} runs passed`);
+                    const repEvidence = repMarker.found
+                        ? buildProofEvidence(repMarker, {
+                              sandboxBackend: testResult.backend || 'unknown',
+                              targetFile: filePath || '',
+                              targetLine: finding.line,
+                              repeatedRuns: REPEAT_RUNS,
+                              repeatPasses: totalPasses,
+                          })
+                        : proofEvidence;
+                    return {
+                        verdict: 'INCONCLUSIVE',
+                        reason: `Repeatability check failed: ${totalPasses}/${REPEAT_RUNS} runs passed. ${repGateResult.warnings.join(' ')}`,
+                        roundsUsed: round,
+                        testScript: lastTestScript,
+                        testOutput: lastTestOutput,
+                        backend: testResult.backend || '',
+                        proofEvidence: repEvidence,
+                        proofGateResult: repGateResult,
+                        proofSubVerdict: 'gate-rejected',
+                        subVerdict: 'analyzed',
+                    };
+                }
+
+                if (proofEvidence) {
+                    proofEvidence.repeatedRuns = REPEAT_RUNS;
+                    proofEvidence.repeatPasses = totalPasses;
+                }
+
+                const mutationResult = await runMutationTest({
+                    testScript: lastTestScript,
+                    runner: genResp.runner || runtimeInfo.runner || 'node',
+                    workspaceRoot: opts.workspaceRoot,
+                    filePath: filePath || '',
+                    code,
+                    vulnerabilityType: finding.type,
+                    line: finding.line,
+                    evidence: finding.evidence,
+                    why: finding.why,
+                    client,
+                });
+
+                if (!mutationResult.discriminating) {
+                    console.warn(`[Verify Loop] Mutation test non-discriminating: ${mutationResult.reason}`);
+                    if (proofEvidence) {
+                        proofEvidence.assumptions.push(`mutation-test: ${mutationResult.reason}`);
+                    }
+                    return {
+                        verdict: 'INCONCLUSIVE',
+                        reason: `Proof gate passed but mutation test was non-discriminating: ${mutationResult.reason}`,
+                        roundsUsed: round,
+                        testScript: lastTestScript,
+                        testOutput: lastTestOutput,
+                        backend: testResult.backend || '',
+                        proofEvidence,
+                        proofGateResult: { ...gateResult, failedGates: [...gateResult.failedGates, 'mutation-non-discriminating'] },
+                        proofSubVerdict: 'gate-rejected',
+                        subVerdict: 'analyzed',
+                    };
+                }
+
                 return {
                     verdict: 'PROVEN',
-                    reason: analyzeResp.reason,
+                    reason: `${analyzeResp.reason} [mutation: ${mutationResult.reason}]`,
                     roundsUsed: round,
                     testScript: lastTestScript,
                     testOutput: lastTestOutput,

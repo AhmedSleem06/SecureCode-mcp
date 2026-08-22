@@ -5,7 +5,7 @@ import type {
     ProofSourceMode,
 } from './proofTypes';
 
-const DEFAULT_MINIMUM_REPEAT_RUNS = 1;
+const DEFAULT_MINIMUM_REPEAT_RUNS = 3;
 
 export function evaluateProofGate(
     marker: ParsedProofMarker,

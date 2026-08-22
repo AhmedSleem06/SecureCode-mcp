@@ -10,6 +10,10 @@ vi.mock('../src/utils/localTestRunner', () => ({
     runLocalTest: vi.fn(),
 }));
 
+vi.mock('../src/attack/mutationTest', () => ({
+    runMutationTest: vi.fn().mockResolvedValue({ discriminating: true, mutatedVerdict: 'fail', reason: 'mutation test passed (discriminating)' }),
+}));
+
 import { runLocalTest } from '../src/utils/localTestRunner';
 
 const VALID_PROOF_MARKER = 'SECURECODE_PROOF_RESULT:{"baseline":"pass","exploit":"pass","impact":"observed","targetReached":true,"assertion":"deterministic","mockedVulnerablePath":false,"sourceMode":"real-import"}:SECURECODE_PROOF_END';
@@ -217,7 +221,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
     // ── Cost tracking (Fix 6) ──────────────────────────────────────────────
 
     it('records costUsd from generate + analyze responses into the budget tracker', async () => {
-        vi.mocked(runLocalTest).mockResolvedValueOnce({
+        vi.mocked(runLocalTest).mockResolvedValue({
             verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
@@ -242,7 +246,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
     });
 
     it('records $0 cost when costUsd is absent (backward compatible)', async () => {
-        vi.mocked(runLocalTest).mockResolvedValueOnce({
+        vi.mocked(runLocalTest).mockResolvedValue({
             verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
@@ -287,7 +291,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
     // ── Python runner end-to-end (Fix 5) ──────────────────────────────────
 
     it('passes python3 runner through to runLocalTest when API returns it', async () => {
-        vi.mocked(runLocalTest).mockResolvedValueOnce({
+        vi.mocked(runLocalTest).mockResolvedValue({
             verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
@@ -309,7 +313,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
     });
 
     it('passes deno runner through to runLocalTest when API returns it', async () => {
-        vi.mocked(runLocalTest).mockResolvedValueOnce({
+        vi.mocked(runLocalTest).mockResolvedValue({
             verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();

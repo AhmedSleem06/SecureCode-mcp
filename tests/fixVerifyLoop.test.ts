@@ -8,6 +8,10 @@ vi.mock('../src/utils/localTestRunner', () => ({
     runLocalTest: vi.fn(),
 }));
 
+vi.mock('../src/attack/mutationTest', () => ({
+    runMutationTest: vi.fn().mockResolvedValue({ discriminating: true, mutatedVerdict: 'fail', reason: 'mutation test passed (discriminating)' }),
+}));
+
 import { runLocalTest } from '../src/utils/localTestRunner';
 
 const VALID_PROOF_MARKER = 'SECURECODE_PROOF_RESULT:{"baseline":"pass","exploit":"pass","impact":"observed","targetReached":true,"assertion":"deterministic","mockedVulnerablePath":false,"sourceMode":"real-import"}:SECURECODE_PROOF_END';
@@ -134,7 +138,7 @@ describe('runFixVerifyLoop', () => {
     });
 
     it('returns still-vulnerable when original PROVEN + fixed PROVEN', async () => {
-        vi.mocked(runLocalTest).mockResolvedValueOnce({
+        vi.mocked(runLocalTest).mockResolvedValue({
             verdict: 'pass',
             output: `PASS: exploit worked\n${VALID_PROOF_MARKER}`,
             exitCode: 0,
