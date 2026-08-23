@@ -985,6 +985,44 @@ export async function runAgentScan(
                 investigationState.markCandidatesVerified();
             }
 
+            // Evidence ledger: record evidence for each action type. This
+            // populates the evidence ledger so the scheduler can suggest
+            // actions for unsatisfied requirements and the finish gate can
+            // verify all evidence requirements are met.
+            if (!wasBlocked) {
+                const actionFile = String((action as any).filePath || (action as any).path || target.filePath);
+                const evidenceKindMap: Record<string, string> = {
+                    read_file: 'source-range',
+                    search_code: 'symbol-reference',
+                    trace_flow: 'cross-file-flow',
+                    trace_flow_cross_file: 'cross-file-flow',
+                    check_guard: 'guard-result',
+                    check_policy: 'policy-result',
+                    get_endpoints: 'handler-inventory',
+                    list_imports: 'symbol-reference',
+                    find_definition: 'symbol-definition',
+                    find_references: 'symbol-reference',
+                    find_tests: 'test-location',
+                    run_tests: 'test-result',
+                    read_config: 'config-result',
+                    call_graph: 'cross-file-flow',
+                };
+                const kind = evidenceKindMap[action.type];
+                if (kind) {
+                    evidenceLedger.recordEvidence({
+                        kind: kind as any,
+                        tool: action.type as any,
+                        filePath: actionFile,
+                        range: action.type === 'read_file'
+                            ? { start: (action as any).startLine || 1, end: (action as any).endLine || 1 }
+                            : undefined,
+                        symbol: (action as any).symbol || (action as any).pattern || undefined,
+                        outcome: wasBlocked ? 'blocked' : 'positive',
+                        transcriptStep: stepsTaken,
+                    });
+                }
+            }
+
             // Handler discovery: when the agent calls get_endpoints, discover
             // handlers and populate the handler inventory. Create handler
             // review work items for security-sensitive handlers.
