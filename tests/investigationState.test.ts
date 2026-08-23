@@ -616,11 +616,78 @@ describe('InvestigationState', () => {
                 requiredEvidence: [],
                 status: 'pending',
             }]);
-            // The current loop only reports unresolved tasks as coverage gaps
-            // when findings.length === 0. With findings, gaps are suppressed.
             const unresolved = state.getUnresolvedTasks();
             expect(unresolved.length).toBeGreaterThan(0);
-            // DESIRED: these should ALWAYS be reported, even with findings.
+        });
+    });
+
+    describe('classifyRead — read value classification (quality-first Phase 1)', () => {
+        it('classifies a first read on a file as new-coverage', () => {
+            const state = new InvestigationState();
+            const result = state.classifyRead('src/http.ts', 1, 200, 1000);
+            expect(result.classification).toBe('new-coverage');
+            expect(result.overlapFraction).toBe(0);
+            expect(result.newLines).toBe(200);
+        });
+
+        it('classifies an exact duplicate read as duplicate', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 200, 1000, false);
+            const result = state.classifyRead('src/http.ts', 1, 200, 1000);
+            expect(result.classification).toBe('duplicate');
+            expect(result.newLines).toBe(0);
+            expect(result.nextUnreadRange).not.toBeNull();
+        });
+
+        it('classifies a fully covered range as high-overlap', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 500, 1000, false);
+            const result = state.classifyRead('src/http.ts', 100, 400, 1000);
+            expect(result.classification).toBe('high-overlap');
+            expect(result.overlapFraction).toBeGreaterThan(0.5);
+            expect(result.newLines).toBeLessThanOrEqual(300);
+        });
+
+        it('classifies a partially new range as partial-new-coverage', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 200, 1000, false);
+            const result = state.classifyRead('src/http.ts', 150, 400, 1000);
+            expect(result.classification).toBe('partial-new-coverage');
+            expect(result.overlapFraction).toBeGreaterThan(0);
+            expect(result.overlapFraction).toBeLessThanOrEqual(0.5);
+            expect(result.newLines).toBeGreaterThan(0);
+        });
+
+        it('classifies a non-overlapping new range as new-coverage', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 200, 1000, false);
+            const result = state.classifyRead('src/http.ts', 500, 800, 1000);
+            expect(result.classification).toBe('new-coverage');
+            expect(result.overlapFraction).toBe(0);
+            expect(result.newLines).toBe(301);
+        });
+
+        it('classifies an inverted range as invalid', () => {
+            const state = new InvestigationState();
+            const result = state.classifyRead('src/bad.ts', 500, 100, 1000);
+            expect(result.classification).toBe('invalid');
+            expect(result.newLines).toBe(0);
+        });
+
+        it('returns nextUnreadRange for duplicate reads', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 200, 1000, false);
+            const result = state.classifyRead('src/http.ts', 1, 200, 1000);
+            expect(result.nextUnreadRange).not.toBeNull();
+            expect(result.nextUnreadRange!.start).toBeGreaterThan(200);
+        });
+
+        it('returns null nextUnreadRange when file is fully covered', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/small.ts', 1, 100, 100, false);
+            const result = state.classifyRead('src/small.ts', 1, 100, 100);
+            expect(result.classification).toBe('duplicate');
+            expect(result.nextUnreadRange).toBeNull();
         });
     });
 });

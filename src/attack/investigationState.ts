@@ -33,16 +33,27 @@ export interface InvestigationTask {
 }
 
 export interface FileCoverage {
-    /** Normalized file path (lowercase, forward slashes). */
     filePath: string;
-    /** Merged, non-overlapping ranges that have been read. */
     ranges: LineRange[];
-    /** Total line count of the file (if known). */
     totalLines?: number;
-    /** Number of read_file calls on this file (including blocked ones). */
     readCount: number;
-    /** Number of blocked read_file attempts (did not produce content). */
     blockedReadCount: number;
+}
+
+export type ReadValueClassification =
+    | 'new-coverage'
+    | 'partial-new-coverage'
+    | 'duplicate'
+    | 'high-overlap'
+    | 'invalid'
+    | 'function-map';
+
+export interface ReadValueResult {
+    classification: ReadValueClassification;
+    overlapFraction: number;
+    newLines: number;
+    coverageAfter: LineRange[];
+    nextUnreadRange: LineRange | null;
 }
 
 export type InvestigationStep =
@@ -159,6 +170,62 @@ export class InvestigationState {
             overlapping: maxOverlap > 0.5,
             overlapFraction: maxOverlap,
             coverageAfter: coverage ? [...coverage.ranges] : [],
+        };
+    }
+
+    classifyRead(filePath: string, startLine?: number, endLine?: number, totalLines?: number): ReadValueResult {
+        const normalized = InvestigationState.normalizePath(filePath);
+        const range = InvestigationState.parseRange(startLine, endLine, totalLines);
+        const rangeKey = `${normalized}:${startLine || 0}:${endLine || 0}`;
+        const coverage = this.fileCoverages.get(normalized);
+
+        if (startLine !== undefined && endLine !== undefined && startLine > endLine) {
+            return {
+                classification: 'invalid',
+                overlapFraction: 0,
+                newLines: 0,
+                coverageAfter: coverage ? [...coverage.ranges] : [],
+                nextUnreadRange: null,
+            };
+        }
+
+        if (this.duplicateReadKeys.has(rangeKey)) {
+            return {
+                classification: 'duplicate',
+                overlapFraction: 1,
+                newLines: 0,
+                coverageAfter: coverage ? [...coverage.ranges] : [],
+                nextUnreadRange: this.getNextUnreadRange(filePath),
+            };
+        }
+
+        let maxOverlap = 0;
+        if (coverage) {
+            for (const existing of coverage.ranges) {
+                const frac = InvestigationState.overlapFraction(existing, range);
+                if (frac > maxOverlap) maxOverlap = frac;
+            }
+        }
+
+        const requestedLines = range.end - range.start + 1;
+        const overlapLines = Math.round(maxOverlap * requestedLines);
+        const newLines = requestedLines - overlapLines;
+
+        let classification: ReadValueClassification;
+        if (maxOverlap === 0) {
+            classification = 'new-coverage';
+        } else if (maxOverlap > 0.5) {
+            classification = 'high-overlap';
+        } else {
+            classification = 'partial-new-coverage';
+        }
+
+        return {
+            classification,
+            overlapFraction: maxOverlap,
+            newLines,
+            coverageAfter: coverage ? [...coverage.ranges] : [],
+            nextUnreadRange: this.getNextUnreadRange(filePath),
         };
     }
 
@@ -518,6 +585,33 @@ export class InvestigationState {
 
     getReadCount(filePath: string): number {
         return this.getCoverage(filePath)?.readCount ?? 0;
+    }
+
+    getCoverageSummary(filePath: string): {
+        totalLines: number;
+        coveredLines: number;
+        coveragePercentage: number;
+        uncoveredRangeCount: number;
+        largestUncoveredRange: LineRange | null;
+        readCount: number;
+        blockedReadCount: number;
+    } {
+        const coverage = this.getCoverage(filePath);
+        const totalLines = coverage?.totalLines ?? 0;
+        const coveredLines = (coverage?.ranges ?? []).reduce((sum, r) => sum + (r.end - r.start + 1), 0);
+        const uncovered = this.getUncoveredRanges(filePath);
+        const largestUncovered = uncovered.length > 0
+            ? uncovered.reduce((max, r) => (r.end - r.start) > (max.end - max.start) ? r : max)
+            : null;
+        return {
+            totalLines,
+            coveredLines,
+            coveragePercentage: totalLines > 0 ? Math.round(100 * coveredLines / totalLines) : 0,
+            uncoveredRangeCount: uncovered.length,
+            largestUncoveredRange: largestUncovered,
+            readCount: coverage?.readCount ?? 0,
+            blockedReadCount: coverage?.blockedReadCount ?? 0,
+        };
     }
 
     registerRootCause(rootCauseId: string, description: string): void {

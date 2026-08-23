@@ -72,7 +72,30 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
         }
     }
 
-    // 2. Unresolved critical/high architecture task
+    // 2. Next unread critical range — raised above architecture tasks and
+    // evidence requirements because source coverage is the foundation
+    // for all analysis. Without reading the code, the agent cannot
+    // produce quality findings.
+    const nextRange = investigation.getNextUnreadRange(target.filePath);
+    if (nextRange) {
+        const coverage = investigation.getCoverage(target.filePath);
+        const totalLines = coverage?.totalLines ?? 0;
+        const coveredLines = (coverage?.ranges ?? []).reduce((sum, r) => sum + (r.end - r.start + 1), 0);
+        const pct = totalLines > 0 ? Math.round(100 * coveredLines / totalLines) : 0;
+        return {
+            kind: 'deterministic-action',
+            action: {
+                type: 'read_file',
+                path: target.filePath,
+                startLine: nextRange.start,
+                endLine: nextRange.end,
+                rationale: `Read next unread range (coverage: ${pct}% of ${totalLines} lines)`,
+            } as AgentScanAction,
+            reason: `Unread range ${nextRange.start}-${nextRange.end} in target file (${pct}% covered)`,
+        };
+    }
+
+    // 3. Unresolved critical/high architecture task
     const topWorkItem = workItems.highestPriority();
     if (topWorkItem && (topWorkItem.priority === 'critical' || topWorkItem.priority === 'high')) {
         if (topWorkItem.status === 'pending' || topWorkItem.status === 'active') {
@@ -88,7 +111,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
         }
     }
 
-    // 3. Contract/interface target requiring implementation resolution
+    // 4. Contract/interface target requiring implementation resolution
     const implRequirement = evidence.getUnsatisfiedRequirements().find(r =>
         r.acceptedKinds.includes('implementation-resolution'),
     );
@@ -137,22 +160,6 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
                 reason: `Missing evidence: ${unsatisfied[0].description}`,
             };
         }
-    }
-
-    // 9. Next unread critical range
-    const nextRange = investigation.getNextUnreadRange(target.filePath);
-    if (nextRange) {
-        return {
-            kind: 'deterministic-action',
-            action: {
-                type: 'read_file',
-                path: target.filePath,
-                startLine: nextRange.start,
-                endLine: nextRange.end,
-                rationale: 'Read next unread critical range',
-            } as AgentScanAction,
-            reason: `Unread range ${nextRange.start}-${nextRange.end} in target file`,
-        };
     }
 
     // 10. Lower-priority pending work items

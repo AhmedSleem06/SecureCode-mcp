@@ -262,20 +262,36 @@ export async function runAgentScan(
                 };
             }
 
-            // Build action constraint for deterministic blocked-read recovery.
+            // Build action constraint for blocked-read recovery.
             //   0-1 blocked reads: normal (no constraint)
-            //   2 blocked reads: recovery mode, forbid read_file
+            //   2 blocked reads: recovery mode — if unread ranges exist,
+            //     require the next unread range; if no unread ranges remain,
+            //     forbid read_file entirely and require an analysis tool.
             //   3 blocked reads: MCP selects a deterministic recovery action (skip API)
-            //   5 blocked reads: force-finish
             let actionConstraint: AgentActionConstraint | undefined;
             if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
-                const recoveryAction = investigationState.getRecommendedRecoveryAction();
-                actionConstraint = {
-                    mode: 'recovery',
-                    forbiddenActions: ['read_file'],
-                    requiredAction: recoveryAction as any || undefined,
-                    reason: 'You have been blocked by duplicate/overlapping reads. Switch to a different tool.',
-                };
+                const nextRange = investigationState.getNextUnreadRange(target.filePath);
+                if (nextRange) {
+                    actionConstraint = {
+                        mode: 'recovery',
+                        requiredAction: {
+                            type: 'read_file',
+                            path: target.filePath,
+                            startLine: nextRange.start,
+                            endLine: nextRange.end,
+                            rationale: `Read next unread range: lines ${nextRange.start}-${nextRange.end}`,
+                        } as any,
+                        reason: `You have been blocked by duplicate/overlapping reads. Read the next unread range: lines ${nextRange.start}-${nextRange.end}, or use an analysis tool (trace_flow, check_guard, check_policy).`,
+                    };
+                } else {
+                    const recoveryAction = investigationState.getRecommendedRecoveryAction();
+                    actionConstraint = {
+                        mode: 'recovery',
+                        forbiddenActions: ['read_file'],
+                        requiredAction: recoveryAction as any || undefined,
+                        reason: 'You have been blocked by duplicate/overlapping reads and no unread ranges remain. Switch to an analysis tool.',
+                    };
+                }
             }
 
             const stepReq: AgentScanStepRequest = {
@@ -601,7 +617,7 @@ export async function runAgentScan(
 
                     return {
                         status: 'completed',
-                        findings: action.findings,
+                        findings: sanitizeFindings(action.findings),
                         investigationNotes: action.investigationNotes ?? [],
                         coverageGaps,
                         transcript,
@@ -688,71 +704,65 @@ export async function runAgentScan(
                     totalLines = content.split('\n').length;
                 } catch { /* best-effort */ }
 
-                const checkResult = investigationState.checkRead(
+                const readValue = investigationState.classifyRead(
                     action.path, action.startLine, action.endLine, totalLines,
                 );
-                const rangeKey = `${normalizedPath}:${action.startLine || 0}:${action.endLine || 0}`;
                 const checklist = investigationState.formatChecklistForPrompt();
+                const fileMax = maxReadsForFile(action.path);
+                const count = investigationState.getReadCount(action.path);
 
-                if (checkResult.isExactDuplicate) {
+                if (readValue.classification === 'duplicate') {
                     investigationState.recordBlockedRead(action.path);
-                    observation = `File "${action.path}" (lines ${action.startLine || 'all'}-${action.endLine || 'all'}) was already read. The content is in the transcript above. Use a DIFFERENT line range or a different tool.\n\n${checklist}`;
-                    wasBlocked = true;
-                } else if (checkResult.overlapping && checkResult.overlapFraction > 0.5) {
-                    investigationState.recordBlockedRead(action.path);
-                    const coveredRanges = checkResult.coverageAfter
-                        .filter(r => InvestigationState.rangesOverlap(
-                            r,
-                            InvestigationState.parseRange(action.startLine, action.endLine, totalLines),
-                        ))
-                        .map(r => `L${r.start}-${r.end}`)
-                        .join(', ');
-                    const nextRange = investigationState.getNextUnreadRange(action.path);
-                    const nextHint = nextRange
-                        ? `\nNext unread range: lines ${nextRange.start}-${nextRange.end}. Use read_file with startLine=${nextRange.start} and endLine=${nextRange.end}.`
+                    const nextHint = readValue.nextUnreadRange
+                        ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
                         : '';
-                    observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" substantially overlap already-read ranges (${coveredRanges}). The content is in the transcript above. Read a DIFFERENT section, use search_code to find specific patterns, or use trace_flow/check_guard/check_policy to analyze what you've already read.${nextHint}\n\n${checklist}`;
+                    observation = `BLOCKED: Lines ${action.startLine || 'all'}-${action.endLine || 'all'} of "${action.path}" were already read. The content is in the transcript above.${nextHint}\n\n${checklist}`;
+                    wasBlocked = true;
+                } else if (readValue.classification === 'high-overlap') {
+                    investigationState.recordBlockedRead(action.path);
+                    const nextHint = readValue.nextUnreadRange
+                        ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
+                        : '';
+                    observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" substantially overlap already-read ranges (${readValue.newLines} new lines of ${(action.endLine || 0) - (action.startLine || 1) + 1} requested). The content is in the transcript above. Read a DIFFERENT section or use trace_flow/check_guard/check_policy to analyze what you've already read.${nextHint}\n\n${checklist}`;
+                    wasBlocked = true;
+                } else if (readValue.classification === 'invalid') {
+                    investigationState.recordBlockedRead(action.path);
+                    observation = `BLOCKED: Invalid range for "${action.path}" (startLine=${action.startLine}, endLine=${action.endLine}). The requested range is inverted or out of bounds. Use a valid line range.\n\n${checklist}`;
                     wasBlocked = true;
                 } else {
-                    const fileMax = maxReadsForFile(action.path);
-                    const count = investigationState.getReadCount(action.path);
-                    const stepFraction = count / Math.max(stepsTaken, 1);
-                    if (count > fileMax) {
-                        investigationState.recordBlockedRead(action.path);
-                        observation = `BLOCKED: You have already read "${action.path}" ${fileMax} times. Further read_file calls on this file will also be blocked. You MUST use a different tool (search_code, trace_flow, check_guard, check_policy, list_imports, or finish) to proceed.\n\n${checklist}`;
-                        wasBlocked = true;
-                    } else if (stepFraction > 0.4 && count > 5) {
-                        investigationState.recordBlockedRead(action.path);
-                        observation = `BLOCKED: You have spent ${count} of ${stepsTaken} steps reading "${action.path}". That's too much — switch to search_code, trace_flow, check_guard, or check_policy to analyze the code you've already read. If you have enough evidence, call finish to report your findings.\n\n${checklist}`;
-                        wasBlocked = true;
-                    } else {
-                        // Execute the read and get structured metadata about the
-                        // ACTUAL delivered range (not the requested range).
-                        const readResult = await executeReadFileAction(action, ctx);
-                        observation = readResult.observation;
+                    const readResult = await executeReadFileAction(action, ctx);
+                    observation = readResult.observation;
 
-                        if (readResult.totalLines > 0) {
-                            // Record the actual delivered range, not the requested range.
-                            // A truncated read (function map) records no content coverage.
-                            investigationState.recordActualRead(
-                                action.path,
-                                readResult.actualStart,
-                                readResult.actualEnd,
-                                readResult.totalLines,
-                                readResult.truncated,
-                            );
-                        } else {
-                            // File read failed (error) — record as blocked, not covered.
-                            investigationState.recordBlockedRead(action.path);
-                        }
+                    if (readResult.totalLines > 0 && !readResult.truncated) {
+                        investigationState.recordActualRead(
+                            action.path,
+                            readResult.actualStart,
+                            readResult.actualEnd,
+                            readResult.totalLines,
+                            readResult.truncated,
+                        );
                         const rangeKey = `${normalizedPath}:${readResult.actualStart || 0}:${readResult.actualEnd || 0}`;
                         readFiles.add(rangeKey);
                         investigationState.recordToolUse('read_file');
-                        // Meaningful progress = actual content lines delivered
-                        // (not a truncated function map). Truncated reads don't
-                        // earn extension credit or reset recovery state.
-                        meaningfulProgressSinceLastExtension = !readResult.truncated;
-                        meaningfulProgressSinceRecovery = !readResult.truncated;
+                        meaningfulProgressSinceLastExtension = true;
+                        meaningfulProgressSinceRecovery = true;
+
+                        if (count >= fileMax) {
+                            observation += `\n\nNOTE: You have read "${action.path}" ${count + 1} times. Consider using search_code, trace_flow, check_guard, or check_policy to analyze the code you've read. If you have enough evidence, call finish to report your findings.\n\n${checklist}`;
+                        }
+                    } else if (readResult.truncated) {
+                        investigationState.recordActualRead(
+                            action.path,
+                            readResult.actualStart,
+                            readResult.actualEnd,
+                            readResult.totalLines,
+                            readResult.truncated,
+                        );
+                        investigationState.recordToolUse('read_file');
+                        meaningfulProgressSinceLastExtension = false;
+                        meaningfulProgressSinceRecovery = false;
+                    } else {
+                        investigationState.recordBlockedRead(action.path);
                     }
                 }
             } else {
@@ -854,8 +864,9 @@ export async function runAgentScan(
                 }
             }
 
-            // Track consecutive blocked reads — if the agent keeps requesting
-            // read_file on blocked files, force-finish to stop wasting steps.
+            // Track consecutive blocked reads — quality-first: don't
+            // force-finish while unread ranges remain and budget is available.
+            // Instead, force a deterministic recovery action.
             if (wasBlocked) {
                 trace.logToolBlocked(action.type, observation.slice(0, 200));
                 consecutiveBlockedReads++;
@@ -866,55 +877,76 @@ export async function runAgentScan(
                 const recoveryLimit = AGENT_SCAN_DEFAULTS.blockedReadRecoveryLimit;
 
                 if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
-                    const recommendedTool = investigationState.getRecommendedRecoveryAction();
-                    if (recommendedTool) {
-                        observation += `\n\nRECOVERY REQUIRED: You have been blocked ${consecutiveBlockedReads} time(s). Do NOT call read_file again. Your next action MUST be: ${recommendedTool}. If you have enough evidence, call finish.`;
+                    const nextRange = investigationState.getNextUnreadRange(target.filePath);
+                    if (nextRange) {
+                        observation += `\n\nRECOVERY REQUIRED: You have been blocked ${consecutiveBlockedReads} time(s). Read the next unread range: lines ${nextRange.start}-${nextRange.end}, or use an analysis tool (trace_flow, check_guard, check_policy).`;
+                    } else {
+                        const recommendedTool = investigationState.getRecommendedRecoveryAction();
+                        if (recommendedTool) {
+                            observation += `\n\nRECOVERY REQUIRED: You have been blocked ${consecutiveBlockedReads} time(s). No unread ranges remain. Your next action MUST be: ${recommendedTool}. If you have enough evidence, call finish.`;
+                        }
                     }
                 }
 
                 if (consecutiveBlockedReads >= recoveryLimit) {
-                    console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — force-finishing to stop wasting steps.`);
-                    transcript.push({ action, observation });
-                    trace.logRunCompleted('completed');
-                    const incompleteSteps = investigationState.getIncompleteSteps();
-                    const autoGaps = incompleteSteps.map(step => ({
-                        title: `Investigation step not completed: ${step}`,
-                        detail: `The agent was force-finished after repeated blocked reads without completing this required investigation step: ${step}. The investigation was incomplete and vulnerabilities may have been missed.`,
-                        file: target.filePath,
-                        requiredEvidence: [`Complete the ${step} step before concluding no vulnerabilities exist`],
-                        suggestedNextAction: step === 'config-inspection' ? 'read_config'
-                            : step === 'policy-check' ? 'check_policy'
-                            : step === 'cross-file-flow' ? 'trace_flow_cross_file'
-                            : step === 'route-discovery' ? 'get_endpoints'
-                            : step === 'auth-symbol-search' ? 'search_code'
-                            : 'continue investigation',
-                        priority: 'high' as const,
-                    }));
-                    // Add unresolved architecture-risk tasks as coverage gaps
-                    const unresolvedTasks = investigationState.getUnresolvedTasks();
-                    const taskGaps = unresolvedTasks.map(task => ({
-                        title: `Architecture risk unresolved: ${task.claim}`,
-                        detail: `This architecture-risk investigation task was not resolved: ${task.claim}. Required evidence: ${task.requiredEvidence.join('; ')}.`,
-                        file: task.targetFiles[0] || target.filePath,
-                        requiredEvidence: task.requiredEvidence,
-                        suggestedNextAction: task.requiredTools[0] || 'continue investigation',
-                        priority: 'high' as const,
-                    }));
-                    const allGaps = [...autoGaps, ...taskGaps];
-                    terminateScan(scanState, 'blocked_read_recovery', `Agent stuck re-reading files. ${allGaps.length} coverage gaps.`);
-                    return {
-                        status: 'completed',
-                        findings: [],
-                        transcript,
-                        stepsUsed: stepsTaken,
-                        stepsGranted,
-                        extensionsGranted,
-                        costSpentUsd,
-                        terminationReason: 'blocked_read_recovery',
-                        summary: `Investigation cut short — agent was stuck re-reading files. ${allGaps.length} coverage gaps identified.`,
-                        investigationNotes: [],
-                        coverageGaps: allGaps,
-                    };
+                    const nextRange = investigationState.getNextUnreadRange(target.filePath);
+                    const hasBudget = budget.stepsRemaining > 0 && costSpentUsd < budget.costCapUsd;
+                    const hasWallClock = Date.now() - startTime < wallClockMs;
+
+                    if (nextRange && hasBudget && hasWallClock) {
+                        console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — forcing deterministic recovery to unread range ${nextRange.start}-${nextRange.end}.`);
+                    } else {
+                        console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — no recovery available, force-finishing.`);
+                        transcript.push({ action, observation });
+                        trace.logRunCompleted('completed');
+                        const incompleteSteps = investigationState.getIncompleteSteps();
+                        const autoGaps = incompleteSteps.map(step => ({
+                            title: `Investigation step not completed: ${step}`,
+                            detail: `The agent was force-finished after repeated blocked reads without completing this required investigation step: ${step}. The investigation was incomplete and vulnerabilities may have been missed.`,
+                            file: target.filePath,
+                            requiredEvidence: [`Complete the ${step} step before concluding no vulnerabilities exist`],
+                            suggestedNextAction: step === 'config-inspection' ? 'read_config'
+                                : step === 'policy-check' ? 'check_policy'
+                                : step === 'cross-file-flow' ? 'trace_flow_cross_file'
+                                : step === 'route-discovery' ? 'get_endpoints'
+                                : step === 'auth-symbol-search' ? 'search_code'
+                                : 'continue investigation',
+                            priority: 'high' as const,
+                        }));
+                        const unresolvedTasks = investigationState.getUnresolvedTasks();
+                        const taskGaps = unresolvedTasks.map(task => ({
+                            title: `Architecture risk unresolved: ${task.claim}`,
+                            detail: `This architecture-risk investigation task was not resolved: ${task.claim}. Required evidence: ${task.requiredEvidence.join('; ')}.`,
+                            file: task.targetFiles[0] || target.filePath,
+                            requiredEvidence: task.requiredEvidence,
+                            suggestedNextAction: task.requiredTools[0] || 'continue investigation',
+                            priority: 'high' as const,
+                        }));
+                        const uncoveredRanges = investigationState.getUncoveredRanges(target.filePath);
+                        const rangeGaps = uncoveredRanges.map(r => ({
+                            title: `Unread range: lines ${r.start}-${r.end} of ${target.filePath}`,
+                            detail: `This range was never read during the investigation. Vulnerabilities in this range were not checked.`,
+                            file: target.filePath,
+                            requiredEvidence: [`Read lines ${r.start}-${r.end} and analyze for vulnerabilities`],
+                            suggestedNextAction: 'read_file',
+                            priority: 'high' as const,
+                        }));
+                        const allGaps = [...autoGaps, ...taskGaps, ...rangeGaps];
+                        terminateScan(scanState, 'blocked_read_recovery', `Agent stuck re-reading files. ${allGaps.length} coverage gaps.`);
+                        return {
+                            status: 'completed',
+                            findings: [],
+                            transcript,
+                            stepsUsed: stepsTaken,
+                            stepsGranted,
+                            extensionsGranted,
+                            costSpentUsd,
+                            terminationReason: 'blocked_read_recovery',
+                            summary: `Investigation cut short — agent was stuck re-reading files. ${allGaps.length} coverage gaps identified.`,
+                            investigationNotes: [],
+                            coverageGaps: allGaps,
+                        };
+                    }
                 }
             } else {
                 trace.logToolCompleted(action.type, observation);
@@ -1130,6 +1162,42 @@ export async function runAgentScan(
             coverageGaps: [],
         };
     }
+}
+
+function isCoherentText(text: string): boolean {
+    if (!text || text.length < 5) return false;
+    const asciiLetters = (text.match(/[a-zA-Z]/g) || []).length;
+    const totalChars = text.length;
+    if (totalChars > 0 && asciiLetters / totalChars < 0.3) return false;
+    const controlChars = (text.match(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFD]/g) || []).length;
+    if (controlChars > 0) return false;
+    const words = text.split(/\s+/).filter(w => w.length > 1);
+    if (words.length < 3) return false;
+    return true;
+}
+
+function sanitizeFindingText(text: string): string {
+    if (!text) return text;
+    return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFD]/g, '').trim();
+}
+
+function sanitizeFindings(findings: any[]): any[] {
+    return findings.map(f => {
+        const sanitized = { ...f };
+        if (sanitized.why) {
+            sanitized.why = sanitizeFindingText(sanitized.why);
+            if (!isCoherentText(sanitized.why)) {
+                sanitized.why = `[Quality warning: model produced incoherent explanation] ${sanitized.why || '(empty)'}`;
+                if (sanitized.severity === 'high' || sanitized.severity === 'critical') {
+                    sanitized.severity = 'medium';
+                }
+            }
+        }
+        if (sanitized.evidence) {
+            sanitized.evidence = sanitizeFindingText(sanitized.evidence);
+        }
+        return sanitized;
+    });
 }
 
 function describeAction(action: AgentScanAction): string {
