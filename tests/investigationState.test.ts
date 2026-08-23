@@ -223,6 +223,72 @@ describe('InvestigationState', () => {
         });
     });
 
+    describe('recordActualRead (actual delivered range)', () => {
+        it('records the actual delivered range, not the requested range', () => {
+            const state = new InvestigationState();
+            // Requested 1-2000, but executor clamped to 1-500 (actual)
+            state.recordActualRead('src/big.ts', 1, 500, 2000, false);
+            const coverage = state.getCoverage('src/big.ts');
+            expect(coverage).toBeDefined();
+            expect(coverage!.ranges).toEqual([{ start: 1, end: 500 }]);
+            expect(coverage!.totalLines).toBe(2000);
+        });
+
+        it('records full coverage for a small file (not truncated)', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/small.ts', 1, 100, 100, false);
+            const coverage = state.getCoverage('src/small.ts');
+            expect(coverage!.ranges).toEqual([{ start: 1, end: 100 }]);
+        });
+
+        it('records no content coverage for a truncated (function map) read', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/large.ts', 0, 0, 2000, true);
+            const coverage = state.getCoverage('src/large.ts');
+            expect(coverage!.ranges).toEqual([]);
+            expect(coverage!.readCount).toBe(1);
+            expect(coverage!.totalLines).toBe(2000);
+        });
+
+        it('allows a second read of a non-overlapping actual range', () => {
+            const state = new InvestigationState();
+            const r1 = state.recordActualRead('src/big.ts', 1, 300, 2000, false);
+            expect(r1.overlapping).toBe(false);
+            const r2 = state.recordActualRead('src/big.ts', 301, 600, 2000, false);
+            expect(r2.overlapping).toBe(false);
+            const coverage = state.getCoverage('src/big.ts');
+            expect(coverage!.ranges).toEqual([{ start: 1, end: 600 }]);
+        });
+
+        it('detects overlapping actual ranges', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 300, 2000, false);
+            const r2 = state.recordActualRead('src/big.ts', 200, 400, 2000, false);
+            expect(r2.overlapping).toBe(true);
+            expect(r2.overlapFraction).toBeGreaterThan(0.5);
+        });
+
+        it('increments readCount for truncated reads', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/large.ts', 0, 0, 2000, true);
+            expect(state.getReadCount('src/large.ts')).toBe(1);
+        });
+
+        it('marks initial-read complete even for truncated reads', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/large.ts', 0, 0, 2000, true);
+            expect(state.getCompletedSteps()).toContain('initial-read');
+        });
+
+        it('does not record coverage when actualStart/actualEnd are 0', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/large.ts', 0, 0, 2000, false);
+            const coverage = state.getCoverage('src/large.ts');
+            expect(coverage!.ranges).toEqual([]);
+            expect(coverage!.readCount).toBe(1);
+        });
+    });
+
     describe('getRecommendedRecoveryAction', () => {
         it('returns check_policy when policy-check is incomplete', () => {
             const state = new InvestigationState();
@@ -257,6 +323,153 @@ describe('InvestigationState', () => {
             state.markAllHandlersReviewed();
             state.markCandidatesVerified();
             expect(state.getRecommendedRecoveryAction()).toBeNull();
+        });
+    });
+
+    describe('getUncoveredRanges', () => {
+        it('returns full file as uncovered when nothing has been read', () => {
+            const state = new InvestigationState();
+            state.recordRead('src/big.ts', 1, 0, 500);
+            state.getCoverage('src/big.ts')!.ranges = [];
+            const gaps = state.getUncoveredRanges('src/big.ts');
+            expect(gaps).toEqual([{ start: 1, end: 500 }]);
+        });
+
+        it('returns gap after a partial read', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 300, 1000, false);
+            const gaps = state.getUncoveredRanges('src/big.ts');
+            expect(gaps).toEqual([{ start: 301, end: 1000 }]);
+        });
+
+        it('returns gap between two read ranges', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 100, 1000, false);
+            state.recordActualRead('src/big.ts', 500, 600, 1000, false);
+            const gaps = state.getUncoveredRanges('src/big.ts');
+            expect(gaps).toEqual([{ start: 101, end: 499 }, { start: 601, end: 1000 }]);
+        });
+
+        it('returns empty array when fully covered', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 1000, 1000, false);
+            const gaps = state.getUncoveredRanges('src/big.ts');
+            expect(gaps).toEqual([]);
+        });
+
+        it('returns empty array for untracked file', () => {
+            const state = new InvestigationState();
+            const gaps = state.getUncoveredRanges('src/unknown.ts');
+            expect(gaps).toEqual([]);
+        });
+
+        it('returns gap before the first range', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 100, 200, 500, false);
+            const gaps = state.getUncoveredRanges('src/big.ts');
+            expect(gaps).toEqual([{ start: 1, end: 99 }, { start: 201, end: 500 }]);
+        });
+    });
+
+    describe('getNextUnreadRange', () => {
+        it('returns the first gap chunk for a partially read file', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 300, 1000, false);
+            const next = state.getNextUnreadRange('src/big.ts');
+            expect(next).toEqual({ start: 301, end: 600 });
+        });
+
+        it('returns null when fully covered', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/small.ts', 1, 100, 100, false);
+            expect(state.getNextUnreadRange('src/small.ts')).toBeNull();
+        });
+
+        it('returns null for untracked file', () => {
+            const state = new InvestigationState();
+            expect(state.getNextUnreadRange('src/unknown.ts')).toBeNull();
+        });
+
+        it('respects the chunk size policy for a 2000-line file', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 300, 2000, false);
+            const next = state.getNextUnreadRange('src/big.ts');
+            expect(next).toEqual({ start: 301, end: 600 });
+        });
+
+        it('uses 250-line chunks for a 500-line file', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/med.ts', 1, 100, 500, false);
+            const next = state.getNextUnreadRange('src/med.ts');
+            expect(next).toEqual({ start: 101, end: 350 });
+        });
+
+        it('clamps the chunk to the file end', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 900, 1000, false);
+            const next = state.getNextUnreadRange('src/big.ts');
+            expect(next).toEqual({ start: 901, end: 1000 });
+        });
+
+        it('returns the full file for a small file with no reads', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/small.ts', 0, 0, 100, true);
+            const next = state.getNextUnreadRange('src/small.ts');
+            expect(next).toEqual({ start: 1, end: 100 });
+        });
+    });
+
+    describe('getCoveragePercent', () => {
+        it('returns 0 for untracked file', () => {
+            const state = new InvestigationState();
+            expect(state.getCoveragePercent('src/unknown.ts')).toBe(0);
+        });
+
+        it('returns 0 for a file with no coverage', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 0, 0, 1000, true);
+            expect(state.getCoveragePercent('src/big.ts')).toBe(0);
+        });
+
+        it('returns correct percentage for partial coverage', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 300, 1000, false);
+            expect(state.getCoveragePercent('src/big.ts')).toBe(30);
+        });
+
+        it('returns 100 for full coverage', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/small.ts', 1, 100, 100, false);
+            expect(state.getCoveragePercent('src/small.ts')).toBe(100);
+        });
+
+        it('handles multiple ranges', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 200, 1000, false);
+            state.recordActualRead('src/big.ts', 500, 700, 1000, false);
+            expect(state.getCoveragePercent('src/big.ts')).toBe(40);
+        });
+    });
+
+    describe('chunkSizeForLines', () => {
+        it('returns totalLines for files under 300 lines', () => {
+            expect(InvestigationState.chunkSizeForLines(100)).toBe(100);
+            expect(InvestigationState.chunkSizeForLines(299)).toBe(299);
+        });
+
+        it('returns 250 for files 300-999 lines', () => {
+            expect(InvestigationState.chunkSizeForLines(300)).toBe(250);
+            expect(InvestigationState.chunkSizeForLines(999)).toBe(250);
+        });
+
+        it('returns 300 for files 1000-4999 lines', () => {
+            expect(InvestigationState.chunkSizeForLines(1000)).toBe(300);
+            expect(InvestigationState.chunkSizeForLines(4999)).toBe(300);
+        });
+
+        it('returns 400 for files over 5000 lines', () => {
+            expect(InvestigationState.chunkSizeForLines(5000)).toBe(400);
+            expect(InvestigationState.chunkSizeForLines(10000)).toBe(400);
         });
     });
 });

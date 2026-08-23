@@ -34,7 +34,7 @@ vi.mock('../src/api/client', () => ({
     })),
 }));
 
-import { executeAction } from '../src/attack/agentScanExecutor';
+import { executeAction, executeReadFileAction } from '../src/attack/agentScanExecutor';
 import { trackTaint } from '../src/project-map/taintTracker';
 import { evaluateGuard } from '../src/project-map/guardEvaluator';
 import { searchCode, formatSearchResult } from '../src/utils/searchCode';
@@ -251,5 +251,97 @@ describe('executeAction — truncation', () => {
         expect(result).toContain('truncated');
 
         fs.unlinkSync(tmpFile);
+    });
+});
+
+describe('executeReadFileAction — structured metadata', () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    it('returns actualStart/actualEnd for a ranged read', async () => {
+        const content = Array.from({ length: 500 }, (_, i) => `line ${i + 1}`).join('\n');
+        const tmpFile = path.join(os.tmpdir(), 'test-range.ts');
+        fs.writeFileSync(tmpFile, content);
+
+        const result = await executeReadFileAction(
+            { type: 'read_file', path: 'test-range.ts', startLine: 10, endLine: 20, rationale: 'read' },
+            ctx,
+        );
+
+        expect(result.actualStart).toBe(10);
+        expect(result.actualEnd).toBe(20);
+        expect(result.totalLines).toBe(500);
+        expect(result.truncated).toBe(false);
+        expect(result.observation).toContain('lines 10-20 of 500');
+
+        fs.unlinkSync(tmpFile);
+    });
+
+    it('clamps endLine to totalLines', async () => {
+        const content = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join('\n');
+        const tmpFile = path.join(os.tmpdir(), 'test-clamp.ts');
+        fs.writeFileSync(tmpFile, content);
+
+        const result = await executeReadFileAction(
+            { type: 'read_file', path: 'test-clamp.ts', startLine: 50, endLine: 2000, rationale: 'read' },
+            ctx,
+        );
+
+        expect(result.actualStart).toBe(50);
+        expect(result.actualEnd).toBe(100);
+        expect(result.totalLines).toBe(100);
+        expect(result.truncated).toBe(false);
+
+        fs.unlinkSync(tmpFile);
+    });
+
+    it('returns truncated=true for a large file with no range', async () => {
+        const content = Array.from({ length: 500 }, (_, i) => `function func${i}() { return ${i}; }`).join('\n');
+        const tmpFile = path.join(os.tmpdir(), 'test-large.ts');
+        fs.writeFileSync(tmpFile, content);
+
+        const result = await executeReadFileAction(
+            { type: 'read_file', path: 'test-large.ts', rationale: 'read' },
+            ctx,
+        );
+
+        expect(result.totalLines).toBe(500);
+        expect(result.truncated).toBe(true);
+        expect(result.actualStart).toBe(0);
+        expect(result.actualEnd).toBe(0);
+        expect(result.observation).toContain('LARGE FILE');
+        expect(result.observation).toContain('function map');
+
+        fs.unlinkSync(tmpFile);
+    });
+
+    it('returns full coverage for a small file with no range', async () => {
+        const content = 'line one\nline two\nline three';
+        const tmpFile = path.join(os.tmpdir(), 'test-small.ts');
+        fs.writeFileSync(tmpFile, content);
+
+        const result = await executeReadFileAction(
+            { type: 'read_file', path: 'test-small.ts', rationale: 'read' },
+            ctx,
+        );
+
+        expect(result.actualStart).toBe(1);
+        expect(result.actualEnd).toBe(3);
+        expect(result.totalLines).toBe(3);
+        expect(result.truncated).toBe(false);
+        expect(result.observation).toContain('1: line one');
+
+        fs.unlinkSync(tmpFile);
+    });
+
+    it('returns totalLines=0 on error', async () => {
+        const result = await executeReadFileAction(
+            { type: 'read_file', path: 'nonexistent.ts', rationale: 'read' },
+            ctx,
+        );
+
+        expect(result.totalLines).toBe(0);
+        expect(result.actualStart).toBe(0);
+        expect(result.actualEnd).toBe(0);
+        expect(result.observation).toContain('Error reading file');
     });
 });

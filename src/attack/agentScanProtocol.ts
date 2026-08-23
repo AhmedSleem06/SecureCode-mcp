@@ -47,6 +47,28 @@ export interface AgentScanClientCapabilities {
     supportedActions: AgentScanActionType[];
 }
 
+/**
+ * Action constraint sent by the MCP to restrict which actions the API's LLM
+ * can select. Used for deterministic blocked-read recovery:
+ *
+ * - normal: no constraint (all supported actions allowed)
+ * - recovery: the MCP forbids read_file and may require a specific action
+ *
+ * The API MUST filter the LLM's actionType enum using `allowedActions` /
+ * `forbiddenActions` — textual instructions alone are insufficient.
+ */
+export interface AgentActionConstraint {
+    mode: 'normal' | 'recovery';
+    /** If set, only these actions are allowed (overrides supportedActions). */
+    allowedActions?: AgentScanActionType[];
+    /** If set, these actions are forbidden (removed from the enum). */
+    forbiddenActions?: AgentScanActionType[];
+    /** If set, the API should strongly prefer this action. */
+    requiredAction?: AgentScanActionType;
+    /** Human-readable reason for the constraint (shown to the LLM). */
+    reason?: string;
+}
+
 export function defaultClientCapabilities(): AgentScanClientCapabilities {
     return {
         protocolVersion: AGENT_SCAN_PROTOCOL_VERSION,
@@ -62,6 +84,27 @@ export interface AgentScanReadFileAction {
     startLine?: number;
     endLine?: number;
     rationale: string;
+}
+
+/**
+ * Structured metadata returned by the executor for a read_file action.
+ *
+ * The loop records coverage using `actualStart..actualEnd` (the range the
+ * executor actually delivered), never the requested range. A large-file read
+ * that returns a function map instead of raw content has `truncated === true`
+ * and `actualStart/actualEnd` set to 0 (no content lines were delivered).
+ */
+export interface ReadFileObservation {
+    /** Redacted, truncated observation string for the LLM transcript. */
+    observation: string;
+    /** First line of actual content delivered (1-indexed). 0 if no content. */
+    actualStart: number;
+    /** Last line of actual content delivered (1-indexed). 0 if no content. */
+    actualEnd: number;
+    /** Total line count of the file on disk. */
+    totalLines: number;
+    /** True if the executor returned a function map or otherwise did not deliver raw content. */
+    truncated: boolean;
 }
 
 export interface AgentScanSearchCodeAction {
@@ -503,6 +546,8 @@ export interface AgentScanStepRequest {
      */
     clientCapabilities?: AgentScanClientCapabilities;
     investigationProgress?: AgentInvestigationProgress;
+    /** Action constraint for deterministic blocked-read recovery. */
+    actionConstraint?: AgentActionConstraint;
 }
 
 export interface AgentInvestigationProgress {

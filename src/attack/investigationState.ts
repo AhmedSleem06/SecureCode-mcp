@@ -217,6 +217,76 @@ export class InvestigationState {
         };
     }
 
+    /**
+     * Record a read using the ACTUAL delivered range (not the requested range).
+     *
+     * Use this when the executor returns structured metadata telling you
+     * exactly which lines were delivered. A large-file read that returns a
+     * function map (truncated=true, actualStart=0, actualEnd=0) does NOT
+     * record any content coverage — the agent must still read specific
+     * line ranges.
+     */
+    recordActualRead(
+        filePath: string,
+        actualStart: number,
+        actualEnd: number,
+        totalLines: number,
+        truncated: boolean,
+    ): {
+        overlapping: boolean;
+        overlapFraction: number;
+        coverageAfter: LineRange[];
+    } {
+        const normalized = InvestigationState.normalizePath(filePath);
+
+        let coverage = this.fileCoverages.get(normalized);
+        if (!coverage) {
+            coverage = {
+                filePath: normalized,
+                ranges: [],
+                totalLines,
+                readCount: 0,
+                blockedReadCount: 0,
+            };
+            this.fileCoverages.set(normalized, coverage);
+        }
+
+        coverage.readCount++;
+        if (totalLines) coverage.totalLines = totalLines;
+
+        // Truncated reads (function map) deliver no content lines — don't
+        // record any range coverage. The agent must still read specific sections.
+        if (truncated || actualStart === 0 || actualEnd === 0) {
+            this.filesRead.add(normalized);
+            this.markStepComplete('initial-read');
+            return {
+                overlapping: false,
+                overlapFraction: 0,
+                coverageAfter: [...coverage.ranges],
+            };
+        }
+
+        const range: LineRange = { start: actualStart, end: actualEnd };
+
+        let maxOverlap = 0;
+        for (const existing of coverage.ranges) {
+            const frac = InvestigationState.overlapFraction(existing, range);
+            if (frac > maxOverlap) maxOverlap = frac;
+        }
+
+        coverage.ranges = InvestigationState.mergeRanges([...coverage.ranges, range]);
+        this.filesRead.add(normalized);
+        const rangeKey = `${normalized}:${actualStart || 0}:${actualEnd || 0}`;
+        this.duplicateReadKeys.add(rangeKey);
+        this.markStepComplete('initial-read');
+
+        return {
+            overlapping: maxOverlap > 0.5,
+            overlapFraction: maxOverlap,
+            coverageAfter: [...coverage.ranges],
+        };
+    }
+
     getCoverage(filePath: string): FileCoverage | undefined {
         return this.fileCoverages.get(InvestigationState.normalizePath(filePath));
     }
@@ -229,6 +299,85 @@ export class InvestigationState {
         return coverage.ranges.some(r =>
             r.start <= range.start && r.end >= range.end,
         );
+    }
+
+    /**
+     * Return the gaps in coverage for a file — the line ranges that have NOT
+     * been read yet. Returns [] if the file is fully covered or not tracked.
+     */
+    getUncoveredRanges(filePath: string): LineRange[] {
+        const coverage = this.getCoverage(filePath);
+        if (!coverage || !coverage.totalLines) return [];
+        if (coverage.ranges.length === 0) {
+            return [{ start: 1, end: coverage.totalLines }];
+        }
+        const gaps: LineRange[] = [];
+        const sorted = [...coverage.ranges].sort((a, b) => a.start - b.start);
+
+        // Gap before the first range
+        if (sorted[0].start > 1) {
+            gaps.push({ start: 1, end: sorted[0].start - 1 });
+        }
+
+        // Gaps between ranges
+        for (let i = 0; i < sorted.length - 1; i++) {
+            const gapStart = sorted[i].end + 1;
+            const gapEnd = sorted[i + 1].start - 1;
+            if (gapStart <= gapEnd) {
+                gaps.push({ start: gapStart, end: gapEnd });
+            }
+        }
+
+        // Gap after the last range
+        const last = sorted[sorted.length - 1];
+        if (last.end < coverage.totalLines) {
+            gaps.push({ start: last.end + 1, end: coverage.totalLines });
+        }
+
+        return gaps;
+    }
+
+    /**
+     * Return the next unread chunk for a file, using a chunk-size policy
+     * based on file size:
+     *   < 300 lines       full-file read (chunk = totalLines)
+     *   300-1,000 lines   250-line chunks
+     *   1,000-5,000       300-line chunks
+     *   > 5,000 lines     400-line chunks
+     *
+     * Returns null if the file is fully covered or not tracked.
+     */
+    getNextUnreadRange(filePath: string, chunkSize?: number): LineRange | null {
+        const coverage = this.getCoverage(filePath);
+        if (!coverage || !coverage.totalLines) return null;
+
+        const chunk = chunkSize ?? InvestigationState.chunkSizeForLines(coverage.totalLines);
+        const gaps = this.getUncoveredRanges(filePath);
+        if (gaps.length === 0) return null;
+
+        const firstGap = gaps[0];
+        const end = Math.min(firstGap.start + chunk - 1, firstGap.end);
+        return { start: firstGap.start, end };
+    }
+
+    /**
+     * Return coverage percentage for a file (0-100). Returns 0 if the file
+     * is not tracked or has no totalLines.
+     */
+    getCoveragePercent(filePath: string): number {
+        const coverage = this.getCoverage(filePath);
+        if (!coverage || !coverage.totalLines) return 0;
+        const coveredLines = coverage.ranges.reduce(
+            (sum, r) => sum + (r.end - r.start + 1), 0,
+        );
+        return Math.round((coveredLines / coverage.totalLines) * 100);
+    }
+
+    static chunkSizeForLines(totalLines: number): number {
+        if (totalLines < 300) return totalLines;
+        if (totalLines < 1000) return 250;
+        if (totalLines < 5000) return 300;
+        return 400;
     }
 
     recordToolUse(toolType: string): void {
@@ -277,6 +426,14 @@ export class InvestigationState {
 
     markArchitectureRisksAddressed(): void {
         this.markStepComplete('architecture-risks-addressed');
+    }
+
+    /**
+     * Replace the required checklist with a specific set of steps.
+     * Used by target-specific investigation profiles.
+     */
+    setRequiredSteps(steps: InvestigationStep[]): void {
+        this.checklist.required = new Set(steps);
     }
 
     getIncompleteSteps(): InvestigationStep[] {

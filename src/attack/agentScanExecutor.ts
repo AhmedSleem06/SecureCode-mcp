@@ -35,6 +35,7 @@ import type {
     AgentScanToolRequest,
     AgentScanToolResponse,
     AgentScanTarget,
+    ReadFileObservation,
 } from './agentScanProtocol';
 
 export const MAX_OBSERVATION_CHARS = 16000;
@@ -173,6 +174,90 @@ export async function extractFunctionMap(content: string, relPath: string): Prom
     }
 }
 
+/**
+ * Execute a read_file action and return structured metadata alongside the
+ * redacted observation string.
+ *
+ * The loop uses `actualStart..actualEnd` to record coverage — this is the
+ * range the executor actually delivered, which may differ from the requested
+ * range in three ways:
+ *
+ * 1. Requested range clamped to file bounds (e.g., endLine=2000 on a 500-line
+ *    file → actualEnd=500).
+ * 2. Large file (> LARGE_FILE_THRESHOLD) with no startLine/endLine → the
+ *    executor returns a function map, not raw content. `truncated === true`
+ *    and actualStart/actualEnd are 0 (no content lines delivered).
+ * 3. Small file with no startLine/endLine → full content returned,
+ *    actualStart=1, actualEnd=totalLines, truncated=false.
+ */
+export async function executeReadFileAction(
+    action: AgentScanAction,
+    ctx: ServerContext,
+): Promise<ReadFileObservation> {
+    try {
+        const absPath = resolveWorkspacePath(ctx.workspaceRoot, (action as any).path);
+        const content = fs.readFileSync(absPath, 'utf8');
+        const rel = path.relative(ctx.workspaceRoot, absPath).replace(/\\/g, '/');
+        const allLines = content.split('\n');
+        const totalLines = allLines.length;
+        const startLine = (action as any).startLine;
+        const endLine = (action as any).endLine;
+
+        // Case 1: explicit range requested
+        if (startLine || endLine) {
+            const start = Math.max(1, startLine || 1);
+            const end = Math.min(totalLines, endLine || totalLines);
+            const section = allLines.slice(start - 1, end)
+                .map((line, i) => `${start + i}: ${line}`)
+                .join('\n');
+            const observation = redact(`File: ${rel} (lines ${start}-${end} of ${totalLines})\n\n${section}`);
+            return {
+                observation,
+                actualStart: start,
+                actualEnd: end,
+                totalLines,
+                truncated: false,
+            };
+        }
+
+        // Case 2: large file, no range → function map (not raw content)
+        if (totalLines > LARGE_FILE_THRESHOLD) {
+            const funcMap = await extractFunctionMap(content, rel);
+            if (funcMap) {
+                const observation = redact(`File: ${rel} (${totalLines} lines — LARGE FILE)\n\nThis file is too large to show in full. Here is a function map. Use read_file with startLine/endLine to read specific sections.\n\n${funcMap}`);
+                return {
+                    observation,
+                    actualStart: 0,
+                    actualEnd: 0,
+                    totalLines,
+                    truncated: true,
+                };
+            }
+        }
+
+        // Case 3: small file, no range → full content
+        const numbered = allLines
+            .map((line, i) => `${i + 1}: ${line}`)
+            .join('\n');
+        const observation = redact(`File: ${rel} (${totalLines} lines)\n\n${numbered}`);
+        return {
+            observation,
+            actualStart: 1,
+            actualEnd: totalLines,
+            totalLines,
+            truncated: false,
+        };
+    } catch (e: any) {
+        return {
+            observation: `Error reading file "${(action as any).path}": ${e.message || e}`,
+            actualStart: 0,
+            actualEnd: 0,
+            totalLines: 0,
+            truncated: false,
+        };
+    }
+}
+
 export async function executeAction(
     action: AgentScanAction,
     ctx: ServerContext,
@@ -182,39 +267,8 @@ export async function executeAction(
 ): Promise<string> {
     switch (action.type) {
         case 'read_file': {
-            try {
-                const absPath = resolveWorkspacePath(ctx.workspaceRoot, action.path);
-                const content = fs.readFileSync(absPath, 'utf8');
-                const rel = path.relative(ctx.workspaceRoot, absPath).replace(/\\/g, '/');
-                const allLines = content.split('\n');
-                const totalLines = allLines.length;
-
-                // If startLine/endLine provided, return only that range
-                if (action.startLine || action.endLine) {
-                    const start = Math.max(1, action.startLine || 1);
-                    const end = Math.min(totalLines, action.endLine || totalLines);
-                    const section = allLines.slice(start - 1, end)
-                        .map((line, i) => `${start + i}: ${line}`)
-                        .join('\n');
-                    return redact(`File: ${rel} (lines ${start}-${end} of ${totalLines})\n\n${section}`);
-                }
-
-                // For large files, return a function map instead of raw content
-                if (totalLines > LARGE_FILE_THRESHOLD) {
-                    const funcMap = await extractFunctionMap(content, rel);
-                    if (funcMap) {
-                        return redact(`File: ${rel} (${totalLines} lines — LARGE FILE)\n\nThis file is too large to show in full. Here is a function map. Use read_file with startLine/endLine to read specific sections.\n\n${funcMap}`);
-                    }
-                }
-
-                // Small file: return full content with line numbers
-                const numbered = allLines
-                    .map((line, i) => `${i + 1}: ${line}`)
-                    .join('\n');
-                return redact(`File: ${rel} (${totalLines} lines)\n\n${numbered}`);
-            } catch (e: any) {
-                return `Error reading file "${action.path}": ${e.message || e}`;
-            }
+            const result = await executeReadFileAction(action, ctx);
+            return result.observation;
         }
 
         case 'search_code': {

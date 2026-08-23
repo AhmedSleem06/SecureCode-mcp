@@ -19,9 +19,10 @@
 
 import { ApiClient } from '../api/client';
 import type { ServerContext } from '../mcp/types';
-import { executeAction } from './agentScanExecutor';
+import { executeAction, executeReadFileAction } from './agentScanExecutor';
 import { AgentTraceLogger } from './agentTrace';
 import { InvestigationState } from './investigationState';
+import { selectInvestigationProfile } from './investigationProfiles';
 import {
     validateStartResponse,
     validateStepResponse,
@@ -30,6 +31,7 @@ import {
 import {
     AGENT_SCAN_DEFAULTS,
     defaultClientCapabilities,
+    type AgentActionConstraint,
     type AgentScanAction,
     type AgentScanBudget,
     type AgentScanFinding,
@@ -96,6 +98,16 @@ export async function runAgentScan(
 
         const transcript: AgentScanTranscriptStep[] = [];
         const investigationState = new InvestigationState();
+        // Select a target-specific investigation profile to set the required
+        // checklist steps. This prevents the agent from wasting steps on
+        // irrelevant tools (e.g., get_endpoints on a utility file) and ensures
+        // required steps for the target type are not skipped.
+        const profile = selectInvestigationProfile({
+            filePath: target.filePath,
+            architectureContext: (target as any).architectureContext,
+            endpointContext: (target as any).endpointContext,
+        });
+        investigationState.setRequiredSteps(profile.requiredSteps);
         const readFiles = new Set<string>();
         const readFileCounts = new Map<string, number>();
         // Dynamic read cap based on file size:
@@ -128,6 +140,7 @@ export async function runAgentScan(
 
         let consecutiveErrors = 0;
         let consecutiveBlockedReads = 0;
+        let meaningfulProgressSinceRecovery = true;
 
         while (true) {
             // Wall clock check
@@ -164,6 +177,22 @@ export async function runAgentScan(
                 };
             }
 
+            // Build action constraint for deterministic blocked-read recovery.
+            //   0-1 blocked reads: normal (no constraint)
+            //   2 blocked reads: recovery mode, forbid read_file
+            //   3 blocked reads: MCP selects a deterministic recovery action (skip API)
+            //   5 blocked reads: force-finish
+            let actionConstraint: AgentActionConstraint | undefined;
+            if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
+                const recoveryAction = investigationState.getRecommendedRecoveryAction();
+                actionConstraint = {
+                    mode: 'recovery',
+                    forbiddenActions: ['read_file'],
+                    requiredAction: recoveryAction as any || undefined,
+                    reason: 'You have been blocked by duplicate/overlapping reads. Switch to a different tool.',
+                };
+            }
+
             const stepReq: AgentScanStepRequest = {
                 runId: startResp.runId,
                 target,
@@ -183,6 +212,7 @@ export async function runAgentScan(
                     consecutiveBlockedReads,
                     meaningfulProgressSinceLastExtension,
                 },
+                actionConstraint,
             };
 
             let stepResp: AgentScanStepResponse;
@@ -423,6 +453,8 @@ export async function runAgentScan(
             // Execute the action locally
             let observation: string;
             let wasBlocked = false;
+            // Reset progress flag — only set to true when actual progress is made
+            meaningfulProgressSinceRecovery = false;
 
             if (action.type === 'read_file') {
                 const normalizedPath = action.path.replace(/\\/g, '/').toLowerCase();
@@ -453,7 +485,11 @@ export async function runAgentScan(
                         ))
                         .map(r => `L${r.start}-${r.end}`)
                         .join(', ');
-                    observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" substantially overlap already-read ranges (${coveredRanges}). The content is in the transcript above. Read a DIFFERENT section, use search_code to find specific patterns, or use trace_flow/check_guard/check_policy to analyze what you've already read.\n\n${checklist}`;
+                    const nextRange = investigationState.getNextUnreadRange(action.path);
+                    const nextHint = nextRange
+                        ? `\nNext unread range: lines ${nextRange.start}-${nextRange.end}. Use read_file with startLine=${nextRange.start} and endLine=${nextRange.end}.`
+                        : '';
+                    observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" substantially overlap already-read ranges (${coveredRanges}). The content is in the transcript above. Read a DIFFERENT section, use search_code to find specific patterns, or use trace_flow/check_guard/check_policy to analyze what you've already read.${nextHint}\n\n${checklist}`;
                     wasBlocked = true;
                 } else {
                     const fileMax = maxReadsForFile(action.path);
@@ -468,11 +504,33 @@ export async function runAgentScan(
                         observation = `BLOCKED: You have spent ${count} of ${stepsTaken} steps reading "${action.path}". That's too much — switch to search_code, trace_flow, check_guard, or check_policy to analyze the code you've already read. If you have enough evidence, call finish to report your findings.\n\n${checklist}`;
                         wasBlocked = true;
                     } else {
-                        investigationState.recordRead(action.path, action.startLine, action.endLine, totalLines);
+                        // Execute the read and get structured metadata about the
+                        // ACTUAL delivered range (not the requested range).
+                        const readResult = await executeReadFileAction(action, ctx);
+                        observation = readResult.observation;
+
+                        if (readResult.totalLines > 0) {
+                            // Record the actual delivered range, not the requested range.
+                            // A truncated read (function map) records no content coverage.
+                            investigationState.recordActualRead(
+                                action.path,
+                                readResult.actualStart,
+                                readResult.actualEnd,
+                                readResult.totalLines,
+                                readResult.truncated,
+                            );
+                        } else {
+                            // File read failed (error) — record as blocked, not covered.
+                            investigationState.recordBlockedRead(action.path);
+                        }
+                        const rangeKey = `${normalizedPath}:${readResult.actualStart || 0}:${readResult.actualEnd || 0}`;
                         readFiles.add(rangeKey);
-                        observation = await executeAction(action, ctx, startResp.runId, client, target);
                         investigationState.recordToolUse('read_file');
-                        meaningfulProgressSinceLastExtension = true;
+                        // Meaningful progress = actual content lines delivered
+                        // (not a truncated function map). Truncated reads don't
+                        // earn extension credit or reset recovery state.
+                        meaningfulProgressSinceLastExtension = !readResult.truncated;
+                        meaningfulProgressSinceRecovery = !readResult.truncated;
                     }
                 }
             } else {
@@ -529,12 +587,19 @@ export async function runAgentScan(
                         if (action.type === 'search_code') {
                             investigationState.recordSymbolSearch((action as any).pattern || '');
                         }
-                        meaningfulProgressSinceLastExtension = true;
+                        // First call with these args = meaningful progress.
+                        // Repeated call (count > 1) does NOT reset recovery state.
+                        const isFirstCall = count === 1;
+                        meaningfulProgressSinceLastExtension = isFirstCall;
+                        if (isFirstCall) {
+                            meaningfulProgressSinceRecovery = true;
+                        }
                     }
                 } else {
                     observation = await executeAction(action, ctx, startResp.runId, client, target);
                     investigationState.recordToolUse(action.type);
                     meaningfulProgressSinceLastExtension = true;
+                    meaningfulProgressSinceRecovery = true;
                 }
             }
 
@@ -545,7 +610,7 @@ export async function runAgentScan(
                 consecutiveBlockedReads++;
                 const recoveryLimit = AGENT_SCAN_DEFAULTS.blockedReadRecoveryLimit;
 
-                if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < recoveryLimit) {
+                if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
                     const recommendedTool = investigationState.getRecommendedRecoveryAction();
                     if (recommendedTool) {
                         observation += `\n\nRECOVERY REQUIRED: You have been blocked ${consecutiveBlockedReads} time(s). Do NOT call read_file again. Your next action MUST be: ${recommendedTool}. If you have enough evidence, call finish.`;
@@ -586,7 +651,13 @@ export async function runAgentScan(
                 }
             } else {
                 trace.logToolCompleted(action.type, observation);
-                consecutiveBlockedReads = 0;
+                // Only reset the blocked counter when meaningful progress was
+                // made. Repeated searches and truncated reads do NOT reset
+                // recovery state — only new coverage, new symbols, or new
+                // tool calls (first invocation with these args) do.
+                if (meaningfulProgressSinceRecovery) {
+                    consecutiveBlockedReads = 0;
+                }
             }
 
             // The agent needs both the action it tried and the block/observation
@@ -594,6 +665,47 @@ export async function runAgentScan(
             // We don't need a separate system_event for blocked (unlike
             // critique, the blocked case is tied to an action the agent took).
             transcript.push({ action, observation });
+
+            // Deterministic recovery: on the third consecutive blocked read,
+            // skip the API and directly execute a recovery action selected by
+            // the MCP. This prevents wasting API calls on an agent that is
+            // stuck re-reading files.
+            if (wasBlocked && consecutiveBlockedReads >= 3) {
+                const recoveryAction = selectDeterministicRecoveryAction(
+                    investigationState, target, ctx,
+                );
+                if (recoveryAction) {
+                    stepsTaken++;
+                    budget.stepsRemaining--;
+                    trace.nextStep();
+                    trace.logActionSelected(recoveryAction.type, 'deterministic-recovery', false);
+                    if (options.onProgress) {
+                        options.onProgress(stepsTaken, stepsGranted, `Step ${stepsTaken}: deterministic recovery: ${describeAction(recoveryAction)}`);
+                    }
+
+                    let recoveryObservation: string;
+                    if (recoveryAction.type === 'read_file') {
+                        const readResult = await executeReadFileAction(recoveryAction, ctx);
+                        recoveryObservation = readResult.observation;
+                        if (readResult.totalLines > 0) {
+                            investigationState.recordActualRead(
+                                (recoveryAction as any).path,
+                                readResult.actualStart,
+                                readResult.actualEnd,
+                                readResult.totalLines,
+                                readResult.truncated,
+                            );
+                        }
+                    } else {
+                        recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
+                    }
+                    investigationState.recordToolUse(recoveryAction.type);
+                    consecutiveBlockedReads = 0; // recovery resets the counter
+                    meaningfulProgressSinceRecovery = true; // recovery is meaningful progress
+                    trace.logToolCompleted(recoveryAction.type, recoveryObservation);
+                    transcript.push({ action: recoveryAction, observation: `[DETERMINISTIC RECOVERY] ${recoveryObservation}` });
+                }
+            }
         }
     } catch (err: any) {
         return {
@@ -641,3 +753,55 @@ function describeAction(action: AgentScanAction): string {
 // Local type alias to avoid importing from api/types (which uses a different
 // AgentScanStepResponse shape — the one here is the same as agentScanProtocol).
 type AgentStepResponse = AgentScanStepResponse;
+
+/**
+ * Select a deterministic recovery action based on investigation state.
+ *
+ * Priority:
+ *   1. Unread range exists on the target file → read_file(next unread range)
+ *   2. route-discovery missing → get_endpoints
+ *   3. policy-check missing → check_policy
+ *   4. auth-symbol-search missing → search_code
+ *   5. cross-file-flow missing → trace_flow_cross_file
+ *   6. config-inspection missing → read_config
+ *   7. tests-found missing → find_tests
+ *   8. otherwise → null (force-finish will handle it)
+ */
+function selectDeterministicRecoveryAction(
+    state: InvestigationState,
+    target: AgentScanTarget,
+    ctx: ServerContext,
+): AgentScanAction | null {
+    // Priority 1: unread range on the target file
+    const nextRange = state.getNextUnreadRange(target.filePath);
+    if (nextRange) {
+        return {
+            type: 'read_file',
+            path: target.filePath,
+            startLine: nextRange.start,
+            endLine: nextRange.end,
+            rationale: 'Deterministic recovery: reading next unread range',
+        } as AgentScanAction;
+    }
+
+    // Priority 2-7: incomplete investigation steps
+    const incomplete = state.getIncompleteSteps();
+    for (const step of incomplete) {
+        switch (step) {
+            case 'route-discovery':
+                return { type: 'get_endpoints', rationale: 'Deterministic recovery: route discovery' } as AgentScanAction;
+            case 'policy-check':
+                return { type: 'check_policy', filePath: target.filePath, rationale: 'Deterministic recovery: policy check' } as AgentScanAction;
+            case 'auth-symbol-search':
+                return { type: 'search_code', pattern: 'auth|require|guard|permission|owner', rationale: 'Deterministic recovery: auth symbol search' } as AgentScanAction;
+            case 'cross-file-flow':
+                return { type: 'trace_flow_cross_file', filePath: target.filePath, rationale: 'Deterministic recovery: cross-file flow' } as AgentScanAction;
+            case 'config-inspection':
+                return { type: 'read_config', configKind: 'all', rationale: 'Deterministic recovery: config inspection' } as AgentScanAction;
+            case 'tests-found':
+                return { type: 'find_tests', filePath: target.filePath, rationale: 'Deterministic recovery: find tests' } as AgentScanAction;
+        }
+    }
+
+    return null;
+}
