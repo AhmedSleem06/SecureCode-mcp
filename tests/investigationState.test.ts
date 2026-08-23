@@ -63,9 +63,25 @@ describe('InvestigationState', () => {
         expect(state.getCompletedSteps()).toContain('policy-check');
     });
 
-    it('marks cross-file-flow after trace_flow or trace_flow_cross_file', () => {
+    it('marks cross-file-flow after trace_flow with flow verification', () => {
         const state = new InvestigationState();
         state.recordToolUse('trace_flow_cross_file');
+        expect(state.getCompletedSteps()).not.toContain('cross-file-flow');
+        state.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'confirmed', 2, '2 flows found');
+        expect(state.getCompletedSteps()).toContain('cross-file-flow');
+    });
+
+    it('does NOT mark cross-file-flow from blocked flow verification', () => {
+        const state = new InvestigationState();
+        state.recordToolUse('trace_flow_cross_file');
+        state.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'blocked', 0, 'blocked');
+        expect(state.getCompletedSteps()).not.toContain('cross-file-flow');
+    });
+
+    it('marks cross-file-flow from refuted flow (negative result still classifies)', () => {
+        const state = new InvestigationState();
+        state.recordToolUse('trace_flow');
+        state.recordFlowVerification('test.ts', 'trace_flow', 'refuted', 0, 'no flows');
         expect(state.getCompletedSteps()).toContain('cross-file-flow');
     });
 
@@ -97,6 +113,7 @@ describe('InvestigationState', () => {
         state.recordToolUse('get_endpoints');
         state.recordToolUse('search_code');
         state.recordToolUse('trace_flow_cross_file');
+        state.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'confirmed', 1, 'flows found');
         state.recordToolUse('read_config');
         state.markAllHandlersReviewed();
         state.markCandidatesVerified();
@@ -121,6 +138,7 @@ describe('InvestigationState', () => {
         state.recordToolUse('get_endpoints');
         state.recordToolUse('search_code');
         state.recordToolUse('trace_flow_cross_file');
+        state.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'confirmed', 1, 'flows found');
         state.recordToolUse('read_config');
         state.markAllHandlersReviewed();
         state.markCandidatesVerified();
@@ -306,6 +324,7 @@ describe('InvestigationState', () => {
             state.recordToolUse('search_code');
             state.recordToolUse('get_endpoints');
             state.recordToolUse('trace_flow_cross_file');
+        state.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'confirmed', 1, 'flows found');
             state.markAllHandlersReviewed();
             state.markCandidatesVerified();
             const rec = state.getRecommendedRecoveryAction();
@@ -319,6 +338,7 @@ describe('InvestigationState', () => {
             state.recordToolUse('search_code');
             state.recordToolUse('get_endpoints');
             state.recordToolUse('trace_flow_cross_file');
+        state.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'confirmed', 1, 'flows found');
             state.recordToolUse('read_config');
             state.markAllHandlersReviewed();
             state.markCandidatesVerified();

@@ -122,6 +122,7 @@ describe('Synara Regression: investigation state prevents brute-reading', () => 
         state.recordToolUse('search_code');
         state.recordToolUse('read_config');
         state.recordToolUse('trace_flow_cross_file');
+        state.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'confirmed', 1, 'flows found');
 
         const completed = state.getCompletedSteps();
         expect(completed).toContain('initial-read');

@@ -40,6 +40,17 @@ export interface FileCoverage {
     blockedReadCount: number;
 }
 
+export type FlowVerificationStatus = 'confirmed' | 'refuted' | 'inconclusive' | 'blocked';
+
+export interface FlowVerification {
+    filePath: string;
+    tool: string;
+    status: FlowVerificationStatus;
+    flowCount: number;
+    reason: string;
+    timestamp: number;
+}
+
 export type ReadValueClassification =
     | 'new-coverage'
     | 'partial-new-coverage'
@@ -110,6 +121,7 @@ export class InvestigationState {
     private rootCauses = new Map<string, string>();
     private duplicateReadKeys = new Set<string>();
     private tasks = new Map<string, InvestigationTask>();
+    private flowVerifications: FlowVerification[] = [];
 
     constructor() {
         this.checklist = {
@@ -587,7 +599,6 @@ export class InvestigationState {
                 break;
             case 'trace_flow':
             case 'trace_flow_cross_file':
-                this.markStepComplete('cross-file-flow');
                 this.markStepComplete('ownership-analysis');
                 break;
             case 'read_config':
@@ -600,6 +611,28 @@ export class InvestigationState {
                 this.markStepComplete('tests-found');
                 break;
         }
+    }
+
+    recordFlowVerification(filePath: string, tool: string, status: FlowVerificationStatus, flowCount: number, reason: string): void {
+        this.flowVerifications.push({
+            filePath,
+            tool,
+            status,
+            flowCount,
+            reason,
+            timestamp: Date.now(),
+        });
+        if (status === 'confirmed' || status === 'refuted' || status === 'inconclusive') {
+            this.markStepComplete('cross-file-flow');
+        }
+    }
+
+    getFlowVerifications(): FlowVerification[] {
+        return [...this.flowVerifications];
+    }
+
+    hasClassifiedFlow(): boolean {
+        return this.flowVerifications.some(v => v.status !== 'blocked');
     }
 
     recordSymbolSearch(symbol: string): void {

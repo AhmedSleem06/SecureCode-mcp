@@ -41,6 +41,7 @@ describe('Finish Gate', () => {
         investigation.recordToolUse('search_code');
         investigation.recordToolUse('get_endpoints');
         investigation.recordToolUse('trace_flow_cross_file');
+        investigation.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'confirmed', 1, 'flows found');
         investigation.recordToolUse('read_config');
         investigation.markAllHandlersReviewed();
         investigation.markCandidatesVerified();

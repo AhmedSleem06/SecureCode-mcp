@@ -1117,7 +1117,26 @@ export async function runAgentScan(
                 }
             }
 
-            // Handler discovery: when the agent calls get_endpoints, discover
+            // Flow verification: classify trace_flow/trace_flow_cross_file
+            // results as confirmed, refuted, inconclusive, or blocked.
+            // This prevents the cross-file-flow checklist step from completing
+            // until a flow result has been explicitly classified.
+            if (action.type === 'trace_flow' || action.type === 'trace_flow_cross_file') {
+                const flowFile = String((action as any).filePath || target.filePath);
+                if (wasBlocked) {
+                    investigationState.recordFlowVerification(flowFile, action.type, 'blocked', 0, 'Action was blocked');
+                } else {
+                    const obsLower = observation.toLowerCase();
+                    if (obsLower.includes('no taint flows') || obsLower.includes('no flows found') || obsLower.includes('no data flow')) {
+                        investigationState.recordFlowVerification(flowFile, action.type, 'refuted', 0, 'No taint flows found — negative result');
+                    } else if (obsLower.includes('truncat') || obsLower.includes('error') || obsLower.includes('incomplete')) {
+                        investigationState.recordFlowVerification(flowFile, action.type, 'inconclusive', 0, 'Result was truncated or errored');
+                    } else {
+                        const flowCount = (observation.match(/L\d+.*:/g) || []).length;
+                        investigationState.recordFlowVerification(flowFile, action.type, 'confirmed', flowCount, `${flowCount} flow path(s) found`);
+                    }
+                }
+            }
             // handlers and populate the handler inventory. Create handler
             // review work items for security-sensitive handlers.
             if (!wasBlocked && action.type === 'get_endpoints') {
