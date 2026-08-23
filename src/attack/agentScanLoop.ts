@@ -272,7 +272,9 @@ export async function runAgentScan(
             //   3 blocked reads: MCP selects a deterministic recovery action (skip API)
             let actionConstraint: AgentActionConstraint | undefined;
             if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
-                const nextRange = investigationState.getNextUnreadRange(target.filePath);
+                const nextRange = target.fileContent
+                    ? investigationState.getPrioritizedUnreadRange(target.filePath, target.fileContent)
+                    : investigationState.getNextUnreadRange(target.filePath);
                 if (nextRange) {
                     actionConstraint = {
                         mode: 'recovery',
@@ -895,7 +897,9 @@ export async function runAgentScan(
                 const recoveryLimit = AGENT_SCAN_DEFAULTS.blockedReadRecoveryLimit;
 
                 if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
-                    const nextRange = investigationState.getNextUnreadRange(target.filePath);
+                    const nextRange = target.fileContent
+                        ? investigationState.getPrioritizedUnreadRange(target.filePath, target.fileContent)
+                        : investigationState.getNextUnreadRange(target.filePath);
                     if (nextRange) {
                         observation += `\n\nRECOVERY REQUIRED: You have been blocked ${consecutiveBlockedReads} time(s). Read the next unread range: lines ${nextRange.start}-${nextRange.end}, or use an analysis tool (trace_flow, check_guard, check_policy).`;
                     } else {
@@ -907,7 +911,9 @@ export async function runAgentScan(
                 }
 
                 if (consecutiveBlockedReads >= recoveryLimit) {
-                    const nextRange = investigationState.getNextUnreadRange(target.filePath);
+                    const nextRange = target.fileContent
+                        ? investigationState.getPrioritizedUnreadRange(target.filePath, target.fileContent)
+                        : investigationState.getNextUnreadRange(target.filePath);
                     const hasBudget = budget.stepsRemaining > 0 && costSpentUsd < budget.costCapUsd;
                     const hasWallClock = Date.now() - startTime < wallClockMs;
 

@@ -75,6 +75,32 @@ export interface InvestigationChecklist {
     requiredForFindingType: Map<string, Set<InvestigationStep>>;
 }
 
+const SECURITY_KEYWORD_WEIGHTS: Array<[string, number]> = [
+    ['authenticat', 30], ['authorize', 30], ['authorization', 30],
+    ['permission', 25], ['ownership', 25], ['owner', 20],
+    ['token', 25], ['session', 25], ['cookie', 20], ['credential', 25],
+    ['password', 30], ['secret', 25], ['apikey', 25], ['api_key', 25],
+    ['execfile', 35], ['exec(', 30], ['spawn(', 30], ['child_process', 35],
+    ['writefile', 30], ['write(', 25], ['unlink', 25], ['mkdir', 20],
+    ['path.', 20], ['resolve(', 15], ['join(', 15], ['traversal', 30],
+    ['sql', 25], ['query(', 20], ['rawquery', 30], ['queryraw', 30],
+    ['inject', 30], ['eval(', 30], ['function(', 10],
+    ['router.', 20], ['route(', 20], ['handler', 15], ['middleware', 15],
+    ['guard', 20], ['check(', 15], ['validate', 15], ['verify', 15],
+    ['login', 25], ['logout', 20], ['register', 20], ['signup', 20],
+    ['bootstrap', 25], ['pairing', 25], ['enroll', 20],
+    ['rate', 15], ['limit', 15], ['throttle', 15],
+    ['origin', 20], ['cors', 20], ['csrf', 25],
+    ['csp', 20], ['header', 10], ['helmet', 15],
+    ['websocket', 20], ['upgrade', 15], ['rpc', 20],
+    ['file', 10], ['read(', 10], ['open(', 10],
+    ['import', 5], ['export', 5], ['require(', 5],
+    ['config', 10], ['env', 10], ['process.env', 15],
+    ['crypto', 15], ['hash', 15], ['encrypt', 20], ['decrypt', 20],
+    ['sanitiz', 15], ['escape', 15], ['encode', 10], ['decode', 10],
+    ['error', 5], ['catch', 5], ['throw', 5], ['reject', 5],
+];
+
 export class InvestigationState {
     private fileCoverages = new Map<string, FileCoverage>();
     private checklist: InvestigationChecklist;
@@ -448,6 +474,57 @@ export class InvestigationState {
         const firstGap = gaps[0];
         const end = Math.min(firstGap.start + chunk - 1, firstGap.end);
         return { start: firstGap.start, end };
+    }
+
+    getPrioritizedUnreadRange(filePath: string, fileContent: string, chunkSize?: number, candidateLocations?: LineRange[]): LineRange | null {
+        const coverage = this.getCoverage(filePath);
+        if (!coverage || !coverage.totalLines) return null;
+
+        const chunk = chunkSize ?? InvestigationState.chunkSizeForLines(coverage.totalLines);
+        const gaps = this.getUncoveredRanges(filePath);
+        if (gaps.length === 0) return null;
+
+        if (gaps.length === 1) {
+            const end = Math.min(gaps[0].start + chunk - 1, gaps[0].end);
+            return { start: gaps[0].start, end };
+        }
+
+        const lines = fileContent.split('\n');
+        let bestGap = gaps[0];
+        let bestScore = -1;
+
+        for (const gap of gaps) {
+            let score = 0;
+            const gapLines = lines.slice(Math.max(0, gap.start - 1), Math.min(lines.length, gap.end));
+            const gapText = gapLines.join('\n').toLowerCase();
+
+            for (const [pattern, weight] of SECURITY_KEYWORD_WEIGHTS) {
+                if (gapText.includes(pattern)) {
+                    score += weight;
+                }
+            }
+
+            if (candidateLocations) {
+                for (const loc of candidateLocations) {
+                    if (loc.start >= gap.start && loc.start <= gap.end) {
+                        score += 100;
+                    }
+                    if (loc.end >= gap.start && loc.end <= gap.end) {
+                        score += 50;
+                    }
+                }
+            }
+
+            score += Math.min(gap.end - gap.start, chunk) * 0.01;
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestGap = gap;
+            }
+        }
+
+        const end = Math.min(bestGap.start + chunk - 1, bestGap.end);
+        return { start: bestGap.start, end };
     }
 
     /**

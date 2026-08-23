@@ -75,8 +75,12 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
     // 2. Next unread critical range — raised above architecture tasks and
     // evidence requirements because source coverage is the foundation
     // for all analysis. Without reading the code, the agent cannot
-    // produce quality findings.
-    const nextRange = investigation.getNextUnreadRange(target.filePath);
+    // produce quality findings. Uses security-keyword prioritization
+    // to read the most security-relevant uncovered range first.
+    const candidateLocations = candidates.getAll().flatMap(c => c.locations.map(l => ({ start: l.line, end: l.line })));
+    const nextRange = target.fileContent
+        ? investigation.getPrioritizedUnreadRange(target.filePath, target.fileContent, undefined, candidateLocations)
+        : investigation.getNextUnreadRange(target.filePath);
     if (nextRange) {
         const coverage = investigation.getCoverage(target.filePath);
         const totalLines = coverage?.totalLines ?? 0;
