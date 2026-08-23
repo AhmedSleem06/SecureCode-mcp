@@ -472,4 +472,73 @@ describe('InvestigationState', () => {
             expect(InvestigationState.chunkSizeForLines(10000)).toBe(400);
         });
     });
+
+    describe('investigation tasks', () => {
+        it('addInvestigationTasks stores tasks', () => {
+            const state = new InvestigationState();
+            state.addInvestigationTasks([{
+                id: 'task-1',
+                targetFiles: ['src/http.ts'],
+                claim: 'Auth bypass on loopback',
+                requiredTools: ['read_config', 'trace_flow_cross_file'],
+                requiredEvidence: ['Verify defaults'],
+                status: 'pending',
+            }]);
+            expect(state.getAllTasks()).toHaveLength(1);
+            expect(state.getPendingTasks()).toHaveLength(1);
+        });
+
+        it('updateTaskStatus changes task status', () => {
+            const state = new InvestigationState();
+            state.addInvestigationTasks([{
+                id: 'task-1',
+                targetFiles: ['src/http.ts'],
+                claim: 'Risk',
+                requiredTools: [],
+                requiredEvidence: [],
+                status: 'pending',
+            }]);
+            state.updateTaskStatus('task-1', 'verified');
+            expect(state.getPendingTasks()).toHaveLength(0);
+            expect(state.getUnresolvedTasks()).toHaveLength(0);
+        });
+
+        it('getUnresolvedTasks returns pending and blocked', () => {
+            const state = new InvestigationState();
+            state.addInvestigationTasks([
+                { id: 't1', targetFiles: [], claim: 'A', requiredTools: [], requiredEvidence: [], status: 'pending' },
+                { id: 't2', targetFiles: [], claim: 'B', requiredTools: [], requiredEvidence: [], status: 'blocked' },
+                { id: 't3', targetFiles: [], claim: 'C', requiredTools: [], requiredEvidence: [], status: 'verified' },
+            ]);
+            const unresolved = state.getUnresolvedTasks();
+            expect(unresolved).toHaveLength(2);
+            expect(unresolved.map(t => t.id).sort()).toEqual(['t1', 't2']);
+        });
+
+        it('marks architecture-risks-addressed when all tasks are resolved', () => {
+            const state = new InvestigationState();
+            state.setRequiredSteps(['initial-read', 'architecture-risks-addressed', 'candidates-verified']);
+            state.addInvestigationTasks([
+                { id: 't1', targetFiles: [], claim: 'A', requiredTools: [], requiredEvidence: [], status: 'pending' },
+            ]);
+            state.recordRead('src/http.ts', 1, 100, 500);
+            expect(state.getIncompleteSteps()).toContain('architecture-risks-addressed');
+            state.updateTaskStatus('t1', 'verified');
+            expect(state.getIncompleteSteps()).not.toContain('architecture-risks-addressed');
+        });
+
+        it('does not duplicate tasks with the same id', () => {
+            const state = new InvestigationState();
+            state.addInvestigationTasks([{
+                id: 'task-1', targetFiles: [], claim: 'A',
+                requiredTools: [], requiredEvidence: [], status: 'pending',
+            }]);
+            state.addInvestigationTasks([{
+                id: 'task-1', targetFiles: [], claim: 'B (different)',
+                requiredTools: [], requiredEvidence: [], status: 'pending',
+            }]);
+            expect(state.getAllTasks()).toHaveLength(1);
+            expect(state.getAllTasks()[0].claim).toBe('A');
+        });
+    });
 });

@@ -118,6 +118,21 @@ export interface ArchitectureRisk {
     severity: 'high' | 'medium' | 'low';
 }
 
+/**
+ * An investigation task derived from an architecture risk. Tasks are tracked
+ * by the InvestigationState and must be resolved (investigated, verified,
+ * unproven, or blocked) before the scan finishes. Unresolved tasks appear
+ * as coverage gaps in the final result.
+ */
+export interface InvestigationTask {
+    id: string;
+    targetFiles: string[];
+    claim: string;
+    requiredTools: string[];
+    requiredEvidence: string[];
+    status: 'pending' | 'investigated' | 'verified' | 'unproven' | 'blocked';
+}
+
 export interface ArchitectureContext {
     /** Schema version of this context (for cache invalidation). */
     version: number;
@@ -401,4 +416,72 @@ export function formatArchitectureRiskTasksForTarget(
     });
 
     return lines.join('\n');
+}
+
+/**
+ * Convert architecture risks relevant to a target file into structured
+ * InvestigationTask objects. Each task tracks its own status and must be
+ * resolved before the scan finishes.
+ *
+ * A risk is relevant if:
+ *   - The target file is listed in the risk's files[]
+ *   - The target file's path is a substring of any file in the risk's files[]
+ *   - The risk has no specific files (project-wide)
+ */
+export function createInvestigationTasksFromRisks(
+    ctx: ArchitectureContext | undefined,
+    targetFilePath: string,
+): InvestigationTask[] {
+    if (!ctx || !ctx.architectureRisks || ctx.architectureRisks.length === 0) return [];
+
+    const normalizedTarget = targetFilePath.replace(/\\/g, '/').toLowerCase();
+    const relevant = ctx.architectureRisks.filter(r => {
+        if (!r.files || r.files.length === 0) return true;
+        return r.files.some(f => {
+            const nf = f.replace(/\\/g, '/').toLowerCase();
+            return nf === normalizedTarget ||
+                nf.includes(normalizedTarget) ||
+                normalizedTarget.includes(nf);
+        });
+    });
+
+    return relevant.map((r, i) => {
+        const id = `arch-risk-${i + 1}-${r.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}`;
+        return {
+            id,
+            targetFiles: r.files.length > 0 ? r.files : [targetFilePath],
+            claim: r.title,
+            requiredTools: inferRequiredTools(r),
+            requiredEvidence: [
+                'Trace the code path from input to the sensitive operation',
+                'Determine whether the control is present, bypassed, or missing',
+                'Establish the threat model (is the attacker in scope?)',
+            ],
+            status: 'pending' as const,
+        };
+    });
+}
+
+function inferRequiredTools(risk: ArchitectureRisk): string[] {
+    const tools: string[] = [];
+    const text = (risk.title + ' ' + risk.description).toLowerCase();
+    if (/auth|token|session|login|credential|password|jwt/i.test(text)) {
+        tools.push('search_code', 'check_policy', 'read_config');
+    }
+    if (/flow|taint|cross-file|propagat|input|sink/i.test(text)) {
+        tools.push('trace_flow_cross_file', 'trace_flow');
+    }
+    if (/config|env|secret|key/i.test(text)) {
+        tools.push('read_config');
+    }
+    if (/route|endpoint|handler/i.test(text)) {
+        tools.push('get_endpoints', 'check_policy');
+    }
+    if (/owner|permission|access|rbac|role/i.test(text)) {
+        tools.push('search_code', 'check_policy', 'trace_flow_cross_file');
+    }
+    if (tools.length === 0) {
+        tools.push('read_file', 'search_code', 'trace_flow_cross_file');
+    }
+    return [...new Set(tools)];
 }

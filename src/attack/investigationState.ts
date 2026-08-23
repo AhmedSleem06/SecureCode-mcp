@@ -21,6 +21,17 @@ export interface LineRange {
     end: number;
 }
 
+export type InvestigationTaskStatus = 'pending' | 'investigated' | 'verified' | 'unproven' | 'blocked';
+
+export interface InvestigationTask {
+    id: string;
+    targetFiles: string[];
+    claim: string;
+    requiredTools: string[];
+    requiredEvidence: string[];
+    status: InvestigationTaskStatus;
+}
+
 export interface FileCoverage {
     /** Normalized file path (lowercase, forward slashes). */
     filePath: string;
@@ -61,6 +72,7 @@ export class InvestigationState {
     private symbolsSearched = new Set<string>();
     private rootCauses = new Map<string, string>();
     private duplicateReadKeys = new Set<string>();
+    private tasks = new Map<string, InvestigationTask>();
 
     constructor() {
         this.checklist = {
@@ -434,6 +446,40 @@ export class InvestigationState {
      */
     setRequiredSteps(steps: InvestigationStep[]): void {
         this.checklist.required = new Set(steps);
+    }
+
+    // ── Investigation task tracking ──────────────────────────────────────────
+
+    addInvestigationTasks(tasks: InvestigationTask[]): void {
+        for (const task of tasks) {
+            if (!this.tasks.has(task.id)) {
+                this.tasks.set(task.id, { ...task });
+            }
+        }
+    }
+
+    updateTaskStatus(taskId: string, status: InvestigationTaskStatus): void {
+        const task = this.tasks.get(taskId);
+        if (task) {
+            task.status = status;
+            if (this.tasks.size > 0 && [...this.tasks.values()].every(t => t.status !== 'pending')) {
+                this.markStepComplete('architecture-risks-addressed');
+            }
+        }
+    }
+
+    getPendingTasks(): InvestigationTask[] {
+        return [...this.tasks.values()].filter(t => t.status === 'pending');
+    }
+
+    getUnresolvedTasks(): InvestigationTask[] {
+        return [...this.tasks.values()].filter(t =>
+            t.status === 'pending' || t.status === 'blocked',
+        );
+    }
+
+    getAllTasks(): InvestigationTask[] {
+        return [...this.tasks.values()];
     }
 
     getIncompleteSteps(): InvestigationStep[] {

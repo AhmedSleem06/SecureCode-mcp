@@ -23,6 +23,8 @@ import { executeAction, executeReadFileAction } from './agentScanExecutor';
 import { AgentTraceLogger } from './agentTrace';
 import { InvestigationState } from './investigationState';
 import { selectInvestigationProfile } from './investigationProfiles';
+import { createInvestigationTasksFromRisks } from '../project-map/architectureContext';
+import { isEquivalentSearchIntent, normalizeSearchPattern } from './searchIntent';
 import {
     validateStartResponse,
     validateStepResponse,
@@ -108,6 +110,12 @@ export async function runAgentScan(
             endpointContext: (target as any).endpointContext,
         });
         investigationState.setRequiredSteps(profile.requiredSteps);
+        // Convert architecture risks relevant to this target into tracked
+        // investigation tasks. Unresolved tasks will appear as coverage gaps.
+        const archTasks = createInvestigationTasksFromRisks(
+            (target as any).architectureContext, target.filePath,
+        );
+        investigationState.addInvestigationTasks(archTasks);
         const readFiles = new Set<string>();
         const readFileCounts = new Map<string, number>();
         // Dynamic read cap based on file size:
@@ -137,6 +145,10 @@ export async function runAgentScan(
         // same search_code/trace_flow call repeatedly. Keyed by (type + args).
         const toolCallCounts = new Map<string, number>();
         const MAX_SAME_TOOL_CALL = 2;
+        // Track normalized search patterns to detect equivalent searches
+        // (same terms, different order) that the raw toolKey dedup misses.
+        const searchedPatterns = new Set<string>();
+        let equivalentSearchCount = 0;
 
         let consecutiveErrors = 0;
         let consecutiveBlockedReads = 0;
@@ -434,6 +446,19 @@ export async function runAgentScan(
                         }));
                         coverageGaps = [...coverageGaps, ...autoGaps];
                     }
+                    // Add unresolved architecture-risk tasks as coverage gaps
+                    const unresolvedTasks = investigationState.getUnresolvedTasks();
+                    if (unresolvedTasks.length > 0) {
+                        const taskGaps = unresolvedTasks.map(task => ({
+                            title: `Architecture risk unresolved: ${task.claim}`,
+                            detail: `This architecture-risk investigation task was not resolved: ${task.claim}. Required evidence: ${task.requiredEvidence.join('; ')}. The investigation was incomplete and vulnerabilities may have been missed.`,
+                            file: task.targetFiles[0] || target.filePath,
+                            requiredEvidence: task.requiredEvidence,
+                            suggestedNextAction: task.requiredTools[0] || 'continue investigation',
+                            priority: 'high' as const,
+                        }));
+                        coverageGaps = [...coverageGaps, ...taskGaps];
+                    }
                 }
                 return {
                     status: 'completed',
@@ -576,6 +601,35 @@ export async function runAgentScan(
                 }
 
                 if (toolKey) {
+                    // Check for equivalent search intent (same terms, different
+                    // order) before the raw toolKey dedup.
+                    if (action.type === 'search_code') {
+                        const pattern = (action as any).pattern || '';
+                        const normalized = normalizeSearchPattern(pattern);
+                        let isEquivalent = false;
+                        for (const prev of searchedPatterns) {
+                            if (isEquivalentSearchIntent(prev, pattern)) {
+                                isEquivalent = true;
+                                break;
+                            }
+                        }
+                        if (isEquivalent) {
+                            equivalentSearchCount++;
+                            if (equivalentSearchCount >= 2) {
+                                observation = `BLOCKED: This search is equivalent to a previous search (same terms, different order). The results are in the transcript above. Use find_definition, find_references, call_graph, a targeted read_file with specific line numbers, or trace_flow_cross_file instead.`;
+                                wasBlocked = true;
+                                const checklist = investigationState.formatChecklistForPrompt();
+                                observation += `\n\n${checklist}`;
+                                // Skip execution — jump to the blocked handling
+                                transcript.push({ action, observation });
+                                trace.logToolBlocked(action.type, observation.slice(0, 200));
+                                consecutiveBlockedReads++;
+                                continue;
+                            }
+                        }
+                        searchedPatterns.add(normalized);
+                    }
+
                     const count = (toolCallCounts.get(toolKey) || 0) + 1;
                     toolCallCounts.set(toolKey, count);
                     if (count > MAX_SAME_TOOL_CALL) {
@@ -635,6 +689,17 @@ export async function runAgentScan(
                             : 'continue investigation',
                         priority: 'high' as const,
                     }));
+                    // Add unresolved architecture-risk tasks as coverage gaps
+                    const unresolvedTasks = investigationState.getUnresolvedTasks();
+                    const taskGaps = unresolvedTasks.map(task => ({
+                        title: `Architecture risk unresolved: ${task.claim}`,
+                        detail: `This architecture-risk investigation task was not resolved: ${task.claim}. Required evidence: ${task.requiredEvidence.join('; ')}.`,
+                        file: task.targetFiles[0] || target.filePath,
+                        requiredEvidence: task.requiredEvidence,
+                        suggestedNextAction: task.requiredTools[0] || 'continue investigation',
+                        priority: 'high' as const,
+                    }));
+                    const allGaps = [...autoGaps, ...taskGaps];
                     return {
                         status: 'completed',
                         findings: [],
@@ -644,9 +709,9 @@ export async function runAgentScan(
                         extensionsGranted,
                         costSpentUsd,
                         terminationReason: 'blocked_read_recovery',
-                        summary: `Investigation cut short — agent was stuck re-reading files. ${autoGaps.length} coverage gaps identified.`,
+                        summary: `Investigation cut short — agent was stuck re-reading files. ${allGaps.length} coverage gaps identified.`,
                         investigationNotes: [],
-                        coverageGaps: autoGaps,
+                        coverageGaps: allGaps,
                     };
                 }
             } else {
