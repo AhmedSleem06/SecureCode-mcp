@@ -26,6 +26,14 @@ import { selectInvestigationProfile } from './investigationProfiles';
 import { createInvestigationTasksFromRisks } from '../project-map/architectureContext';
 import { isEquivalentSearchIntent, normalizeSearchPattern } from './searchIntent';
 import {
+    createScanRunState,
+    transitionScanPhase,
+    terminateScan,
+    isScanTerminal,
+    canExecuteWork,
+    type ScanRunState,
+} from './scanState';
+import {
     validateStartResponse,
     validateStepResponse,
     type ValidationResult,
@@ -98,6 +106,12 @@ export async function runAgentScan(
         const trace = new AgentTraceLogger(ctx.workspaceRoot, startResp.runId);
         trace.logRunStarted();
 
+        // Authoritative scan state — the single source of truth for phase,
+        // budget, recovery, and lifecycle. Local counters below are kept in
+        // sync with this state until they are fully replaced.
+        const scanState = createScanRunState(startResp.runId, target, budget);
+        scanState.budget.wallClockMs = wallClockMs;
+
         const transcript: AgentScanTranscriptStep[] = [];
         const investigationState = new InvestigationState();
         // Select a target-specific investigation profile to set the required
@@ -110,6 +124,7 @@ export async function runAgentScan(
             endpointContext: (target as any).endpointContext,
         });
         investigationState.setRequiredSteps(profile.requiredSteps);
+        scanState.profileId = profile.name;
         // Convert architecture risks relevant to this target into tracked
         // investigation tasks. Unresolved tasks will appear as coverage gaps.
         const archTasks = createInvestigationTasksFromRisks(
@@ -157,6 +172,7 @@ export async function runAgentScan(
         while (true) {
             // Wall clock check
             if (Date.now() - startTime > wallClockMs) {
+                terminateScan(scanState, 'wall_clock', `Wall clock limit (${wallClockMs}ms) exceeded.`);
                 return {
                     status: 'capped',
                     findings: [],
@@ -174,6 +190,7 @@ export async function runAgentScan(
 
             // Abort check
             if (options.signal?.aborted) {
+                terminateScan(scanState, 'cancelled', 'Cancelled by user.');
                 return {
                     status: 'cancelled',
                     findings: [],
@@ -346,8 +363,14 @@ export async function runAgentScan(
                 continue;
             }
             costSpentUsd += stepResp.costUsd || 0;
+            scanState.budget.costSpentUsd = costSpentUsd;
             consecutiveErrors = 0;
             trace.logStepRequested(stepResp.model, stepResp.tokens, stepResp.costUsd, stepResp.latencyMs);
+
+            // Transition from planning to surveying on first successful step
+            if (scanState.phase === 'planning') {
+                transitionScanPhase(scanState, 'surveying', 'first step received');
+            }
 
             // Budget extension — the API may grant additional steps when the
             // agent demonstrates meaningful progress. Update our local tracking.
@@ -358,6 +381,9 @@ export async function runAgentScan(
                 budget.stepsRemaining = stepResp.stepsRemaining;
                 budget.stepsGranted = ext.totalGranted;
                 budget.extensionsGranted = extensionsGranted;
+                scanState.budget.stepsGranted = ext.totalGranted;
+                scanState.budget.extensionsGranted = extensionsGranted;
+                scanState.budget.stepsRemaining = stepResp.stepsRemaining;
                 meaningfulProgressSinceLastExtension = false;
                 if (options.onProgress) {
                     options.onProgress(stepsTaken, ext.hardMaxSteps, `Budget extended +${ext.granted} steps (${ext.totalGranted}/${ext.hardMaxSteps}): ${ext.reason}`);
@@ -413,6 +439,8 @@ export async function runAgentScan(
             const action: AgentScanAction = stepResp.next;
             stepsTaken++;
             budget.stepsRemaining = stepResp.stepsRemaining;
+            scanState.budget.stepsUsed = stepsTaken;
+            scanState.budget.stepsRemaining = stepResp.stepsRemaining;
             trace.nextStep();
             trace.logActionSelected(action.type, stepResp.model, stepResp.degraded || stepResp.fallbackFired);
 
@@ -474,6 +502,9 @@ export async function runAgentScan(
                     summary: action.summary,
                 };
             }
+
+            // Sync scan state — model proposed finish, increment counter
+            scanState.finishAttempts++;
 
             // Execute the action locally
             let observation: string;
@@ -662,6 +693,10 @@ export async function runAgentScan(
             if (wasBlocked) {
                 trace.logToolBlocked(action.type, observation.slice(0, 200));
                 consecutiveBlockedReads++;
+                scanState.recovery.consecutiveBlockedActions = consecutiveBlockedReads;
+                scanState.recovery.totalBlockedActions++;
+                scanState.recovery.lastBlockedAction = action.type;
+                scanState.recovery.meaningfulProgressSinceRecovery = false;
                 const recoveryLimit = AGENT_SCAN_DEFAULTS.blockedReadRecoveryLimit;
 
                 if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
@@ -700,6 +735,7 @@ export async function runAgentScan(
                         priority: 'high' as const,
                     }));
                     const allGaps = [...autoGaps, ...taskGaps];
+                    terminateScan(scanState, 'blocked_read_recovery', `Agent stuck re-reading files. ${allGaps.length} coverage gaps.`);
                     return {
                         status: 'completed',
                         findings: [],
@@ -722,6 +758,8 @@ export async function runAgentScan(
                 // tool calls (first invocation with these args) do.
                 if (meaningfulProgressSinceRecovery) {
                     consecutiveBlockedReads = 0;
+                    scanState.recovery.consecutiveBlockedActions = 0;
+                    scanState.recovery.meaningfulProgressSinceRecovery = true;
                 }
             }
 
