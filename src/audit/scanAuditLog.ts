@@ -71,9 +71,14 @@ export interface ScanAuditSample {
         provenRejectedByGate?: number;
         proofGateFailures?: Record<string, number>;
         syntheticProofCount?: number;
+        extractedLogicProofCount?: number;
         realImportProofCount?: number;
+        baselinePassRate?: number;
+        exploitPassRate?: number;
+        targetReachedRate?: number;
         flakyProofCount?: number;
         mutationDiscriminationRate?: number;
+        humanReviewPendingCount?: number;
     };
     verifyUsage?: {
         findingsAttempted: number;
@@ -431,4 +436,81 @@ export function formatAuditSummary(summary: ScanAuditSummary): string {
     }
 
     return lines.join('\n');
+}
+
+// ── Proof audit metrics ────────────────────────────────────────────────────
+
+export interface ProofAuditMetrics {
+    provenStrictCount: number;
+    provenRejectedByGate: number;
+    proofGateFailures: Record<string, number>;
+    syntheticProofCount: number;
+    extractedLogicProofCount: number;
+    realImportProofCount: number;
+    baselinePassRate: number;
+    exploitPassRate: number;
+    targetReachedRate: number;
+    flakyProofCount: number;
+    mutationDiscriminationRate: number;
+    humanReviewPendingCount: number;
+}
+
+export interface ProofInvariantCheck {
+    findingIndex: number;
+    violations: string[];
+}
+
+/**
+ * Validate the PROVEN invariant: every PROVEN finding must have:
+ *   - proofEvidence
+ *   - proofGateResult.eligibleForProven === true
+ *   - sourceMode = real-import or real-server
+ *   - repeatedRuns >= 3
+ *   - repeatPasses === repeatedRuns
+ *   - mutation discrimination passed
+ *
+ * Returns an array of violations per finding. An empty array means all
+ * PROVEN findings satisfy the invariant.
+ */
+export function validateProvenInvariant(findings: any[]): ProofInvariantCheck[] {
+    const checks: ProofInvariantCheck[] = [];
+
+    findings.forEach((finding, i) => {
+        if (finding.proven !== 'PROVEN' && finding.verdict !== 'PROVEN') return;
+
+        const violations: string[] = [];
+
+        if (!finding.proofEvidence) {
+            violations.push('missing proofEvidence');
+        }
+
+        if (!finding.proofGateResult || !finding.proofGateResult.eligibleForProven) {
+            violations.push('proofGateResult.eligibleForProven is not true');
+        }
+
+        const sourceMode = finding.proofEvidence?.sourceMode;
+        if (sourceMode && sourceMode !== 'real-import' && sourceMode !== 'real-server') {
+            violations.push(`sourceMode is ${sourceMode}, must be real-import or real-server`);
+        }
+
+        const repeatedRuns = finding.proofEvidence?.repeatedRuns ?? 0;
+        if (repeatedRuns < 3) {
+            violations.push(`repeatedRuns is ${repeatedRuns}, must be >= 3`);
+        }
+
+        const repeatPasses = finding.proofEvidence?.repeatPasses ?? 0;
+        if (repeatPasses !== repeatedRuns) {
+            violations.push(`repeatPasses (${repeatPasses}) !== repeatedRuns (${repeatedRuns}) — proof is flaky`);
+        }
+
+        if (finding.proofEvidence?.assumptions?.some((a: string) => a.includes('mutation-test'))) {
+            violations.push('mutation discrimination not passed');
+        }
+
+        if (violations.length > 0) {
+            checks.push({ findingIndex: i, violations });
+        }
+    });
+
+    return checks;
 }
