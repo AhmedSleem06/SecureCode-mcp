@@ -133,10 +133,10 @@ describe('Cross-repo contract parity (Suite 5)', () => {
         });
     });
 
-    describe('AGENT_SCAN_PROTOCOL_VERSION is 4', () => {
+    describe('AGENT_SCAN_PROTOCOL_VERSION is 5', () => {
         it('MCP protocol version is 4', async () => {
             const mod = await import('../src/attack/agentScanProtocol');
-            expect(mod.AGENT_SCAN_PROTOCOL_VERSION).toBe(4);
+            expect(mod.AGENT_SCAN_PROTOCOL_VERSION).toBe(5);
         });
     });
 });
