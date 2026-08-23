@@ -9,7 +9,7 @@ import {
     type VerifyBudget,
 } from './agentScanProtocol';
 import { validateVerifyGenerateResponse, validateVerifyAnalyzeResponse } from './protocolValidator';
-import { parseProofMarker } from './proofTypes';
+import { parseProofMarker, type ProofRunResult } from './proofTypes';
 import { evaluateProofGate, buildProofEvidence } from './proofGate';
 import { runMutationTest } from './mutationTest';
 
@@ -349,7 +349,21 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         if (analyzeResp.verdict === 'PROVEN') {
             if (gateResult.eligibleForProven) {
                 const REPEAT_RUNS = 3;
-                let totalPasses = 1;
+                const runResults: ProofRunResult[] = [];
+                // First run already done — validate it independently
+                runResults.push({
+                    runIndex: 1,
+                    verdict: testResult.verdict as 'pass' | 'fail' | 'error' | 'timeout',
+                    markerValid: proofMarker.found,
+                    targetReached: proofMarker.targetReached === true,
+                    impactObserved: proofMarker.impact === 'observed',
+                    baselineResult: proofMarker.baseline,
+                    exploitResult: proofMarker.exploit,
+                });
+
+                let lastRepOutput = lastTestOutput;
+                let lastRepMarker = proofMarker;
+
                 for (let rep = 2; rep <= REPEAT_RUNS; rep++) {
                     if (opts.signal?.aborted) break;
                     if (tracker && !tracker.canAttemptRound()) break;
@@ -360,34 +374,53 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                         opts.workspaceRoot,
                         { setupScript: genResp.setupScript || null, timeoutMs: tracker ? Math.min(30_000, tracker.remainingWallClockMs()) : 30_000, signal: opts.signal },
                     );
-                    if (repResult.verdict === 'pass') totalPasses++;
+                    lastRepOutput = repResult.output;
+                    const repMarker = parseProofMarker(repResult.output);
+                    lastRepMarker = repMarker;
+                    runResults.push({
+                        runIndex: rep,
+                        verdict: repResult.verdict as 'pass' | 'fail' | 'error' | 'timeout',
+                        markerValid: repMarker.found,
+                        targetReached: repMarker.targetReached === true,
+                        impactObserved: repMarker.impact === 'observed',
+                        baselineResult: repMarker.baseline,
+                        exploitResult: repMarker.exploit,
+                    });
                 }
 
-                const repMarker = parseProofMarker(lastTestOutput);
-                const repGateResult = evaluateProofGate(repMarker, {
+                // A run only counts as "passed" if ALL proof properties are valid.
+                // Do not count a run as passed solely because verdict === 'pass'.
+                const totalPasses = runResults.filter(r =>
+                    r.verdict === 'pass' &&
+                    r.markerValid &&
+                    r.targetReached &&
+                    r.impactObserved,
+                ).length;
+
+                const repGateResult = evaluateProofGate(lastRepMarker, {
                     sandboxBackend: testResult.backend || 'unknown',
                     targetFile: filePath || '',
                     targetLine: finding.line,
-                    repeatedRuns: REPEAT_RUNS,
+                    repeatedRuns: runResults.length,
                     repeatPasses: totalPasses,
                     llmVerdict: 'PROVEN',
-                    sourceMode: repMarker.sourceMode,
+                    sourceMode: lastRepMarker.sourceMode,
                 });
 
                 if (!repGateResult.eligibleForProven) {
-                    console.warn(`[Verify Loop] Repeatability check failed: ${totalPasses}/${REPEAT_RUNS} runs passed`);
-                    const repEvidence = repMarker.found
-                        ? buildProofEvidence(repMarker, {
+                    console.warn(`[Verify Loop] Repeatability check failed: ${totalPasses}/${runResults.length} runs passed`);
+                    const repEvidence = lastRepMarker.found
+                        ? buildProofEvidence(lastRepMarker, {
                               sandboxBackend: testResult.backend || 'unknown',
                               targetFile: filePath || '',
                               targetLine: finding.line,
-                              repeatedRuns: REPEAT_RUNS,
+                              repeatedRuns: runResults.length,
                               repeatPasses: totalPasses,
                           })
                         : proofEvidence;
                     return {
                         verdict: 'INCONCLUSIVE',
-                        reason: `Repeatability check failed: ${totalPasses}/${REPEAT_RUNS} runs passed. ${repGateResult.warnings.join(' ')}`,
+                        reason: `Repeatability check failed: ${totalPasses}/${runResults.length} runs passed. ${repGateResult.warnings.join(' ')}`,
                         roundsUsed: round,
                         testScript: lastTestScript,
                         testOutput: lastTestOutput,
@@ -405,16 +438,13 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 }
 
                 const mutationResult = await runMutationTest({
+                    vulnerableCode: code,
                     testScript: lastTestScript,
                     runner: genResp.runner || runtimeInfo.runner || 'node',
                     workspaceRoot: opts.workspaceRoot,
                     filePath: filePath || '',
-                    code,
                     vulnerabilityType: finding.type,
                     line: finding.line,
-                    evidence: finding.evidence,
-                    why: finding.why,
-                    client,
                 });
 
                 if (!mutationResult.discriminating) {

@@ -48,6 +48,25 @@ export interface ParsedProofMarker {
     sourceMode?: ProofSourceMode;
 }
 
+/**
+ * Per-run validation result for a single repeatability run. Each repeat
+ * must independently validate all proof properties — a run is only
+ * counted as "passed" if ALL of these are true:
+ *   - verdict === 'pass'
+ *   - markerValid (proof marker was found and parsed)
+ *   - targetReached (the proof reached the target file/line)
+ *   - impactObserved (the exploit produced an observable impact)
+ */
+export interface ProofRunResult {
+    runIndex: number;
+    verdict: 'pass' | 'fail' | 'error' | 'timeout';
+    markerValid: boolean;
+    targetReached: boolean;
+    impactObserved: boolean;
+    baselineResult?: 'pass' | 'fail';
+    exploitResult?: 'pass' | 'fail';
+}
+
 export const PROOF_MARKER_START = 'SECURECODE_PROOF_RESULT:';
 export const PROOF_MARKER_END = ':SECURECODE_PROOF_END';
 
