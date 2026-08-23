@@ -24,7 +24,7 @@ function makeReport(metrics: AgentEvalMetrics, overrides: Partial<AgentEvalRepor
         results: [],
         targets: { recall_min: 0.70, precision_min: 0.70, fpr_max: 0.30, completion_rate_min: 0.90 },
         pass: true,
-        cacheVersion: 28,
+        cacheVersion: 29,
         commitSha: 'abc12345def67890',
         ...overrides,
     };
