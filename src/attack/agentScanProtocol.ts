@@ -30,7 +30,7 @@ export const AGENT_SCAN_DEFAULTS = {
 // new optional action type only requires adding it to SUPPORTED_ACTIONS
 // and bumping the MCP version — the API filters its schema accordingly.
 
-export const AGENT_SCAN_PROTOCOL_VERSION = 4;
+export const AGENT_SCAN_PROTOCOL_VERSION = 5;
 
 export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
@@ -408,7 +408,7 @@ export interface AgentScanFinishAction {
 // the critique content over the wire). A real action type fixes the bug
 // and prevents the next synthetic event from reintroducing the same class.
 
-export type AgentScanSystemEventType = 'critique' | 'error' | 'blocked' | 'budget';
+export type AgentScanSystemEventType = 'critique' | 'error' | 'blocked' | 'budget' | 'finish_gate';
 
 export interface AgentScanSystemEventAction {
     type: 'system_event';
@@ -573,6 +573,12 @@ export interface AgentScanStepResponse {
     stepsRemaining: number;
     systemEvent?: AgentScanSystemEventAction;
     budgetExtension?: BudgetExtensionEvent;
+    /** Protocol v5: server-side finish gate evaluation result. */
+    finishGate?: {
+        status: 'accepted' | 'rejected' | 'not_evaluated';
+        incompleteSteps: string[];
+        reason: string;
+    };
     callBreakdown?: {
         decision: number;
         retry: number;

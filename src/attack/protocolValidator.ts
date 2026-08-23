@@ -68,7 +68,7 @@ const VALID_ATTACK_TYPES = new Set([
     'insecure_deserialization', 'broken_access_control',
 ]);
 
-const VALID_SYSTEM_EVENT_TYPES = new Set(['critique', 'error', 'blocked', 'budget']);
+const VALID_SYSTEM_EVENT_TYPES = new Set(['critique', 'error', 'blocked', 'budget', 'finish_gate']);
 const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
 
 /**
