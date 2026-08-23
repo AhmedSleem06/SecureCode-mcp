@@ -385,13 +385,11 @@ export async function runArchitectureScout(
                     wasBlocked = true;
                 } else {
                     const count = (readFileCounts.get(normalizedPath) || 0) + 1;
-                    if (count > 5) {
-                        observation = `BLOCKED: You have already read "${action.path}" 5 times. Use a different tool (search_code, call_graph, find_references, or finish) to proceed.`;
-                        wasBlocked = true;
-                    } else {
-                        readFileCounts.set(normalizedPath, count);
-                        readFiles.add(rangeKey);
-                        observation = await executeScoutAction(action, ctx);
+                    readFileCounts.set(normalizedPath, count);
+                    readFiles.add(rangeKey);
+                    observation = await executeScoutAction(action, ctx);
+                    if (count >= 5) {
+                        observation += `\n\nNOTE: You have read "${action.path}" ${count} times. Consider using search_code, call_graph, find_references, or finish to proceed.`;
                     }
                 }
             } else {
