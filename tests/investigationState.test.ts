@@ -274,10 +274,10 @@ describe('InvestigationState', () => {
             expect(state.getReadCount('src/large.ts')).toBe(1);
         });
 
-        it('marks initial-read complete even for truncated reads', () => {
+        it('does NOT mark initial-read complete for truncated reads', () => {
             const state = new InvestigationState();
             state.recordActualRead('src/large.ts', 0, 0, 2000, true);
-            expect(state.getCompletedSteps()).toContain('initial-read');
+            expect(state.getCompletedSteps()).not.toContain('initial-read');
         });
 
         it('does not record coverage when actualStart/actualEnd are 0', () => {

@@ -267,10 +267,21 @@ export class InvestigationState {
         if (totalLines) coverage.totalLines = totalLines;
 
         // Truncated reads (function map) deliver no content lines — don't
-        // record any range coverage. The agent must still read specific sections.
+        // record any range coverage and don't complete initial-read. The
+        // agent must still read specific sections with actual content.
         if (truncated || actualStart === 0 || actualEnd === 0) {
             this.filesRead.add(normalized);
-            this.markStepComplete('initial-read');
+            return {
+                overlapping: false,
+                overlapFraction: 0,
+                coverageAfter: [...coverage.ranges],
+            };
+        }
+
+        // Reject inverted ranges (actualStart > actualEnd) — these can
+        // happen when startLine > totalLines. Don't record coverage.
+        if (actualStart > actualEnd) {
+            this.filesRead.add(normalized);
             return {
                 overlapping: false,
                 overlapFraction: 0,
