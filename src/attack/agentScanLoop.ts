@@ -24,6 +24,8 @@ import { AgentTraceLogger } from './agentTrace';
 import { InvestigationState } from './investigationState';
 import { selectInvestigationProfile } from './investigationProfiles';
 import { createInvestigationTasksFromRisks } from '../project-map/architectureContext';
+import { discoverEndpoints } from '../project-map/endpointDiscovery';
+import { looksLikeContractOnly, resolveImplementation, formatImplementationResolution } from '../project-map/implementationResolver';
 import { isEquivalentSearchIntent, normalizeSearchPattern } from './searchIntent';
 import {
     createScanRunState,
@@ -131,6 +133,27 @@ export async function runAgentScan(
         });
         investigationState.setRequiredSteps(profile.requiredSteps);
         scanState.profileId = profile.name;
+
+        // Implementation resolution: if the target file looks like a
+        // contract-only file (interface, type declaration, abstract class),
+        // resolve the actual implementation so the investigation can follow
+        // the real code, not just signatures.
+        let implementationResolution: string | null = null;
+        try {
+            const fs = require('fs');
+            const absPath = require('path').resolve(ctx.workspaceRoot, target.filePath);
+            const content = fs.existsSync(absPath) ? fs.readFileSync(absPath, 'utf8') : '';
+            if (content && looksLikeContractOnly(content)) {
+                const symbol = target.filePath.replace(/\.ts$/, '').replace(/.*\//, '');
+                const resolution = await resolveImplementation(
+                    ctx.workspaceRoot, target.filePath, symbol,
+                );
+                if (!resolution.unresolved && resolution.implementationLocations.length > 0) {
+                    implementationResolution = formatImplementationResolution(resolution);
+                    (target as any).implementationHint = implementationResolution;
+                }
+            }
+        } catch { /* best-effort */ }
 
         // Control plane infrastructure — evidence ledger, work items, handler
         // inventory, candidate store, and scheduler work together to ensure
@@ -960,6 +983,48 @@ export async function runAgentScan(
             // Re-sync candidates-verified after evidence linking
             if (candidateStore.allReadyForJuror()) {
                 investigationState.markCandidatesVerified();
+            }
+
+            // Handler discovery: when the agent calls get_endpoints, discover
+            // handlers and populate the handler inventory. Create handler
+            // review work items for security-sensitive handlers.
+            if (!wasBlocked && action.type === 'get_endpoints') {
+                try {
+                    const endpoints = await discoverEndpoints(
+                        ctx.workspaceRoot,
+                        (action as any).glob,
+                    );
+                    if (endpoints.length > 0) {
+                        handlerInventory.addFromEndpoints(endpoints, target.filePath);
+                        // Create work items for newly discovered handlers
+                        for (const handler of handlerInventory.getAll()) {
+                            if (!workItemQueue.all().some(w => w.title === `Review handler: ${handler.symbol || 'unknown'}`)) {
+                                workItemQueue.add(createHandlerReviewWorkItem(
+                                    handler.filePath,
+                                    handler.symbol || 'unknown',
+                                ));
+                            }
+                        }
+                    }
+                } catch { /* best-effort */ }
+            }
+
+            // Handler review tracking: when the agent reads a file range that
+            // covers a handler's range, mark that handler as reviewed.
+            if (!wasBlocked && action.type === 'read_file' && handlerInventory.size() > 0) {
+                const readStart = (action as any).startLine || 1;
+                const readEnd = (action as any).endLine || 9999;
+                const readFileNorm = String((action as any).path || target.filePath).replace(/\\/g, '/').toLowerCase();
+                for (const handler of handlerInventory.getAll()) {
+                    if (!handler.reviewed) {
+                        const handlerFileNorm = handler.filePath.replace(/\\/g, '/').toLowerCase();
+                        if (handlerFileNorm === readFileNorm) {
+                            if (handler.range.start >= readStart && handler.range.end <= readEnd) {
+                                handlerInventory.markReviewed(handler.id);
+                            }
+                        }
+                    }
+                }
             }
 
             // Deterministic recovery: on the third consecutive blocked read,

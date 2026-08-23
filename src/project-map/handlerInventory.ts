@@ -133,6 +133,13 @@ export class HandlerInventory {
     }
 
     /**
+     * Get the number of handlers in the inventory.
+     */
+    size(): number {
+        return this.handlers.size;
+    }
+
+    /**
      * Get handlers for a specific file.
      */
     getForFile(filePath: string): HandlerInventoryItem[] {
