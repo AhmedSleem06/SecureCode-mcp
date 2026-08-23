@@ -183,6 +183,7 @@ function shouldQueueForHumanReview(finding: ProvenFinding): boolean {
 
 export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unknown> {
     const progress = args._progress as ((progress: number, total: number, message: string) => void) | undefined;
+    const skipFix = !!args._skipFix;
 
     // 1. Resolve code + language
     let code: string;
@@ -663,6 +664,9 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     }
 
     // 4b. Generate fixes for proven/suspected findings (requires approval)
+    if (skipFix) {
+        console.log('[Agent Scan] Skipping fix generation (_skipFix=true)');
+    } else {
     const fixableFindings = provenFindings.filter(f =>
         f.proven === 'PROVEN' || (f.proven !== 'UNPROVEN' && f.confidence >= 60)
     );
@@ -797,6 +801,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     } finally {
         if (fixBroker) await fixBroker.stop();
     }
+    } // end else (skipFix)
 
     // 5. Write to cache before returning
     if (useCache) {

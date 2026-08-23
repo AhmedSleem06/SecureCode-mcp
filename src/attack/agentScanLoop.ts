@@ -33,6 +33,12 @@ import {
     canExecuteWork,
     type ScanRunState,
 } from './scanState';
+import { EvidenceLedger } from './evidenceLedger';
+import { WorkItemQueue } from './workItem';
+import { HandlerInventory } from '../project-map/handlerInventory';
+import { CandidateStore } from './candidateStore';
+import { schedule as schedulerDecision } from './scanScheduler';
+import { evaluateFinishGate } from './finishGate';
 import {
     validateStartResponse,
     validateStepResponse,
@@ -125,6 +131,19 @@ export async function runAgentScan(
         });
         investigationState.setRequiredSteps(profile.requiredSteps);
         scanState.profileId = profile.name;
+
+        // Control plane infrastructure — evidence ledger, work items, handler
+        // inventory, candidate store, and scheduler work together to ensure
+        // the investigation is complete before finish is accepted.
+        const evidenceLedger = new EvidenceLedger();
+        evidenceLedger.addRequirements(profile.requirements);
+        const workItemQueue = new WorkItemQueue();
+        // Note: profile requirements are tracked by the evidence ledger and
+        // checklist, not as work items. Work items are for architecture-risk
+        // tasks, handler reviews, and implementation reviews — structured
+        // work that the scheduler can prioritize and attempt-count.
+        const handlerInventory = new HandlerInventory();
+        const candidateStore = new CandidateStore();
         // Convert architecture risks relevant to this target into tracked
         // investigation tasks. Unresolved tasks will appear as coverage gaps.
         const archTasks = createInvestigationTasksFromRisks(
@@ -452,59 +471,116 @@ export async function runAgentScan(
 
             // Finish = done with findings
             if (action.type === 'finish') {
-                trace.logRunCompleted('completed');
-                // Auto-generate coverage gaps for incomplete investigation steps
-                // when the agent finishes with 0 findings
-                let coverageGaps = action.coverageGaps ?? [];
-                if (action.findings.length === 0) {
-                    const incompleteSteps = investigationState.getIncompleteSteps();
-                    if (incompleteSteps.length > 0) {
-                        const autoGaps = incompleteSteps.map(step => ({
-                            title: `Investigation step not completed: ${step}`,
-                            detail: `The agent finished without completing this required investigation step: ${step}. This means the investigation was incomplete and vulnerabilities may have been missed.`,
-                            file: target.filePath,
-                            requiredEvidence: [`Complete the ${step} step before concluding no vulnerabilities exist`],
-                            suggestedNextAction: step === 'config-inspection' ? 'read_config'
-                                : step === 'policy-check' ? 'check_policy'
-                                : step === 'cross-file-flow' ? 'trace_flow_cross_file'
-                                : step === 'route-discovery' ? 'get_endpoints'
-                                : step === 'auth-symbol-search' ? 'search_code'
-                                : 'continue investigation',
-                            priority: 'high' as const,
-                        }));
-                        coverageGaps = [...coverageGaps, ...autoGaps];
+                scanState.finishAttempts++;
+
+                // Evaluate the finish proposal through the hard finish gate
+                const schedDecision = schedulerDecision({
+                    state: scanState,
+                    evidence: evidenceLedger,
+                    workItems: workItemQueue,
+                    handlers: handlerInventory,
+                    candidates: candidateStore,
+                    investigation: investigationState,
+                    target,
+                });
+
+                const gateResult = evaluateFinishGate({
+                    proposal: action,
+                    state: scanState,
+                    evidence: evidenceLedger,
+                    workItems: workItemQueue,
+                    handlers: handlerInventory,
+                    candidates: candidateStore,
+                    investigation: investigationState,
+                    scheduler: schedDecision,
+                    target: { filePath: target.filePath },
+                });
+
+                if (gateResult.accepted) {
+                    trace.logRunCompleted('completed');
+                    if (gateResult.mode === 'forced-incomplete') {
+                        terminateScan(scanState, 'forced_incomplete', 'Budget exhausted with incomplete investigation');
+                    } else {
+                        terminateScan(scanState, 'agent_finish', gateResult.normalizedFinish?.summary);
                     }
-                    // Add unresolved architecture-risk tasks as coverage gaps
-                    const unresolvedTasks = investigationState.getUnresolvedTasks();
-                    if (unresolvedTasks.length > 0) {
-                        const taskGaps = unresolvedTasks.map(task => ({
-                            title: `Architecture risk unresolved: ${task.claim}`,
-                            detail: `This architecture-risk investigation task was not resolved: ${task.claim}. Required evidence: ${task.requiredEvidence.join('; ')}. The investigation was incomplete and vulnerabilities may have been missed.`,
-                            file: task.targetFiles[0] || target.filePath,
-                            requiredEvidence: task.requiredEvidence,
-                            suggestedNextAction: task.requiredTools[0] || 'continue investigation',
-                            priority: 'high' as const,
-                        }));
-                        coverageGaps = [...coverageGaps, ...taskGaps];
+
+                    // Merge gate-generated coverage gaps with model-provided gaps
+                    let coverageGaps = action.coverageGaps ?? [];
+                    if (gateResult.coverageGaps) {
+                        coverageGaps = [...coverageGaps, ...gateResult.coverageGaps];
                     }
+
+                    return {
+                        status: 'completed',
+                        findings: action.findings,
+                        investigationNotes: action.investigationNotes ?? [],
+                        coverageGaps,
+                        transcript,
+                        stepsUsed: stepsTaken,
+                        stepsGranted,
+                        extensionsGranted,
+                        costSpentUsd,
+                        terminationReason: gateResult.mode === 'forced-incomplete' ? 'forced_incomplete' : 'agent_finish',
+                        summary: action.summary,
+                    };
                 }
-                return {
-                    status: 'completed',
-                    findings: action.findings,
-                    investigationNotes: action.investigationNotes ?? [],
-                    coverageGaps,
-                    transcript,
-                    stepsUsed: stepsTaken,
-                    stepsGranted,
-                    extensionsGranted,
-                    costSpentUsd,
-                    terminationReason: 'agent_finish',
-                    summary: action.summary,
-                };
+
+                // Finish rejected — continue investigation
+                trace.logToolBlocked('finish', `Finish rejected: ${gateResult.reasons.map(r => r.description).join('; ')}`);
+
+                // Add a system event so the model sees the rejection
+                const rejectionMessage = `FINISH REJECTED — your investigation is incomplete:\n${gateResult.reasons.map(r => `  - ${r.description}`).join('\n')}\n\nYou must complete the remaining investigation steps before calling finish.${gateResult.recoveryAction ? `\n\nYour next action MUST be: ${gateResult.recoveryAction.type}` : ''}`;
+                transcript.push({
+                    action: {
+                        type: 'system_event',
+                        eventType: 'finish_rejected',
+                        message: rejectionMessage,
+                    } as any,
+                    observation: rejectionMessage,
+                });
+
+                // Execute the recovery action if the scheduler has one
+                if (gateResult.recoveryAction) {
+                    const recoveryAction = gateResult.recoveryAction;
+                    stepsTaken++;
+                    budget.stepsRemaining--;
+                    scanState.budget.stepsUsed = stepsTaken;
+                    scanState.budget.stepsRemaining = budget.stepsRemaining;
+                    trace.nextStep();
+                    trace.logActionSelected(recoveryAction.type, 'finish-gate-recovery', false);
+                    if (options.onProgress) {
+                        options.onProgress(stepsTaken, stepsGranted, `Step ${stepsTaken}: finish-gate recovery: ${describeAction(recoveryAction)}`);
+                    }
+
+                    let recoveryObservation: string;
+                    if (recoveryAction.type === 'read_file') {
+                        const readResult = await executeReadFileAction(recoveryAction, ctx);
+                        recoveryObservation = readResult.observation;
+                        if (readResult.totalLines > 0) {
+                            investigationState.recordActualRead(
+                                (recoveryAction as any).path,
+                                readResult.actualStart,
+                                readResult.actualEnd,
+                                readResult.totalLines,
+                                readResult.truncated,
+                            );
+                        }
+                    } else {
+                        recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
+                    }
+                    investigationState.recordToolUse(recoveryAction.type);
+                    trace.logToolCompleted(recoveryAction.type, recoveryObservation);
+                    transcript.push({ action: recoveryAction, observation: `[FINISH GATE RECOVERY] ${recoveryObservation}` });
+                }
+
+                continue;
             }
 
-            // Sync scan state — model proposed finish, increment counter
-            scanState.finishAttempts++;
+            // Sync candidates-verified: when all candidates are terminal (or
+            // there are none), the candidates-verified step is complete.
+            if (candidateStore.allTerminal()) {
+                investigationState.markCandidatesVerified();
+            }
 
             // Execute the action locally
             let observation: string;

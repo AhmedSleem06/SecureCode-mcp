@@ -119,6 +119,7 @@ async function main() {
             const scanResult = await toolAgentScan(ctx, {
                 filePath: f.file,
                 _progress: logProgress,
+                _skipFix: true,
             });
 
             console.log("  Status:", scanResult.status);

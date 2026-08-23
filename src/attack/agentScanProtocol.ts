@@ -607,6 +607,7 @@ export type AgentScanRunStatus =
 
 export type TerminationReason =
     | 'agent_finish'
+    | 'forced_incomplete'
     | 'budget_exhausted'
     | 'cost_cap'
     | 'wall_clock'
