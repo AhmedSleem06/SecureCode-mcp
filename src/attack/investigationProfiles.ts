@@ -87,9 +87,11 @@ export interface ProfileSelectionInput {
  *   - Otherwise → Generic Utility
  */
 export function selectInvestigationProfile(input: ProfileSelectionInput): InvestigationProfile {
-    const filePathLower = input.filePath.toLowerCase();
-    const archContext = (input.architectureContext || '').toLowerCase();
-    const endpointContext = (input.endpointContext || '').toLowerCase();
+    const filePathLower = (input.filePath || '').toLowerCase();
+    const archContextRaw = input.architectureContext;
+    const archContext = (typeof archContextRaw === 'string' ? archContextRaw : '').toLowerCase();
+    const endpointContextRaw = input.endpointContext;
+    const endpointContext = (typeof endpointContextRaw === 'string' ? endpointContextRaw : '').toLowerCase();
 
     // WebSocket RPC detection
     if (/(ws|websocket|rpc|socket|wss)/i.test(filePathLower) ||
