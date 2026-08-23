@@ -541,4 +541,86 @@ describe('InvestigationState', () => {
             expect(state.getAllTasks()[0].claim).toBe('A');
         });
     });
+
+    describe('coverage bugs — desired behavior (Phase 1 regression tests)', () => {
+        it('function-map-only reads should NOT complete initial-read', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 0, 0, 2000, true);
+            // DESIRED: a truncated function-map read delivers no source lines,
+            // so initial-read should NOT be complete.
+            // CURRENT: initial-read IS marked complete (bug).
+            expect(state.getCompletedSteps()).not.toContain('initial-read');
+        });
+
+        it('invalid inverted ranges should NOT enter coverage state', () => {
+            const state = new InvestigationState();
+            // Simulate an inverted range: actualStart > actualEnd
+            // This can happen when startLine > totalLines
+            state.recordActualRead('src/bad.ts', 500, 100, 200, false);
+            const coverage = state.getCoverage('src/bad.ts');
+            // DESIRED: inverted ranges should be rejected, no coverage recorded
+            // CURRENT: the range is accepted (bug)
+            if (coverage) {
+                const hasInverted = coverage.ranges.some(r => r.start > r.end);
+                expect(hasInverted).toBe(false);
+            }
+        });
+
+        it('all-handlers-reviewed should not be completable without handler evidence', () => {
+            const state = new InvestigationState();
+            // DESIRED: markAllHandlersReviewed should require handler inventory evidence
+            // CURRENT: it can be called manually with no evidence
+            state.markAllHandlersReviewed();
+            // After Phase 5, this should NOT complete the step without evidence.
+            // For now, it does — documenting the gap.
+            expect(state.getCompletedSteps()).toContain('all-handlers-reviewed');
+            // This test documents that the step IS completable without evidence,
+            // which is the bug. After Phase 5, we'll change this to NOT contain.
+        });
+
+        it('candidates-verified should not be completable without terminal candidates', () => {
+            const state = new InvestigationState();
+            // DESIRED: markCandidatesVerified should require all candidates terminal
+            // CURRENT: it can be called manually with no candidates
+            state.markCandidatesVerified();
+            // After Phase 7, this should NOT complete without candidate evidence.
+            expect(state.getCompletedSteps()).toContain('candidates-verified');
+            // This test documents that the step IS completable without candidates,
+            // which is the bug. After Phase 7, we'll change this to NOT contain.
+        });
+
+        it('architecture tasks never transition out of pending in production', () => {
+            const state = new InvestigationState();
+            state.addInvestigationTasks([{
+                id: 'task-1',
+                targetFiles: ['src/http.ts'],
+                claim: 'No rate limiting',
+                requiredTools: ['search_code'],
+                requiredEvidence: ['Trace the code path'],
+                status: 'pending',
+            }]);
+            // DESIRED: there should be a production path to resolve tasks.
+            // CURRENT: updateTaskStatus is never called in production.
+            const pending = state.getPendingTasks();
+            expect(pending).toHaveLength(1);
+            // Documenting: tasks are created but never resolved in production.
+        });
+
+        it('findings-bearing finishes should not bypass unresolved task reporting', () => {
+            const state = new InvestigationState();
+            state.addInvestigationTasks([{
+                id: 'task-1',
+                targetFiles: ['src/http.ts'],
+                claim: 'Risk',
+                requiredTools: [],
+                requiredEvidence: [],
+                status: 'pending',
+            }]);
+            // The current loop only reports unresolved tasks as coverage gaps
+            // when findings.length === 0. With findings, gaps are suppressed.
+            const unresolved = state.getUnresolvedTasks();
+            expect(unresolved.length).toBeGreaterThan(0);
+            // DESIRED: these should ALWAYS be reported, even with findings.
+        });
+    });
 });
