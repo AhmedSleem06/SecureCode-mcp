@@ -347,7 +347,7 @@ export async function runAgentScan(
             }
             costSpentUsd += stepResp.costUsd || 0;
             consecutiveErrors = 0;
-            trace.logStepRequested(undefined, stepResp.tokens, stepResp.costUsd, undefined);
+            trace.logStepRequested(stepResp.model, stepResp.tokens, stepResp.costUsd, stepResp.latencyMs);
 
             // Budget extension — the API may grant additional steps when the
             // agent demonstrates meaningful progress. Update our local tracking.
@@ -414,7 +414,7 @@ export async function runAgentScan(
             stepsTaken++;
             budget.stepsRemaining = stepResp.stepsRemaining;
             trace.nextStep();
-            trace.logActionSelected(action.type, undefined, stepResp.degraded);
+            trace.logActionSelected(action.type, stepResp.model, stepResp.degraded || stepResp.fallbackFired);
 
             // Progress callback
             if (options.onProgress) {

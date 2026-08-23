@@ -578,6 +578,13 @@ export interface AgentScanStepResponse {
         retry: number;
         critique: number;
     };
+    /** Model telemetry — the actual serving model for this step. */
+    model?: string;
+    provider?: string;
+    fallbackFired?: boolean;
+    latencyMs?: number;
+    promptTokens?: number;
+    completionTokens?: number;
 }
 
 export interface AgentScanToolRequest {
