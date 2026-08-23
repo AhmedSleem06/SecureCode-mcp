@@ -585,7 +585,18 @@ export async function runAgentScan(
                                 const stepFile = (step.action as any).filePath || (step.action as any).path || target.filePath;
                                 const stepFileNorm = String(stepFile).replace(/\\/g, '/').toLowerCase();
                                 if (stepFileNorm === targetFileNorm) {
-                                    candidateStore.addEvidence(candidateId, `backfill:${step.action.type}:${stepFileNorm}`);
+                                    const cat = step.action.type === 'trace_flow' || step.action.type === 'trace_flow_cross_file' ? 'flow' as const
+                                        : step.action.type === 'check_guard' ? 'guard' as const
+                                        : step.action.type === 'check_policy' ? 'policy' as const
+                                        : undefined;
+                                    candidateStore.addEvidence(candidateId, `backfill:${step.action.type}:${stepFileNorm}`, cat);
+                                }
+                            }
+                            if (step.action.type === 'read_file') {
+                                const stepFile = (step.action as any).path || target.filePath;
+                                const stepFileNorm = String(stepFile).replace(/\\/g, '/').toLowerCase();
+                                if (stepFileNorm === targetFileNorm) {
+                                    candidateStore.addEvidence(candidateId, `backfill:source:${stepFileNorm}`, 'source');
                                 }
                             }
                         }
@@ -1021,7 +1032,22 @@ export async function runAgentScan(
                         );
                         if (matchesLocation) {
                             const evidenceId = `${action.type}:${actionFileNorm}:${stepsTaken}`;
-                            candidateStore.addEvidence(candidate.id, evidenceId);
+                            const category = action.type === 'trace_flow' || action.type === 'trace_flow_cross_file' ? 'flow' as const
+                                : action.type === 'check_guard' ? 'guard' as const
+                                : action.type === 'check_policy' ? 'policy' as const
+                                : undefined;
+                            candidateStore.addEvidence(candidate.id, evidenceId, category);
+                        }
+                    }
+                }
+                if (action.type === 'read_file' && candidateStore.size() > 0) {
+                    const actionFileNorm = String((action as any).path || target.filePath).replace(/\\/g, '/').toLowerCase();
+                    for (const candidate of candidateStore.getAll()) {
+                        const matchesLocation = candidate.locations.some(
+                            loc => loc.filePath.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
+                        );
+                        if (matchesLocation && candidate.evidenceCategories?.includes('source') !== true) {
+                            candidateStore.addEvidence(candidate.id, `source:${actionFileNorm}:${stepsTaken}`, 'source');
                         }
                     }
                 }

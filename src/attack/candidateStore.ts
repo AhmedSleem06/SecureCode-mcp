@@ -52,6 +52,7 @@ export interface Candidate {
     claim: string;
     status: CandidateStatus;
     evidenceRefs: string[];
+    evidenceCategories?: EvidenceCategory[];
     requiredEvidence: EvidenceRequirement[];
     verification?: CandidateVerification;
     mergedInto?: string;
@@ -69,6 +70,16 @@ export interface CandidateRegistration {
     claim: string;
     requiredEvidence?: EvidenceRequirement[];
 }
+
+export type EvidenceCategory =
+    | 'source'
+    | 'flow'
+    | 'guard'
+    | 'policy'
+    | 'impact'
+    | 'test'
+    | 'negative'
+    | 'cross-file';
 
 export class CandidateStore {
     private candidates = new Map<string, Candidate>();
@@ -160,17 +171,25 @@ export class CandidateStore {
         this.update(id, { status: 'blocked', verification: undefined });
     }
 
-    addEvidence(id: string, evidenceRef: string): void {
+    addEvidence(id: string, evidenceRef: string, category?: EvidenceCategory): void {
         const candidate = this.candidates.get(id);
         if (candidate && !candidate.evidenceRefs.includes(evidenceRef)) {
             candidate.evidenceRefs.push(evidenceRef);
-            // Auto-transition: discovered -> investigating -> supported
+            if (category) {
+                if (!candidate.evidenceCategories) candidate.evidenceCategories = [];
+                if (!candidate.evidenceCategories.includes(category)) {
+                    candidate.evidenceCategories.push(category);
+                }
+            }
             if (candidate.status === 'discovered') {
                 candidate.status = 'investigating';
             }
-            // A single piece of evidence is enough to be "supported" —
-            // the Juror does the actual verification post-scan.
-            if (candidate.status === 'investigating' && candidate.evidenceRefs.length >= 1) {
+            const categories = candidate.evidenceCategories || [];
+            const categoryCount = categories.length;
+            const minCategories = (candidate.severity === 'critical' || candidate.severity === 'high') ? 2 : 1;
+            if (candidate.status === 'investigating' && categoryCount >= minCategories) {
+                candidate.status = 'supported';
+            } else if (candidate.status === 'investigating' && candidate.evidenceRefs.length >= 1 && categoryCount === 0) {
                 candidate.status = 'supported';
             }
             candidate.updatedAt = Date.now();
