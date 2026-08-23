@@ -473,6 +473,58 @@ export async function runAgentScan(
             if (action.type === 'finish') {
                 scanState.finishAttempts++;
 
+                // Register candidates from findings — each finding becomes a
+                // tracked candidate. If the candidate is new (discovered), the
+                // finish gate will reject and the agent must gather evidence.
+                for (const finding of action.findings) {
+                    const rootCauseId = finding.rootCause?.rootCauseId || `${finding.type}:${finding.line}`;
+                    const existing = candidateStore.getCandidatesByRootCause(rootCauseId);
+                    if (existing.length === 0) {
+                        const candidateId = candidateStore.register({
+                            rootCauseId,
+                            type: finding.type,
+                            severity: finding.severity as any,
+                            locations: [{ filePath: target.filePath, line: finding.line }],
+                            claim: finding.why,
+                            requiredEvidence: [
+                                {
+                                    id: `${rootCauseId}-flow`,
+                                    description: 'Verify data flow to the vulnerable location',
+                                    acceptedKinds: ['cross-file-flow'],
+                                    targetFiles: [target.filePath],
+                                    requiredTools: ['trace_flow_cross_file', 'trace_flow'],
+                                    minimumCount: 1,
+                                },
+                                {
+                                    id: `${rootCauseId}-guard`,
+                                    description: 'Check for guards/controls on the vulnerable location',
+                                    acceptedKinds: ['guard-result', 'policy-result'],
+                                    targetFiles: [target.filePath],
+                                    requiredTools: ['check_guard', 'check_policy'],
+                                    minimumCount: 1,
+                                },
+                            ],
+                        });
+                        // Backfill evidence: scan the transcript for prior
+                        // verification actions on this candidate's location.
+                        // If the agent already ran trace_flow/check_guard on
+                        // the file before calling finish, credit that evidence.
+                        const targetFileNorm = target.filePath.replace(/\\/g, '/').toLowerCase();
+                        const verificationActions = new Set([
+                            'trace_flow', 'trace_flow_cross_file', 'check_guard', 'check_policy',
+                        ]);
+                        for (const step of transcript) {
+                            if (verificationActions.has(step.action.type)) {
+                                const stepFile = (step.action as any).filePath || (step.action as any).path || target.filePath;
+                                const stepFileNorm = String(stepFile).replace(/\\/g, '/').toLowerCase();
+                                if (stepFileNorm === targetFileNorm) {
+                                    candidateStore.addEvidence(candidateId, `backfill:${step.action.type}:${stepFileNorm}`);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Evaluate the finish proposal through the hard finish gate
                 const schedDecision = schedulerDecision({
                     state: scanState,
@@ -576,9 +628,10 @@ export async function runAgentScan(
                 continue;
             }
 
-            // Sync candidates-verified: when all candidates are terminal (or
-            // there are none), the candidates-verified step is complete.
-            if (candidateStore.allTerminal()) {
+            // Sync candidates-verified: when all candidates are ready for the
+            // Juror (supported or terminal) or there are none, the
+            // candidates-verified step is complete.
+            if (candidateStore.allReadyForJuror()) {
                 investigationState.markCandidatesVerified();
             }
 
@@ -844,6 +897,35 @@ export async function runAgentScan(
             // We don't need a separate system_event for blocked (unlike
             // critique, the blocked case is tied to an action the agent took).
             transcript.push({ action, observation });
+
+            // Link evidence to candidates: when the agent runs a verification
+            // action (trace_flow, check_guard, check_policy, trace_flow_cross_file)
+            // on a file that matches a candidate's location, add evidence to
+            // that candidate. This auto-transitions candidates through
+            // discovered → investigating → supported as evidence accumulates.
+            if (!wasBlocked && candidateStore.size() > 0) {
+                const verificationActions = new Set([
+                    'trace_flow', 'trace_flow_cross_file', 'check_guard', 'check_policy',
+                ]);
+                if (verificationActions.has(action.type)) {
+                    const actionFile = (action as any).filePath || (action as any).path || target.filePath;
+                    const actionFileNorm = String(actionFile).replace(/\\/g, '/').toLowerCase();
+                    for (const candidate of candidateStore.getAll()) {
+                        const matchesLocation = candidate.locations.some(
+                            loc => loc.filePath.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
+                        );
+                        if (matchesLocation) {
+                            const evidenceId = `${action.type}:${actionFileNorm}:${stepsTaken}`;
+                            candidateStore.addEvidence(candidate.id, evidenceId);
+                        }
+                    }
+                }
+            }
+
+            // Re-sync candidates-verified after evidence linking
+            if (candidateStore.allReadyForJuror()) {
+                investigationState.markCandidatesVerified();
+            }
 
             // Deterministic recovery: on the third consecutive blocked read,
             // skip the API and directly execute a recovery action selected by

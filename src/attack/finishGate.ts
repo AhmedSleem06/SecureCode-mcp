@@ -108,12 +108,20 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
     }
 
     // Check 3: Non-terminal candidates
-    if (!candidates.allTerminal()) {
-        const active = candidates.getActive();
-        for (const candidate of active) {
+    if (!candidates.allReadyForJuror()) {
+        const underInvestigation = candidates.getUnderInvestigation();
+        for (const candidate of underInvestigation) {
             reasons.push({
                 code: 'non-terminal-candidate',
-                description: `Candidate not terminal: ${candidate.claim} (status: ${candidate.status})`,
+                description: `Candidate needs more evidence: ${candidate.claim} (status: ${candidate.status}, ${candidate.evidenceRefs.length} evidence ref(s))`,
+            });
+            coverageGaps.push({
+                title: `Candidate needs more evidence: ${candidate.claim}`,
+                detail: `This vulnerability candidate at ${candidate.locations.map(l => `${l.filePath}:${l.line}`).join(', ')} has status "${candidate.status}" with ${candidate.evidenceRefs.length} evidence reference(s). Run trace_flow, check_guard, or check_policy on the finding location to gather more evidence before finishing.`,
+                file: candidate.locations[0]?.filePath || target.filePath,
+                requiredEvidence: candidate.requiredEvidence.map(e => `${e.description} (tools: ${(e.requiredTools || []).join(', ')})`),
+                suggestedNextAction: (candidate.requiredEvidence[0]?.requiredTools || ['trace_flow_cross_file'])[0],
+                priority: 'high',
             });
         }
     }

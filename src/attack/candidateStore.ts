@@ -168,7 +168,9 @@ export class CandidateStore {
             if (candidate.status === 'discovered') {
                 candidate.status = 'investigating';
             }
-            if (candidate.status === 'investigating' && candidate.evidenceRefs.length >= 2) {
+            // A single piece of evidence is enough to be "supported" —
+            // the Juror does the actual verification post-scan.
+            if (candidate.status === 'investigating' && candidate.evidenceRefs.length >= 1) {
                 candidate.status = 'supported';
             }
             candidate.updatedAt = Date.now();
@@ -207,6 +209,22 @@ export class CandidateStore {
         return all.every(c =>
             c.status === 'verified' || c.status === 'unproven' ||
             c.status === 'rejected' || c.status === 'merged' || c.status === 'blocked',
+        );
+    }
+
+    allReadyForJuror(): boolean {
+        const all = this.getAll();
+        if (all.length === 0) return true;
+        return all.every(c =>
+            c.status === 'supported' || c.status === 'verified' ||
+            c.status === 'unproven' || c.status === 'rejected' ||
+            c.status === 'merged' || c.status === 'blocked',
+        );
+    }
+
+    getUnderInvestigation(): Candidate[] {
+        return [...this.candidates.values()].filter(c =>
+            c.status === 'discovered' || c.status === 'investigating',
         );
     }
 

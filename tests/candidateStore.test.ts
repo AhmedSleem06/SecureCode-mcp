@@ -65,17 +65,17 @@ describe('Candidate Store', () => {
         expect(store.get(id)!.status).toBe('rejected');
     });
 
-    it('candidates auto-transition from discovered to investigating with evidence', () => {
+    it('candidates auto-transition from discovered to supported with evidence', () => {
         const id = store.register({
             rootCauseId: 'rc1', type: 'xss', severity: 'medium',
             locations: [], claim: 'XSS',
         });
         expect(store.get(id)!.status).toBe('discovered');
         store.addEvidence(id, 'ev1');
-        expect(store.get(id)!.status).toBe('investigating');
+        expect(store.get(id)!.status).toBe('supported');
     });
 
-    it('candidates auto-transition to supported with 2+ evidence refs', () => {
+    it('candidates stay supported with additional evidence refs', () => {
         const id = store.register({
             rootCauseId: 'rc1', type: 'xss', severity: 'medium',
             locations: [], claim: 'XSS',
