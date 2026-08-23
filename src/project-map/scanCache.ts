@@ -31,7 +31,7 @@ const CACHE_FILE = 'scan-cache.json';
  * evidenceChain, rootCause, verificationLevel on findings. Cached results
  * from v24 lack these fields and must be re-scanned.
  */
-export const AGENT_SCAN_CACHE_VERSION = 26;
+export const AGENT_SCAN_CACHE_VERSION = 27;
 
 /** Cache TTL: 7 days. Findings older than this are re-scanned. */
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
