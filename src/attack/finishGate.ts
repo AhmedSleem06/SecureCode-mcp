@@ -52,7 +52,7 @@ export interface FinishGateInput {
     candidates: CandidateStore;
     investigation: InvestigationState;
     scheduler: ScheduleDecision;
-    target: { filePath: string };
+    target: { filePath: string; fileContent?: string };
 }
 
 export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
@@ -145,13 +145,47 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
     }
 
     // Check 6: Scheduler has a deterministic action (only when checklist incomplete)
-    // When the checklist is complete, we trust it — the scheduler's evidence
-    // requirements are tracked separately and may have false positives.
     if (incompleteSteps.length > 0 && scheduler.kind === 'deterministic-action' && hasBudget && hasWallClock) {
         reasons.push({
             code: 'scheduler-has-action',
             description: `Scheduler has a deterministic action available: ${scheduler.reason}`,
         });
+    }
+
+    // Check 7: High-priority unread ranges — security-relevant code that
+    // was never read. This prevents finishing while authentication,
+    // authorization, or command-execution code remains uninspected.
+    if (hasBudget && hasWallClock && target.fileContent) {
+        const uncoveredRanges = investigation.getUncoveredRanges(target.filePath);
+        if (uncoveredRanges.length > 0) {
+            const lines = target.fileContent.split('\n');
+            const HIGH_PRIORITY_KEYWORDS = [
+                'authenticat', 'authorize', 'authorization', 'token', 'session',
+                'credential', 'password', 'execfile', 'exec(', 'spawn(',
+                'child_process', 'writefile', 'permission', 'ownership',
+                'bootstrap', 'pairing', 'sql', 'queryraw', 'eval(',
+            ];
+            for (const range of uncoveredRanges) {
+                const rangeLines = lines.slice(Math.max(0, range.start - 1), Math.min(lines.length, range.end));
+                const rangeText = rangeLines.join('\n').toLowerCase();
+                const hasHighPriority = HIGH_PRIORITY_KEYWORDS.some(kw => rangeText.includes(kw));
+                if (hasHighPriority) {
+                    reasons.push({
+                        code: 'high-priority-unread-range',
+                        description: `Unread range lines ${range.start}-${range.end} contains security-relevant code (auth, exec, token, etc.)`,
+                    });
+                    coverageGaps.push({
+                        title: `Unread high-priority range: lines ${range.start}-${range.end} of ${target.filePath}`,
+                        detail: `This unread range contains security-relevant code (authentication, authorization, command execution, or token handling). Vulnerabilities in this range were not checked.`,
+                        file: target.filePath,
+                        requiredEvidence: [`Read lines ${range.start}-${range.end} and analyze for vulnerabilities`],
+                        suggestedNextAction: 'read_file',
+                        priority: 'high',
+                    });
+                    break;
+                }
+            }
+        }
     }
 
     // Decision:

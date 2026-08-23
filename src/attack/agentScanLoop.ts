@@ -613,7 +613,7 @@ export async function runAgentScan(
                     candidates: candidateStore,
                     investigation: investigationState,
                     scheduler: schedDecision,
-                    target: { filePath: target.filePath },
+                    target: { filePath: target.filePath, fileContent: target.fileContent },
                 });
 
                 if (gateResult.accepted) {
