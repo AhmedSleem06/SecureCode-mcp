@@ -83,4 +83,33 @@ describe('selectInvestigationProfile', () => {
         expect(AUTH_SERVICE_PROFILE.requiredSteps).toContain('initial-read');
         expect(GENERIC_UTILITY_PROFILE.requiredSteps).toContain('initial-read');
     });
+
+    it('all profiles define evidence requirements', () => {
+        expect(HTTP_ROUTE_PROFILE.requirements.length).toBeGreaterThan(0);
+        expect(WEBSOCKET_RPC_PROFILE.requirements.length).toBeGreaterThan(0);
+        expect(AUTH_SERVICE_PROFILE.requirements.length).toBeGreaterThan(0);
+        expect(GENERIC_UTILITY_PROFILE.requirements.length).toBeGreaterThan(0);
+    });
+
+    it('each profile has a source-range initial-read requirement', () => {
+        const allProfiles = [HTTP_ROUTE_PROFILE, WEBSOCKET_RPC_PROFILE, AUTH_SERVICE_PROFILE, GENERIC_UTILITY_PROFILE];
+        for (const profile of allProfiles) {
+            const hasInitialRead = profile.requirements.some(r => r.acceptedKinds.includes('source-range'));
+            expect(hasInitialRead).toBe(true);
+        }
+    });
+
+    it('http route profile requires route discovery and policy check evidence', () => {
+        const hasRouteDiscovery = HTTP_ROUTE_PROFILE.requirements.some(r => r.acceptedKinds.includes('handler-inventory'));
+        const hasPolicyCheck = HTTP_ROUTE_PROFILE.requirements.some(r => r.acceptedKinds.includes('policy-result'));
+        expect(hasRouteDiscovery).toBe(true);
+        expect(hasPolicyCheck).toBe(true);
+    });
+
+    it('generic utility does not require route discovery or policy check', () => {
+        const hasRouteDiscovery = GENERIC_UTILITY_PROFILE.requirements.some(r => r.acceptedKinds.includes('handler-inventory'));
+        const hasPolicyCheck = GENERIC_UTILITY_PROFILE.requirements.some(r => r.acceptedKinds.includes('policy-result'));
+        expect(hasRouteDiscovery).toBe(false);
+        expect(hasPolicyCheck).toBe(false);
+    });
 });
