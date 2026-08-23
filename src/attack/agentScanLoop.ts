@@ -41,6 +41,7 @@ import { HandlerInventory } from '../project-map/handlerInventory';
 import { CandidateStore } from './candidateStore';
 import { schedule as schedulerDecision } from './scanScheduler';
 import { evaluateFinishGate } from './finishGate';
+import { QualityMetricsTracker } from './qualityMetrics';
 import {
     validateStartResponse,
     validateStepResponse,
@@ -119,6 +120,7 @@ export async function runAgentScan(
         // sync with this state until they are fully replaced.
         const scanState = createScanRunState(startResp.runId, target, budget);
         scanState.budget.wallClockMs = wallClockMs;
+        const qualityTracker = new QualityMetricsTracker();
 
         const transcript: AgentScanTranscriptStep[] = [];
         const investigationState = new InvestigationState();
@@ -469,6 +471,8 @@ export async function runAgentScan(
             // lost the critique content over the wire.
             if (stepResp.systemEvent) {
                 const ev = stepResp.systemEvent;
+                if (ev.eventType === 'critique') qualityTracker.recordCritique();
+                if (ev.eventType === 'finish_gate') qualityTracker.recordFinishGate();
                 transcript.push({
                     action: ev,
                     observation: ev.message,
@@ -525,6 +529,7 @@ export async function runAgentScan(
             // Finish = done with findings
             if (action.type === 'finish') {
                 scanState.finishAttempts++;
+                qualityTracker.recordFinishAttempt();
 
                 // Register candidates from findings — each finding becomes a
                 // tracked candidate. If the candidate is new (discovered), the
@@ -605,8 +610,10 @@ export async function runAgentScan(
                     trace.logRunCompleted('completed');
                     if (gateResult.mode === 'forced-incomplete') {
                         terminateScan(scanState, 'forced_incomplete', 'Budget exhausted with incomplete investigation');
+                        qualityTracker.recordForcedTermination('forced_incomplete');
                     } else {
                         terminateScan(scanState, 'agent_finish', gateResult.normalizedFinish?.summary);
+                        qualityTracker.recordTermination('agent_finish');
                     }
 
                     // Merge gate-generated coverage gaps with model-provided gaps
@@ -614,6 +621,10 @@ export async function runAgentScan(
                     if (gateResult.coverageGaps) {
                         coverageGaps = [...coverageGaps, ...gateResult.coverageGaps];
                     }
+
+                    const covSummary = investigationState.getCoverageSummary(target.filePath);
+                    qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
+                    qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
 
                     return {
                         status: 'completed',
@@ -627,11 +638,13 @@ export async function runAgentScan(
                         costSpentUsd,
                         terminationReason: gateResult.mode === 'forced-incomplete' ? 'forced_incomplete' : 'agent_finish',
                         summary: action.summary,
+                        qualityMetrics: qualityTracker.getMetrics(),
                     };
                 }
 
                 // Finish rejected — continue investigation
                 trace.logToolBlocked('finish', `Finish rejected: ${gateResult.reasons.map(r => r.description).join('; ')}`);
+                qualityTracker.recordFinishRejection();
 
                 // Add a system event so the model sees the rejection
                 const rejectionMessage = `FINISH REJECTED — your investigation is incomplete:\n${gateResult.reasons.map(r => `  - ${r.description}`).join('\n')}\n\nYou must complete the remaining investigation steps before calling finish.${gateResult.recoveryAction ? `\n\nYour next action MUST be: ${gateResult.recoveryAction.type}` : ''}`;
@@ -673,7 +686,7 @@ export async function runAgentScan(
                     } else {
                         recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
                     }
-                    investigationState.recordToolUse(recoveryAction.type);
+                    qualityTracker.recordToolUse(recoveryAction.type); investigationState.recordToolUse(recoveryAction.type);
                     trace.logToolCompleted(recoveryAction.type, recoveryObservation);
                     transcript.push({ action: recoveryAction, observation: `[FINISH GATE RECOVERY] ${recoveryObservation}` });
                 }
@@ -712,6 +725,7 @@ export async function runAgentScan(
                 const count = investigationState.getReadCount(action.path);
 
                 if (readValue.classification === 'duplicate') {
+                    qualityTracker.recordRead('duplicate', false);
                     investigationState.recordBlockedRead(action.path);
                     const nextHint = readValue.nextUnreadRange
                         ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
@@ -719,6 +733,7 @@ export async function runAgentScan(
                     observation = `BLOCKED: Lines ${action.startLine || 'all'}-${action.endLine || 'all'} of "${action.path}" were already read. The content is in the transcript above.${nextHint}\n\n${checklist}`;
                     wasBlocked = true;
                 } else if (readValue.classification === 'high-overlap') {
+                    qualityTracker.recordRead('high-overlap', false);
                     investigationState.recordBlockedRead(action.path);
                     const nextHint = readValue.nextUnreadRange
                         ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
@@ -726,12 +741,15 @@ export async function runAgentScan(
                     observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" substantially overlap already-read ranges (${readValue.newLines} new lines of ${(action.endLine || 0) - (action.startLine || 1) + 1} requested). The content is in the transcript above. Read a DIFFERENT section or use trace_flow/check_guard/check_policy to analyze what you've already read.${nextHint}\n\n${checklist}`;
                     wasBlocked = true;
                 } else if (readValue.classification === 'invalid') {
+                    qualityTracker.recordRead('invalid', false);
                     investigationState.recordBlockedRead(action.path);
                     observation = `BLOCKED: Invalid range for "${action.path}" (startLine=${action.startLine}, endLine=${action.endLine}). The requested range is inverted or out of bounds. Use a valid line range.\n\n${checklist}`;
                     wasBlocked = true;
                 } else {
+                    qualityTracker.recordRead(readValue.classification, false);
                     const readResult = await executeReadFileAction(action, ctx);
                     observation = readResult.observation;
+                    qualityTracker.recordRead(readValue.classification, readResult.truncated);
 
                     if (readResult.totalLines > 0 && !readResult.truncated) {
                         investigationState.recordActualRead(
@@ -743,7 +761,7 @@ export async function runAgentScan(
                         );
                         const rangeKey = `${normalizedPath}:${readResult.actualStart || 0}:${readResult.actualEnd || 0}`;
                         readFiles.add(rangeKey);
-                        investigationState.recordToolUse('read_file');
+                        qualityTracker.recordToolUse('read_file'); investigationState.recordToolUse('read_file');
                         meaningfulProgressSinceLastExtension = true;
                         meaningfulProgressSinceRecovery = true;
 
@@ -758,7 +776,7 @@ export async function runAgentScan(
                             readResult.totalLines,
                             readResult.truncated,
                         );
-                        investigationState.recordToolUse('read_file');
+                        qualityTracker.recordToolUse('read_file'); investigationState.recordToolUse('read_file');
                         meaningfulProgressSinceLastExtension = false;
                         meaningfulProgressSinceRecovery = false;
                     } else {
@@ -844,7 +862,7 @@ export async function runAgentScan(
                         wasBlocked = true;
                     } else {
                         observation = await executeAction(action, ctx, startResp.runId, client, target);
-                        investigationState.recordToolUse(action.type);
+                        qualityTracker.recordToolUse(action.type); investigationState.recordToolUse(action.type);
                         if (action.type === 'search_code') {
                             investigationState.recordSymbolSearch((action as any).pattern || '');
                         }
@@ -858,7 +876,7 @@ export async function runAgentScan(
                     }
                 } else {
                     observation = await executeAction(action, ctx, startResp.runId, client, target);
-                    investigationState.recordToolUse(action.type);
+                    qualityTracker.recordToolUse(action.type); investigationState.recordToolUse(action.type);
                     meaningfulProgressSinceLastExtension = true;
                     meaningfulProgressSinceRecovery = true;
                 }
@@ -933,6 +951,10 @@ export async function runAgentScan(
                         }));
                         const allGaps = [...autoGaps, ...taskGaps, ...rangeGaps];
                         terminateScan(scanState, 'blocked_read_recovery', `Agent stuck re-reading files. ${allGaps.length} coverage gaps.`);
+                        qualityTracker.recordForcedTermination('blocked_read_recovery');
+                        const covSummary = investigationState.getCoverageSummary(target.filePath);
+                        qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
+                        qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
                         return {
                             status: 'completed',
                             findings: [],
@@ -1139,7 +1161,7 @@ export async function runAgentScan(
                     } else {
                         recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
                     }
-                    investigationState.recordToolUse(recoveryAction.type);
+                    qualityTracker.recordToolUse(recoveryAction.type); investigationState.recordToolUse(recoveryAction.type);
                     consecutiveBlockedReads = 0; // recovery resets the counter
                     meaningfulProgressSinceRecovery = true; // recovery is meaningful progress
                     trace.logToolCompleted(recoveryAction.type, recoveryObservation);

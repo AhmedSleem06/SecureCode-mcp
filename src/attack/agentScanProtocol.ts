@@ -636,6 +636,7 @@ export interface AgentScanResult {
     costSpentUsd: number;
     terminationReason?: TerminationReason;
     error?: string;
+    qualityMetrics?: import('./qualityMetrics').ScanQualityMetrics;
 }
 
 // ── Verify budget ───────────────────────────────────────────────────────────
