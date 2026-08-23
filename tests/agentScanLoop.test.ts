@@ -24,6 +24,7 @@ vi.mock('../src/attack/agentScanExecutor', () => ({
 }));
 
 import { runAgentScan } from '../src/attack/agentScanLoop';
+import { sanitizeFindings, isCoherentText } from '../src/attack/agentScanLoop';
 import { ApiClient } from '../src/api/client';
 import { executeAction, executeReadFileAction } from '../src/attack/agentScanExecutor';
 
@@ -409,5 +410,110 @@ describe('runAgentScan — blocked-read recovery', () => {
         // The important thing is that the loop doesn't hang and eventually
         // terminates (either via budget, blocked_read_recovery, or api_error).
         expect(['completed', 'capped', 'spawn_failed', 'blocked_read_recovery']).toContain(result.status);
+    });
+});
+
+describe('sanitizeFindings quality guard', () => {
+    it('validates required fields and applies defaults', () => {
+        const input = [{ why: 'This is a valid explanation of the issue', evidence: 'code here' }];
+        const result = sanitizeFindings(input);
+        expect(result[0].line).toBe(0);
+        expect(result[0].type).toBe('unknown');
+        expect(result[0].severity).toBe('low');
+        expect(result[0].confidence).toBe(0.3);
+    });
+
+    it('preserves valid findings', () => {
+        const input = [{
+            line: 42, type: 'sql-injection', severity: 'high', confidence: 0.8,
+            why: 'User input flows into SQL query without parameterization',
+            evidence: 'db.query(req.body.input)',
+        }];
+        const result = sanitizeFindings(input);
+        expect(result[0].line).toBe(42);
+        expect(result[0].type).toBe('sql-injection');
+        expect(result[0].severity).toBe('high');
+        expect(result[0].confidence).toBe(0.8);
+    });
+
+    it('clamps confidence to [0, 1]', () => {
+        const result = sanitizeFindings([
+            { line: 1, type: 'xss', severity: 'medium', confidence: 5, why: 'valid explanation here', evidence: 'x' },
+            { line: 2, type: 'xss', severity: 'medium', confidence: -1, why: 'another valid explanation', evidence: 'y' },
+        ]);
+        expect(result[0].confidence).toBe(1);
+        expect(result[1].confidence).toBe(0);
+    });
+
+    it('downgrades severity on incoherent why', () => {
+        const result = sanitizeFindings([{
+            line: 1, type: 'rce', severity: 'critical', confidence: 0.9,
+            why: '   ', evidence: 'x',
+        }]);
+        expect(result[0].severity).toBe('medium');
+        expect(result[0].confidence).toBeLessThanOrEqual(0.3);
+        expect(result[0].why).toContain('Quality warning');
+    });
+
+    it('fixes invalid severity to low', () => {
+        const result = sanitizeFindings([{
+            line: 1, type: 'xss', severity: 'extreme', confidence: 0.5,
+            why: 'valid explanation text', evidence: 'x',
+        }]);
+        expect(result[0].severity).toBe('low');
+    });
+
+    it('removes invalid lineEnd', () => {
+        const result = sanitizeFindings([{
+            line: 10, lineEnd: 5, type: 'xss', severity: 'low', confidence: 0.5,
+            why: 'valid explanation text', evidence: 'x',
+        }]);
+        expect(result[0].lineEnd).toBeUndefined();
+    });
+
+    it('deduplicates findings with same type and line', () => {
+        const result = sanitizeFindings([
+            { line: 42, type: 'xss', severity: 'high', confidence: 0.8, why: 'first valid explanation', evidence: 'a' },
+            { line: 42, type: 'xss', severity: 'medium', confidence: 0.5, why: 'second valid explanation', evidence: 'b' },
+        ]);
+        expect(result.length).toBe(1);
+        expect(result[0].evidence).toBe('a');
+    });
+
+    it('handles non-array input', () => {
+        expect(sanitizeFindings(null as any)).toEqual([]);
+        expect(sanitizeFindings(undefined as any)).toEqual([]);
+    });
+
+    it('strips control characters from text fields', () => {
+        const result = sanitizeFindings([{
+            line: 1, type: 'xss', severity: 'low', confidence: 0.5,
+            why: 'valid\x00\x01explanation here', evidence: 'code\x02here',
+        }]);
+        expect(result[0].why).not.toContain('\x00');
+        expect(result[0].evidence).not.toContain('\x02');
+    });
+});
+
+describe('isCoherentText', () => {
+    it('rejects empty or very short text', () => {
+        expect(isCoherentText('')).toBe(false);
+        expect(isCoherentText('ab')).toBe(false);
+    });
+
+    it('rejects text with too few words', () => {
+        expect(isCoherentText('a b')).toBe(false);
+    });
+
+    it('accepts normal English text', () => {
+        expect(isCoherentText('This is a valid explanation')).toBe(true);
+    });
+
+    it('rejects text with control characters', () => {
+        expect(isCoherentText('valid text\x00 here')).toBe(false);
+    });
+
+    it('rejects text with low ASCII ratio', () => {
+        expect(isCoherentText('1234567890123456789012345ab')).toBe(false);
     });
 });

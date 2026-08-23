@@ -1245,7 +1245,7 @@ export async function runAgentScan(
     }
 }
 
-function isCoherentText(text: string): boolean {
+export function isCoherentText(text: string): boolean {
     if (!text || text.length < 5) return false;
     const asciiLetters = (text.match(/[a-zA-Z]/g) || []).length;
     const totalChars = text.length;
@@ -1257,28 +1257,67 @@ function isCoherentText(text: string): boolean {
     return true;
 }
 
+const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
+
 function sanitizeFindingText(text: string): string {
     if (!text) return text;
     return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFD]/g, '').trim();
 }
 
-function sanitizeFindings(findings: any[]): any[] {
-    return findings.map(f => {
-        const sanitized = { ...f };
-        if (sanitized.why) {
-            sanitized.why = sanitizeFindingText(sanitized.why);
-            if (!isCoherentText(sanitized.why)) {
-                sanitized.why = `[Quality warning: model produced incoherent explanation] ${sanitized.why || '(empty)'}`;
-                if (sanitized.severity === 'high' || sanitized.severity === 'critical') {
-                    sanitized.severity = 'medium';
-                }
-            }
+function validateFinding(f: any, index: number): { finding: any; issues: string[] } {
+    const issues: string[] = [];
+    const sanitized = { ...f };
+
+    if (typeof sanitized.line !== 'number' || sanitized.line < 1 || !Number.isFinite(sanitized.line)) {
+        issues.push(`finding[${index}]: invalid line "${sanitized.line}" — defaulting to 0`);
+        sanitized.line = 0;
+    }
+    if (typeof sanitized.type !== 'string' || sanitized.type.trim().length === 0) {
+        issues.push(`finding[${index}]: missing or empty type — defaulting to "unknown"`);
+        sanitized.type = 'unknown';
+    }
+    if (typeof sanitized.severity !== 'string' || !VALID_SEVERITIES.has(sanitized.severity)) {
+        issues.push(`finding[${index}]: invalid severity "${sanitized.severity}" — defaulting to "low"`);
+        sanitized.severity = 'low';
+    }
+    if (typeof sanitized.confidence !== 'number' || !Number.isFinite(sanitized.confidence)) {
+        issues.push(`finding[${index}]: invalid confidence — defaulting to 0.3`);
+        sanitized.confidence = 0.3;
+    } else {
+        sanitized.confidence = Math.max(0, Math.min(1, sanitized.confidence));
+    }
+    if (sanitized.lineEnd !== undefined && (typeof sanitized.lineEnd !== 'number' || sanitized.lineEnd < sanitized.line)) {
+        delete sanitized.lineEnd;
+    }
+
+    sanitized.why = sanitizeFindingText(sanitized.why || '');
+    if (!isCoherentText(sanitized.why)) {
+        issues.push(`finding[${index}]: incoherent "why" — downgrading severity`);
+        sanitized.why = `[Quality warning: model produced incoherent explanation] ${sanitized.why || '(empty)'}`;
+        if (sanitized.severity === 'high' || sanitized.severity === 'critical') {
+            sanitized.severity = 'medium';
         }
-        if (sanitized.evidence) {
-            sanitized.evidence = sanitizeFindingText(sanitized.evidence);
+        sanitized.confidence = Math.min(sanitized.confidence, 0.3);
+    }
+    sanitized.evidence = sanitizeFindingText(sanitized.evidence || '');
+
+    return { finding: sanitized, issues };
+}
+
+export function sanitizeFindings(findings: any[]): any[] {
+    if (!Array.isArray(findings)) return [];
+    const seen = new Set<string>();
+    const result: any[] = [];
+    for (let i = 0; i < findings.length; i++) {
+        const { finding, issues } = validateFinding(findings[i], i);
+        const dedupKey = `${finding.type}:${finding.line}`;
+        if (seen.has(dedupKey)) {
+            continue;
         }
-        return sanitized;
-    });
+        seen.add(dedupKey);
+        result.push(finding);
+    }
+    return result;
 }
 
 function describeAction(action: AgentScanAction): string {
