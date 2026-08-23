@@ -34,7 +34,7 @@ import {
     type ScanRunState,
 } from './scanState';
 import { EvidenceLedger } from './evidenceLedger';
-import { WorkItemQueue } from './workItem';
+import { WorkItemQueue, createArchitectureRiskWorkItem, createHandlerReviewWorkItem } from './workItem';
 import { HandlerInventory } from '../project-map/handlerInventory';
 import { CandidateStore } from './candidateStore';
 import { schedule as schedulerDecision } from './scanScheduler';
@@ -150,6 +150,20 @@ export async function runAgentScan(
             (target as any).architectureContext, target.filePath,
         );
         investigationState.addInvestigationTasks(archTasks);
+        // Create work items for architecture-risk tasks so the scheduler
+        // can prioritize them and suggest deterministic actions.
+        for (const task of archTasks) {
+            workItemQueue.add(createArchitectureRiskWorkItem(
+                task.claim,
+                task.targetFiles,
+                task.requiredEvidence.map((req, i) => ({
+                    id: `${task.id}-req-${i}`,
+                    description: req,
+                    acceptedKinds: ['source-range', 'cross-file-flow', 'policy-result'] as any,
+                    minimumCount: 1,
+                })),
+            ));
+        }
         const readFiles = new Set<string>();
         const readFileCounts = new Map<string, number>();
         // Dynamic read cap based on file size:
@@ -917,6 +931,27 @@ export async function runAgentScan(
                         if (matchesLocation) {
                             const evidenceId = `${action.type}:${actionFileNorm}:${stepsTaken}`;
                             candidateStore.addEvidence(candidate.id, evidenceId);
+                        }
+                    }
+                }
+            }
+
+            // Link evidence to work items: when the agent runs an action on
+            // a file that matches a work item's target files, add evidence
+            // and resolve the work item if it has enough evidence.
+            if (!wasBlocked && workItemQueue.size() > 0) {
+                const actionFile = (action as any).filePath || (action as any).path || target.filePath;
+                const actionFileNorm = String(actionFile).replace(/\\/g, '/').toLowerCase();
+                for (const item of workItemQueue.getExecutable()) {
+                    const matchesFile = item.targetFiles.some(
+                        f => f.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
+                    );
+                    if (matchesFile) {
+                        const evidenceId = `${action.type}:${actionFileNorm}:${stepsTaken}`;
+                        workItemQueue.addEvidence(item.id, evidenceId);
+                        // Resolve if enough evidence collected
+                        if (item.evidenceRefs.length >= item.requirements.length) {
+                            workItemQueue.resolve(item.id);
                         }
                     }
                 }
