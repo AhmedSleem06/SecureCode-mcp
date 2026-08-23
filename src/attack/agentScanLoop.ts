@@ -233,6 +233,7 @@ export async function runAgentScan(
         let consecutiveErrors = 0;
         let consecutiveBlockedReads = 0;
         let meaningfulProgressSinceRecovery = true;
+        let aggressiveCompaction = false;
 
         while (true) {
             // Wall clock check
@@ -305,10 +306,13 @@ export async function runAgentScan(
                 }
             }
 
+            const compactedTranscript = aggressiveCompaction
+                ? compactTranscriptAggressive(transcript)
+                : compactTranscript(transcript);
             const stepReq: AgentScanStepRequest = {
                 runId: startResp.runId,
                 target,
-                transcript,
+                transcript: compactedTranscript,
                 budget: {
                     stepsRemaining: budget.stepsRemaining,
                     costSpentUsd,
@@ -406,6 +410,13 @@ export async function runAgentScan(
                         investigationNotes: [],
                         coverageGaps: [],
                     };
+                }
+
+                // Detect timeout / network errors — retry once with aggressive compaction
+                if (!aggressiveCompaction && /timeout|ETIMEDOUT|ESOCKETTIMEDOUT|socket hang up|ECONNRESET|fetch failed/i.test(errMsg)) {
+                    console.warn(`[Agent Scan Loop] Step ${stepsTaken + 1} timeout/network error — retrying with aggressive compaction: ${errMsg}`);
+                    aggressiveCompaction = true;
+                    continue;
                 }
 
                 // The API rejected the action (malformed, missing field, etc).
@@ -1255,6 +1266,76 @@ export function isCoherentText(text: string): boolean {
     const words = text.split(/\s+/).filter(w => w.length > 1);
     if (words.length < 3) return false;
     return true;
+}
+
+const TRANSCRIPT_CHAR_BUDGET = 120_000;
+const TRANSCRIPT_KEEP_RECENT = 12;
+const TRANSCRIPT_SUMMARY_LEN = 200;
+
+export function estimateTranscriptSize(transcript: { action: any; observation: string }[]): number {
+    let size = 0;
+    for (const step of transcript) {
+        size += (step.observation || '').length;
+        size += JSON.stringify(step.action || {}).length;
+    }
+    return size;
+}
+
+export function compactTranscript(transcript: { action: any; observation: string }[]): { action: any; observation: string }[] {
+    const totalSize = estimateTranscriptSize(transcript);
+    if (totalSize <= TRANSCRIPT_CHAR_BUDGET || transcript.length <= TRANSCRIPT_KEEP_RECENT) {
+        return transcript;
+    }
+    const cutoff = transcript.length - TRANSCRIPT_KEEP_RECENT;
+    const compacted: { action: any; observation: string }[] = [];
+    for (let i = 0; i < transcript.length; i++) {
+        if (i < cutoff) {
+            const obs = transcript[i].observation || '';
+            const actionType = transcript[i].action?.type || 'unknown';
+            if (actionType === 'system_event' || actionType === 'finish') {
+                compacted.push(transcript[i]);
+            } else if (obs.length > TRANSCRIPT_SUMMARY_LEN) {
+                compacted.push({
+                    action: transcript[i].action,
+                    observation: obs.slice(0, TRANSCRIPT_SUMMARY_LEN) + '\n...[compacted]',
+                });
+            } else {
+                compacted.push(transcript[i]);
+            }
+        } else {
+            compacted.push(transcript[i]);
+        }
+    }
+    return compacted;
+}
+
+export function compactTranscriptAggressive(transcript: { action: any; observation: string }[]): { action: any; observation: string }[] {
+    const keepRecent = 6;
+    const summaryLen = 100;
+    if (transcript.length <= keepRecent) {
+        return transcript;
+    }
+    const cutoff = transcript.length - keepRecent;
+    const compacted: { action: any; observation: string }[] = [];
+    for (let i = 0; i < transcript.length; i++) {
+        if (i < cutoff) {
+            const obs = transcript[i].observation || '';
+            const actionType = transcript[i].action?.type || 'unknown';
+            if (actionType === 'system_event' || actionType === 'finish') {
+                compacted.push(transcript[i]);
+            } else if (obs.length > summaryLen) {
+                compacted.push({
+                    action: transcript[i].action,
+                    observation: obs.slice(0, summaryLen) + '\n...[compacted]',
+                });
+            } else {
+                compacted.push(transcript[i]);
+            }
+        } else {
+            compacted.push(transcript[i]);
+        }
+    }
+    return compacted;
 }
 
 const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);

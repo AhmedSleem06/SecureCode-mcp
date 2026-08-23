@@ -24,7 +24,7 @@ vi.mock('../src/attack/agentScanExecutor', () => ({
 }));
 
 import { runAgentScan } from '../src/attack/agentScanLoop';
-import { sanitizeFindings, isCoherentText } from '../src/attack/agentScanLoop';
+import { sanitizeFindings, isCoherentText, estimateTranscriptSize, compactTranscript, compactTranscriptAggressive } from '../src/attack/agentScanLoop';
 import { ApiClient } from '../src/api/client';
 import { executeAction, executeReadFileAction } from '../src/attack/agentScanExecutor';
 
@@ -515,5 +515,96 @@ describe('isCoherentText', () => {
 
     it('rejects text with low ASCII ratio', () => {
         expect(isCoherentText('1234567890123456789012345ab')).toBe(false);
+    });
+});
+
+describe('compactTranscript', () => {
+    function makeStep(obs: string, type = 'read_file'): { action: any; observation: string } {
+        return { action: { type, path: 'test.ts' }, observation: obs };
+    }
+
+    it('returns transcript unchanged when under budget', () => {
+        const small = [makeStep('short observation text here'), makeStep('another short one')];
+        expect(compactTranscript(small)).toBe(small);
+    });
+
+    it('returns transcript unchanged when fewer than keep-recent steps', () => {
+        const tiny = [makeStep('x'.repeat(200000))];
+        expect(compactTranscript(tiny)).toBe(tiny);
+    });
+
+    it('compacts old steps when over budget', () => {
+        const steps: { action: any; observation: string }[] = [];
+        for (let i = 0; i < 20; i++) {
+            steps.push(makeStep('x'.repeat(10000), 'read_file'));
+        }
+        const result = compactTranscript(steps);
+        const resultSize = estimateTranscriptSize(result);
+        expect(resultSize).toBeLessThan(estimateTranscriptSize(steps));
+        expect(result.length).toBe(20);
+    });
+
+    it('preserves recent steps at full fidelity', () => {
+        const steps: { action: any; observation: string }[] = [];
+        for (let i = 0; i < 20; i++) {
+            steps.push(makeStep('x'.repeat(10000), 'read_file'));
+        }
+        const result = compactTranscript(steps);
+        for (let i = result.length - 12; i < result.length; i++) {
+            expect(result[i].observation.length).toBe(10000);
+        }
+    });
+
+    it('preserves system_event steps at full fidelity', () => {
+        const steps: { action: any; observation: string }[] = [];
+        for (let i = 0; i < 20; i++) {
+            steps.push(makeStep('x'.repeat(10000), 'read_file'));
+        }
+        steps.splice(2, 0, makeStep('x'.repeat(10000), 'system_event'));
+        const result = compactTranscript(steps);
+        const eventStep = result.find(s => s.action.type === 'system_event');
+        expect(eventStep).toBeDefined();
+        expect(eventStep!.observation.length).toBe(10000);
+    });
+
+    it('adds compaction marker to truncated observations', () => {
+        const steps: { action: any; observation: string }[] = [];
+        for (let i = 0; i < 20; i++) {
+            steps.push(makeStep('x'.repeat(10000), 'read_file'));
+        }
+        const result = compactTranscript(steps);
+        expect(result[0].observation).toContain('[compacted]');
+    });
+});
+
+describe('compactTranscriptAggressive', () => {
+    it('keeps only 6 recent steps at full fidelity', () => {
+        const steps: { action: any; observation: string }[] = [];
+        for (let i = 0; i < 20; i++) {
+            steps.push({ action: { type: 'read_file', path: 'test.ts' }, observation: 'x'.repeat(10000) });
+        }
+        const result = compactTranscriptAggressive(steps);
+        for (let i = result.length - 6; i < result.length; i++) {
+            expect(result[i].observation.length).toBe(10000);
+        }
+        expect(result[0].observation.length).toBeLessThan(200);
+    });
+
+    it('returns unchanged when fewer than 6 steps', () => {
+        const tiny = [{ action: { type: 'read_file' }, observation: 'short' }];
+        expect(compactTranscriptAggressive(tiny)).toBe(tiny);
+    });
+});
+
+describe('estimateTranscriptSize', () => {
+    it('sums observation and action sizes', () => {
+        const steps = [
+            { action: { type: 'read_file', path: 'a.ts' }, observation: 'hello world' },
+        ];
+        expect(estimateTranscriptSize(steps)).toBeGreaterThan(20);
+    });
+
+    it('handles empty transcript', () => {
+        expect(estimateTranscriptSize([])).toBe(0);
     });
 });
