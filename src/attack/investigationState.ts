@@ -476,7 +476,7 @@ export class InvestigationState {
         return { start: firstGap.start, end };
     }
 
-    getPrioritizedUnreadRange(filePath: string, fileContent: string, chunkSize?: number, candidateLocations?: LineRange[]): LineRange | null {
+    getPrioritizedUnreadRange(filePath: string, fileContent: string, chunkSize?: number, candidateLocations?: LineRange[], functionBoundaries?: { name: string; startLine: number; endLine: number }[]): LineRange | null {
         const coverage = this.getCoverage(filePath);
         if (!coverage || !coverage.totalLines) return null;
 
@@ -486,7 +486,7 @@ export class InvestigationState {
 
         if (gaps.length === 1) {
             const end = Math.min(gaps[0].start + chunk - 1, gaps[0].end);
-            return { start: gaps[0].start, end };
+            return this.snapToFunctionBoundary(gaps[0].start, end, functionBoundaries);
         }
 
         const lines = fileContent.split('\n');
@@ -515,6 +515,17 @@ export class InvestigationState {
                 }
             }
 
+            if (functionBoundaries) {
+                for (const fn of functionBoundaries) {
+                    if (fn.startLine >= gap.start && fn.startLine <= gap.end) {
+                        score += 15;
+                    }
+                    if (fn.endLine >= gap.start && fn.endLine <= gap.end) {
+                        score += 10;
+                    }
+                }
+            }
+
             score += Math.min(gap.end - gap.start, chunk) * 0.01;
 
             if (score > bestScore) {
@@ -524,7 +535,22 @@ export class InvestigationState {
         }
 
         const end = Math.min(bestGap.start + chunk - 1, bestGap.end);
-        return { start: bestGap.start, end };
+        return this.snapToFunctionBoundary(bestGap.start, end, functionBoundaries);
+    }
+
+    private snapToFunctionBoundary(start: number, end: number, boundaries?: { name: string; startLine: number; endLine: number }[]): LineRange {
+        if (!boundaries || boundaries.length === 0) return { start, end };
+        let snappedStart = start;
+        let snappedEnd = end;
+        for (const fn of boundaries) {
+            if (fn.startLine >= start && fn.startLine <= end && fn.endLine > end) {
+                snappedEnd = Math.min(fn.endLine, end + 100);
+            }
+            if (fn.endLine >= start && fn.endLine <= end && fn.startLine < start) {
+                snappedStart = Math.max(fn.startLine, start - 20);
+            }
+        }
+        return { start: snappedStart, end: snappedEnd };
     }
 
     /**

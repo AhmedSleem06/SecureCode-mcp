@@ -46,6 +46,7 @@ export interface SchedulerInput {
     candidates: CandidateStore;
     investigation: InvestigationState;
     target: AgentScanTarget;
+    functionBoundaries?: { name: string; startLine: number; endLine: number }[];
 }
 
 export function schedule(input: SchedulerInput): ScheduleDecision {
@@ -79,7 +80,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
     // to read the most security-relevant uncovered range first.
     const candidateLocations = candidates.getAll().flatMap(c => c.locations.map(l => ({ start: l.line, end: l.line })));
     const nextRange = target.fileContent
-        ? investigation.getPrioritizedUnreadRange(target.filePath, target.fileContent, undefined, candidateLocations)
+        ? investigation.getPrioritizedUnreadRange(target.filePath, target.fileContent, undefined, candidateLocations, input.functionBoundaries)
         : investigation.getNextUnreadRange(target.filePath);
     if (nextRange) {
         const coverage = investigation.getCoverage(target.filePath);

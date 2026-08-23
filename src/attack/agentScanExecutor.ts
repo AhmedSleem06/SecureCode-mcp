@@ -101,11 +101,27 @@ function escapeRegex(s: string): string {
 }
 
 export async function extractFunctionMap(content: string, relPath: string): Promise<string | null> {
+    const boundaries = await extractFunctionBoundaries(content, relPath);
+    if (!boundaries || boundaries.length === 0) return null;
+    const parts = ['Function map (use read_file with startLine/endLine to read specific sections):'];
+    for (const f of boundaries) {
+        parts.push(`  L${f.startLine}-${f.endLine} (${f.endLine - f.startLine + 1}L) ${f.name} [${f.kind}]`);
+    }
+    return parts.join('\n');
+}
+
+export interface FunctionBoundary {
+    name: string;
+    startLine: number;
+    endLine: number;
+    kind: string;
+}
+
+export async function extractFunctionBoundaries(content: string, relPath: string): Promise<FunctionBoundary[] | null> {
     try {
         const { parseSource } = await import('../project-map/parserLoader');
         const { walk } = await import('../project-map/astHelpers');
 
-        // Infer language from path
         const ext = path.extname(relPath).toLowerCase();
         const langMap: Record<string, string> = {
             '.ts': 'typescript', '.tsx': 'tsx', '.js': 'javascript',
@@ -118,7 +134,7 @@ export async function extractFunctionMap(content: string, relPath: string): Prom
         if (!parsed) return null;
 
         const { root } = parsed;
-        const entries: string[] = [];
+        const entries: FunctionBoundary[] = [];
         const FUNCTION_TYPES = new Set([
             'function_declaration', 'async_function_declaration',
             'method_definition', 'async_method_definition',
@@ -129,7 +145,6 @@ export async function extractFunctionMap(content: string, relPath: string): Prom
         for (const node of walk(root)) {
             if (!FUNCTION_TYPES.has(node.type)) continue;
 
-            // Get the name (first identifier child or property_identifier)
             let name = '';
             for (const child of node.children) {
                 if (child.type === 'identifier' || child.type === 'property_identifier' || child.type === 'type_identifier') {
@@ -139,36 +154,15 @@ export async function extractFunctionMap(content: string, relPath: string): Prom
             }
             if (!name) continue;
 
-            const startLine = node.startPosition.row + 1;
-            const endLine = node.endPosition.row + 1;
-            const lineCount = endLine - startLine + 1;
-            const kind = node.type.replace(/_/g, ' ');
-            entries.push(`  L${startLine}-${endLine} (${lineCount}L) ${name} [${kind}]`);
+            entries.push({
+                name,
+                startLine: node.startPosition.row + 1,
+                endLine: node.endPosition.row + 1,
+                kind: node.type.replace(/_/g, ' '),
+            });
         }
 
-        if (entries.length === 0) return null;
-
-        // Also include export-level structure for TS/JS
-        const exportLines: string[] = [];
-        for (const node of walk(root)) {
-            if (node.type === 'export_statement') {
-                const text = content.slice(node.startIndex, node.endIndex);
-                const firstLine = text.split('\n')[0];
-                if (firstLine.length > 100) {
-                    exportLines.push(`  L${node.startPosition.row + 1} ${firstLine.slice(0, 100)}...`);
-                } else {
-                    exportLines.push(`  L${node.startPosition.row + 1} ${firstLine}`);
-                }
-            }
-        }
-
-        const parts = ['Function map (use read_file with startLine/endLine to read specific sections):'];
-        parts.push(...entries);
-        if (exportLines.length > 0 && exportLines.length <= 20) {
-            parts.push('', 'Exports:');
-            parts.push(...exportLines);
-        }
-        return parts.join('\n');
+        return entries.length > 0 ? entries : null;
     } catch {
         return null;
     }

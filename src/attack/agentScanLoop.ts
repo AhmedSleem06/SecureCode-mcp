@@ -42,6 +42,7 @@ import { CandidateStore } from './candidateStore';
 import { schedule as schedulerDecision } from './scanScheduler';
 import { evaluateFinishGate } from './finishGate';
 import { QualityMetricsTracker } from './qualityMetrics';
+import { extractFunctionBoundaries } from './agentScanExecutor';
 import {
     validateStartResponse,
     validateStepResponse,
@@ -191,6 +192,12 @@ export async function runAgentScan(
         }
         const readFiles = new Set<string>();
         const readFileCounts = new Map<string, number>();
+        // Pre-compute function boundaries for chunk alignment
+        let functionBoundaries: { name: string; startLine: number; endLine: number }[] | undefined;
+        try {
+            const fb = await extractFunctionBoundaries(target.fileContent, target.filePath);
+            if (fb) functionBoundaries = fb;
+        } catch { /* best-effort */ }
         // Dynamic read cap based on file size:
         //   < 200 lines  → 5 reads (small file, 5 chunks is enough)
         //   < 1000 lines  → 8 reads (medium file)
@@ -594,6 +601,7 @@ export async function runAgentScan(
                     candidates: candidateStore,
                     investigation: investigationState,
                     target,
+                    functionBoundaries,
                 });
 
                 const gateResult = evaluateFinishGate({
