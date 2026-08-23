@@ -418,6 +418,7 @@ export class InvestigationState {
             case 'trace_flow':
             case 'trace_flow_cross_file':
                 this.markStepComplete('cross-file-flow');
+                this.markStepComplete('ownership-analysis');
                 break;
             case 'read_config':
                 this.markStepComplete('config-inspection');

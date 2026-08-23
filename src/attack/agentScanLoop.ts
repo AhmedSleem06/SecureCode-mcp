@@ -1043,8 +1043,17 @@ export async function runAgentScan(
                                 ));
                             }
                         }
+                    } else {
+                        // No handlers found — auto-complete all-handlers-reviewed
+                        investigationState.markAllHandlersReviewed();
                     }
                 } catch { /* best-effort */ }
+            }
+
+            // Auto-complete all-handlers-reviewed if handler inventory is
+            // empty (no handlers to review for this file type)
+            if (handlerInventory.size() === 0 && !investigationState.getCompletedSteps().includes('all-handlers-reviewed' as any)) {
+                investigationState.markAllHandlersReviewed();
             }
 
             // Handler review tracking: when the agent reads a file range that
