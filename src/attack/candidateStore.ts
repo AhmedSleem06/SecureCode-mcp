@@ -43,6 +43,14 @@ export interface CandidateVerification {
     mutationDiscriminating: boolean;
 }
 
+export type ProofDimension =
+    | 'source'
+    | 'reachability'
+    | 'control'
+    | 'threat-model'
+    | 'impact'
+    | 'verification';
+
 export interface Candidate {
     id: string;
     rootCauseId: string;
@@ -54,8 +62,11 @@ export interface Candidate {
     evidenceRefs: string[];
     evidenceCategories?: EvidenceCategory[];
     requiredEvidence: EvidenceRequirement[];
+    requiredProofDimensions?: ProofDimension[];
+    satisfiedDimensions?: ProofDimension[];
     verification?: CandidateVerification;
     mergedInto?: string;
+    blockedReason?: string;
     createdAt: number;
     updatedAt: number;
 }
@@ -69,6 +80,7 @@ export interface CandidateRegistration {
     locations: EvidenceLocation[];
     claim: string;
     requiredEvidence?: EvidenceRequirement[];
+    requiredProofDimensions?: ProofDimension[];
 }
 
 export type EvidenceCategory =
@@ -106,6 +118,12 @@ export class CandidateStore {
 
         const id = `candidate-${++candidateIdCounter}`;
         const now = Date.now();
+        const defaultDimensions: ProofDimension[] = input.severity === 'critical' || input.severity === 'high'
+            ? ['source', 'reachability', 'control', 'threat-model', 'impact', 'verification']
+            : input.severity === 'medium'
+                ? ['source', 'reachability', 'control', 'threat-model']
+                : ['source', 'control'];
+        const requiredProofDimensions = input.requiredProofDimensions || defaultDimensions;
         const candidate: Candidate = {
             id,
             rootCauseId: input.rootCauseId,
@@ -116,6 +134,8 @@ export class CandidateStore {
             status: 'discovered',
             evidenceRefs: [],
             requiredEvidence: input.requiredEvidence || [],
+            requiredProofDimensions,
+            satisfiedDimensions: [],
             createdAt: now,
             updatedAt: now,
         };
@@ -168,10 +188,15 @@ export class CandidateStore {
     }
 
     setBlocked(id: string, reason: string): void {
-        this.update(id, { status: 'blocked', verification: undefined });
+        const candidate = this.candidates.get(id);
+        if (!candidate) return;
+        candidate.status = 'blocked';
+        candidate.blockedReason = reason;
+        candidate.verification = undefined;
+        candidate.updatedAt = Date.now();
     }
 
-    addEvidence(id: string, evidenceRef: string, category?: EvidenceCategory): void {
+    addEvidence(id: string, evidenceRef: string, category?: EvidenceCategory, dimension?: ProofDimension): void {
         const candidate = this.candidates.get(id);
         if (candidate && !candidate.evidenceRefs.includes(evidenceRef)) {
             candidate.evidenceRefs.push(evidenceRef);
@@ -181,19 +206,44 @@ export class CandidateStore {
                     candidate.evidenceCategories.push(category);
                 }
             }
+            if (dimension) {
+                if (!candidate.satisfiedDimensions) candidate.satisfiedDimensions = [];
+                if (!candidate.satisfiedDimensions.includes(dimension)) {
+                    candidate.satisfiedDimensions.push(dimension);
+                }
+            }
             if (candidate.status === 'discovered') {
                 candidate.status = 'investigating';
             }
-            const categories = candidate.evidenceCategories || [];
-            const categoryCount = categories.length;
-            const minCategories = (candidate.severity === 'critical' || candidate.severity === 'high') ? 2 : 1;
-            if (candidate.status === 'investigating' && categoryCount >= minCategories) {
-                candidate.status = 'supported';
-            } else if (candidate.status === 'investigating' && candidate.evidenceRefs.length >= 1 && categoryCount === 0) {
-                candidate.status = 'supported';
+            const required = candidate.requiredProofDimensions || [];
+            const satisfied = candidate.satisfiedDimensions || [];
+            if (candidate.status === 'investigating' && required.length > 0) {
+                const allDimensionsSatisfied = required.every(d => satisfied.includes(d));
+                if (allDimensionsSatisfied) {
+                    candidate.status = 'supported';
+                }
+            } else if (candidate.status === 'investigating' && required.length === 0) {
+                const categories = candidate.evidenceCategories || [];
+                const categoryCount = categories.length;
+                const minCategories = (candidate.severity === 'critical' || candidate.severity === 'high') ? 2 : 1;
+                if (categoryCount >= minCategories) {
+                    candidate.status = 'supported';
+                } else if (candidate.evidenceRefs.length >= 1 && categoryCount === 0) {
+                    candidate.status = 'supported';
+                }
             }
             candidate.updatedAt = Date.now();
         }
+    }
+
+    isReadyForJuror(id: string): boolean {
+        const candidate = this.candidates.get(id);
+        if (!candidate) return false;
+        if (candidate.status !== 'supported') return false;
+        const required = candidate.requiredProofDimensions || [];
+        if (required.length === 0) return true;
+        const satisfied = candidate.satisfiedDimensions || [];
+        return required.every(d => satisfied.includes(d));
     }
 
     getCandidatesByRootCause(rootCauseId: string): Candidate[] {

@@ -657,15 +657,23 @@ export async function runAgentScan(
                                         : step.action.type === 'check_guard' ? 'guard' as const
                                         : step.action.type === 'check_policy' ? 'policy' as const
                                         : undefined;
-                                    candidateStore.addEvidence(candidateId, `backfill:${step.action.type}:${stepFileNorm}`, cat);
+                                    const dim = step.action.type === 'trace_flow' || step.action.type === 'trace_flow_cross_file' ? 'reachability' as const
+                                        : step.action.type === 'check_guard' || step.action.type === 'check_policy' ? 'control' as const
+                                        : undefined;
+                                    candidateStore.addEvidence(candidateId, `backfill:${step.action.type}:${stepFileNorm}`, cat, dim);
                                 }
                             }
                             if (step.action.type === 'read_file') {
                                 const stepFile = (step.action as any).path || target.filePath;
                                 const stepFileNorm = String(stepFile).replace(/\\/g, '/').toLowerCase();
                                 if (stepFileNorm === targetFileNorm) {
-                                    candidateStore.addEvidence(candidateId, `backfill:source:${stepFileNorm}`, 'source');
+                                    candidateStore.addEvidence(candidateId, `backfill:source:${stepFileNorm}`, 'source', 'source');
                                 }
+                            }
+                            if (step.action.type === 'read_config') {
+                                const stepFile = target.filePath;
+                                const stepFileNorm = stepFile.replace(/\\/g, '/').toLowerCase();
+                                candidateStore.addEvidence(candidateId, `backfill:config:${stepFileNorm}`, undefined, 'threat-model');
                             }
                         }
                     }

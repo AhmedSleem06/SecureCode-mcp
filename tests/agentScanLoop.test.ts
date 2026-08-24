@@ -52,8 +52,10 @@ function completeChecklistSteps(findings: any[] = [], summary: string = 'done') 
     return [
         { next: { type: 'read_file', path: 'test.ts', startLine: 1, endLine: 50, rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 39 },
         { next: { type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 38 },
-        { next: { type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 37 },
-        { next: { type: 'finish', findings, summary, selfCritique: 'done' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 36 },
+        { next: { type: 'check_policy', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 37 },
+        { next: { type: 'read_config', configKind: 'all', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 36 },
+        { next: { type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 35 },
+        { next: { type: 'finish', findings, summary, selfCritique: 'done' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 34 },
     ];
 }
 
@@ -63,7 +65,7 @@ describe('runAgentScan — termination', () => {
     it('terminates on finish action', async () => {
         mockPostJson([
             { runId: 'run-1', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 0.40, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
-            ...completeChecklistSteps([{ line: 10, type: 'broken_access_control', severity: 'high', confidence: 85, evidence: 'no check', why: 'missing ownership' }], 'Found issue'),
+            ...completeChecklistSteps([{ line: 10, type: 'broken_access_control', severity: 'medium', confidence: 85, evidence: 'no check', why: 'missing ownership' }], 'Found issue'),
         ]);
         (executeReadFileAction as any).mockResolvedValue({
             observation: 'file content here', actualStart: 1, actualEnd: 100, totalLines: 100, truncated: false,

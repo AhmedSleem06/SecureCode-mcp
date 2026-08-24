@@ -69,6 +69,7 @@ describe('Candidate Store', () => {
         const id = store.register({
             rootCauseId: 'rc1', type: 'xss', severity: 'medium',
             locations: [], claim: 'XSS',
+            requiredProofDimensions: [],
         });
         expect(store.get(id)!.status).toBe('discovered');
         store.addEvidence(id, 'ev1');
@@ -79,6 +80,7 @@ describe('Candidate Store', () => {
         const id = store.register({
             rootCauseId: 'rc1', type: 'xss', severity: 'medium',
             locations: [], claim: 'XSS',
+            requiredProofDimensions: [],
         });
         store.addEvidence(id, 'ev1');
         store.addEvidence(id, 'ev2');
@@ -89,6 +91,7 @@ describe('Candidate Store', () => {
         const id = store.register({
             rootCauseId: 'rc1', type: 'xss', severity: 'high',
             locations: [], claim: 'XSS',
+            requiredProofDimensions: [],
         });
         store.setVerified(id, {
             verdict: 'PROVEN', reason: 'exploit confirmed',
@@ -121,7 +124,7 @@ describe('Candidate Store', () => {
     });
 
     it('snapshot returns summary counts', () => {
-        const id = store.register({ rootCauseId: 'rc1', type: 'a', severity: 'low', locations: [], claim: 'A' });
+        const id = store.register({ rootCauseId: 'rc1', type: 'a', severity: 'low', locations: [], claim: 'A', requiredProofDimensions: [] });
         store.addEvidence(id, 'ev1');
         store.setUnproven(id, 'done');
         const snap = store.snapshot();
@@ -157,5 +160,89 @@ describe('Candidate Store', () => {
         expect(rc1Candidates).toHaveLength(1); // merged
         const rc2Candidates = store.getCandidatesByRootCause('rc2');
         expect(rc2Candidates).toHaveLength(1);
+    });
+
+    it('high-severity candidate requires all proof dimensions before supported', () => {
+        const id = store.register({
+            rootCauseId: 'rc-shell', type: 'command_injection', severity: 'high',
+            locations: [{ filePath: 'wsRpc.ts', line: 42 }], claim: 'Shell exec',
+        });
+        store.addEvidence(id, 'ev1', 'source', 'source');
+        expect(store.get(id)!.status).toBe('investigating');
+        store.addEvidence(id, 'ev2', 'flow', 'reachability');
+        expect(store.get(id)!.status).toBe('investigating');
+        store.addEvidence(id, 'ev3', 'guard', 'control');
+        expect(store.get(id)!.status).toBe('investigating');
+        store.addEvidence(id, 'ev4', 'policy', 'threat-model');
+        expect(store.get(id)!.status).toBe('investigating');
+        store.addEvidence(id, 'ev5', 'impact', 'impact');
+        expect(store.get(id)!.status).toBe('investigating');
+        store.addEvidence(id, 'ev6', 'test', 'verification');
+        expect(store.get(id)!.status).toBe('supported');
+    });
+
+    it('two source reads do NOT support a high-severity candidate', () => {
+        const id = store.register({
+            rootCauseId: 'rc1', type: 'xss', severity: 'high',
+            locations: [], claim: 'XSS',
+        });
+        store.addEvidence(id, 'ev1', 'source', 'source');
+        store.addEvidence(id, 'ev2', 'source', 'source');
+        expect(store.get(id)!.status).toBe('investigating');
+    });
+
+    it('medium candidate requires source, reachability, control, and threat-model', () => {
+        const id = store.register({
+            rootCauseId: 'rc1', type: 'xss', severity: 'medium',
+            locations: [], claim: 'XSS',
+        });
+        store.addEvidence(id, 'ev1', undefined, 'source');
+        store.addEvidence(id, 'ev2', undefined, 'reachability');
+        store.addEvidence(id, 'ev3', undefined, 'control');
+        expect(store.get(id)!.status).toBe('investigating');
+        store.addEvidence(id, 'ev4', undefined, 'threat-model');
+        expect(store.get(id)!.status).toBe('supported');
+    });
+
+    it('isReadyForJuror returns false for incomplete proof dimensions', () => {
+        const id = store.register({
+            rootCauseId: 'rc1', type: 'xss', severity: 'high',
+            locations: [], claim: 'XSS',
+        });
+        store.addEvidence(id, 'ev1', 'source', 'source');
+        store.addEvidence(id, 'ev2', 'flow', 'reachability');
+        expect(store.isReadyForJuror(id)).toBe(false);
+    });
+
+    it('setBlocked preserves the reason', () => {
+        const id = store.register({
+            rootCauseId: 'rc1', type: 'xss', severity: 'high',
+            locations: [], claim: 'XSS',
+        });
+        store.setBlocked(id, 'Max attempts reached for trace_flow');
+        expect(store.get(id)!.status).toBe('blocked');
+        expect(store.get(id)!.blockedReason).toBe('Max attempts reached for trace_flow');
+    });
+
+    it('default proof dimensions are set based on severity', () => {
+        const highId = store.register({
+            rootCauseId: 'rc-h', type: 'xss', severity: 'high',
+            locations: [], claim: 'H',
+        });
+        expect(store.get(highId)!.requiredProofDimensions).toContain('impact');
+        expect(store.get(highId)!.requiredProofDimensions).toContain('verification');
+
+        const medId = store.register({
+            rootCauseId: 'rc-m', type: 'xss', severity: 'medium',
+            locations: [], claim: 'M',
+        });
+        expect(store.get(medId)!.requiredProofDimensions).toContain('threat-model');
+        expect(store.get(medId)!.requiredProofDimensions).not.toContain('impact');
+
+        const lowId = store.register({
+            rootCauseId: 'rc-l', type: 'xss', severity: 'low',
+            locations: [], claim: 'L',
+        });
+        expect(store.get(lowId)!.requiredProofDimensions).toEqual(['source', 'control']);
     });
 });
