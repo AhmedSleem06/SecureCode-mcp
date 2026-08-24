@@ -65,6 +65,14 @@ export interface ScanQualityMetrics {
         sanitizedFindings: number;
         downgradedFindings: number;
     };
+    proof: {
+        requiredEvidenceChainRate: number;
+        rootCauseCorrelationRate: number;
+        resolvedArchitectureRiskRate: number;
+        structuredCrossFileFlowRate: number;
+        highPriorityGapCount: number;
+        unsupportedFindingCount: number;
+    };
     budget: {
         stepsUsed: number;
         stepsGranted: number;
@@ -134,6 +142,14 @@ export function createQualityMetrics(): ScanQualityMetrics {
             malformedOutputCount: 0,
             sanitizedFindings: 0,
             downgradedFindings: 0,
+        },
+        proof: {
+            requiredEvidenceChainRate: 0,
+            rootCauseCorrelationRate: 0,
+            resolvedArchitectureRiskRate: 0,
+            structuredCrossFileFlowRate: 0,
+            highPriorityGapCount: 0,
+            unsupportedFindingCount: 0,
         },
         budget: {
             stepsUsed: 0,
@@ -246,6 +262,30 @@ export class QualityMetricsTracker {
 
     recordBudget(stepsUsed: number, stepsGranted: number, extensionsGranted: number, costSpentUsd: number, costCapUsd: number, wallClockMs: number, elapsedMs: number): void {
         this.metrics.budget = { stepsUsed, stepsGranted, extensionsGranted, costSpentUsd, costCapUsd, wallClockMs, elapsedMs };
+    }
+
+    recordProofMetrics(input: {
+        totalFindings: number;
+        supportedFindings: number;
+        totalRisks: number;
+        resolvedRisks: number;
+        structuredFlows: number;
+        totalFlows: number;
+        highPriorityGaps: number;
+        unsupportedFindings: number;
+        rootCauseGroups: number;
+        totalCandidates: number;
+    }): void {
+        this.metrics.proof.requiredEvidenceChainRate = input.totalFindings > 0
+            ? Math.round(100 * input.supportedFindings / input.totalFindings) : 100;
+        this.metrics.proof.rootCauseCorrelationRate = input.totalCandidates > 0
+            ? Math.round(100 * input.rootCauseGroups / input.totalCandidates) : 100;
+        this.metrics.proof.resolvedArchitectureRiskRate = input.totalRisks > 0
+            ? Math.round(100 * input.resolvedRisks / input.totalRisks) : 100;
+        this.metrics.proof.structuredCrossFileFlowRate = input.totalFlows > 0
+            ? Math.round(100 * input.structuredFlows / input.totalFlows) : 100;
+        this.metrics.proof.highPriorityGapCount = input.highPriorityGaps;
+        this.metrics.proof.unsupportedFindingCount = input.unsupportedFindings;
     }
 
     getMetrics(): ScanQualityMetrics {

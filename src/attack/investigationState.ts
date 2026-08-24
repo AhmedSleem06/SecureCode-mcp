@@ -719,7 +719,7 @@ export class InvestigationState {
         if (task) {
             task.status = status;
             if (this.tasks.size > 0 && [...this.tasks.values()].every(t =>
-                t.status === 'verified' || t.status === 'refuted' || t.status === 'blocked',
+                t.status === 'verified' || t.status === 'refuted',
             )) {
                 this.markStepComplete('architecture-risks-addressed');
             }

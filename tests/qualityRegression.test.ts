@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { sanitizeFindings, isCoherentText, compactTranscript, compactTranscriptAggressive, estimateTranscriptSize } from '../src/attack/agentScanLoop';
 import { InvestigationState } from '../src/attack/investigationState';
+import { createQualityMetrics, QualityMetricsTracker } from '../src/attack/qualityMetrics';
+import { createInvestigationTasksFromRisks } from '../src/project-map/architectureContext';
 
 interface QualityFixture {
     name: string;
@@ -195,5 +197,168 @@ describe('Quality Regression Harness', () => {
         if (nextRange) {
             state.recordActualRead('test.ts', nextRange.start, nextRange.end, 500, false);
         }
+    });
+});
+
+describe('Proof quality metrics', () => {
+    it('recordProofMetrics calculates rates correctly', () => {
+        const tracker = new QualityMetricsTracker();
+        tracker.recordProofMetrics({
+            totalFindings: 5,
+            supportedFindings: 4,
+            totalRisks: 3,
+            resolvedRisks: 2,
+            structuredFlows: 4,
+            totalFlows: 5,
+            highPriorityGaps: 1,
+            unsupportedFindings: 1,
+            rootCauseGroups: 3,
+            totalCandidates: 4,
+        });
+        const metrics = tracker.getMetrics();
+        expect(metrics.proof.requiredEvidenceChainRate).toBe(80);
+        expect(metrics.proof.rootCauseCorrelationRate).toBe(75);
+        expect(metrics.proof.resolvedArchitectureRiskRate).toBe(67);
+        expect(metrics.proof.structuredCrossFileFlowRate).toBe(80);
+        expect(metrics.proof.highPriorityGapCount).toBe(1);
+        expect(metrics.proof.unsupportedFindingCount).toBe(1);
+    });
+
+    it('recordProofMetrics handles zero-division gracefully', () => {
+        const tracker = new QualityMetricsTracker();
+        tracker.recordProofMetrics({
+            totalFindings: 0,
+            supportedFindings: 0,
+            totalRisks: 0,
+            resolvedRisks: 0,
+            structuredFlows: 0,
+            totalFlows: 0,
+            highPriorityGaps: 0,
+            unsupportedFindings: 0,
+            rootCauseGroups: 0,
+            totalCandidates: 0,
+        });
+        const metrics = tracker.getMetrics();
+        expect(metrics.proof.requiredEvidenceChainRate).toBe(100);
+        expect(metrics.proof.rootCauseCorrelationRate).toBe(100);
+        expect(metrics.proof.resolvedArchitectureRiskRate).toBe(100);
+        expect(metrics.proof.structuredCrossFileFlowRate).toBe(100);
+    });
+});
+
+describe('Cross-file investigation regression', () => {
+    it('architecture risk creates work for related files', () => {
+        const tasks = createInvestigationTasksFromRisks(
+            {
+                version: 1,
+                depth: 'standard',
+                derivedAt: Date.now(),
+                projectMapBuiltAt: 0,
+                projectMapVersion: 0,
+                architectureRisks: [
+                    {
+                        severity: 'high',
+                        title: 'Shell command execution via WS RPC',
+                        description: 'The WS RPC server dispatches orchestration commands that execute shell commands (execFile imported).',
+                        files: ['apps/server/src/wsRpc.ts', 'apps/server/src/orchestration/Layers/ProviderCommandReactor.ts'],
+                    },
+                ],
+                importantFiles: [
+                    { file: 'apps/server/src/wsRpc.ts', importance: 98, role: 'WS RPC', reasons: ['primary attack surface'] },
+                    { file: 'apps/server/src/orchestration/Layers/ProviderCommandReactor.ts', importance: 55, role: 'orchestration', reasons: ['shell exec'] },
+                ],
+            } as any,
+            'apps/server/src/wsRpc.ts',
+        );
+        expect(tasks.length).toBeGreaterThan(0);
+        expect(tasks[0].targetFiles).toContain('apps/server/src/orchestration/Layers/ProviderCommandReactor.ts');
+        expect(tasks[0].relatedFiles).toContain('apps/server/src/orchestration/Layers/ProviderCommandReactor.ts');
+        expect(tasks[0].sinkSymbols).toContain('execFile');
+    });
+
+    it('architecture risk infers proof dimensions for shell execution', () => {
+        const tasks = createInvestigationTasksFromRisks(
+            {
+                version: 1,
+                depth: 'standard',
+                derivedAt: Date.now(),
+                projectMapBuiltAt: 0,
+                projectMapVersion: 0,
+                architectureRisks: [
+                    {
+                        severity: 'high',
+                        title: 'Shell command execution via WS RPC',
+                        description: 'execFile spawn child_process command execution',
+                        files: ['wsRpc.ts'],
+                    },
+                ],
+                importantFiles: [],
+            } as any,
+            'wsRpc.ts',
+        );
+        expect(tasks[0].requiredProofDimensions).toContain('impact');
+        expect(tasks[0].requiredProofDimensions).toContain('verification');
+        expect(tasks[0].sourceSymbols).toContain('execFile');
+        expect(tasks[0].sinkSymbols).toContain('execFile');
+    });
+
+    it('unproven architecture task is treated as unresolved', () => {
+        const state = new InvestigationState('test.ts', 'generic-utility');
+        state.addInvestigationTasks([{
+            id: 'risk-1',
+            targetFiles: ['test.ts'],
+            claim: 'Shell exec risk',
+            requiredTools: ['trace_flow_cross_file'],
+            requiredEvidence: ['Trace the flow'],
+            status: 'pending',
+        }]);
+        state.updateTaskStatus('risk-1', 'unproven');
+        expect(state.getUnresolvedTasks()).toHaveLength(1);
+        expect(state.getCompletedSteps()).not.toContain('architecture-risks-addressed');
+    });
+
+    it('blocked architecture task is treated as unresolved', () => {
+        const state = new InvestigationState('test.ts', 'generic-utility');
+        state.addInvestigationTasks([{
+            id: 'risk-1',
+            targetFiles: ['test.ts'],
+            claim: 'Shell exec risk',
+            requiredTools: ['trace_flow_cross_file'],
+            requiredEvidence: ['Trace the flow'],
+            status: 'pending',
+        }]);
+        state.updateTaskStatus('risk-1', 'blocked');
+        expect(state.getUnresolvedTasks()).toHaveLength(1);
+        expect(state.getCompletedSteps()).not.toContain('architecture-risks-addressed');
+    });
+
+    it('verified architecture task marks risks addressed', () => {
+        const state = new InvestigationState('test.ts', 'generic-utility');
+        state.addInvestigationTasks([{
+            id: 'risk-1',
+            targetFiles: ['test.ts'],
+            claim: 'Shell exec risk',
+            requiredTools: ['trace_flow_cross_file'],
+            requiredEvidence: ['Trace the flow'],
+            status: 'pending',
+        }]);
+        state.updateTaskStatus('risk-1', 'verified');
+        expect(state.getUnresolvedTasks()).toHaveLength(0);
+        expect(state.getCompletedSteps()).toContain('architecture-risks-addressed');
+    });
+
+    it('refuted architecture task marks risks addressed', () => {
+        const state = new InvestigationState('test.ts', 'generic-utility');
+        state.addInvestigationTasks([{
+            id: 'risk-1',
+            targetFiles: ['test.ts'],
+            claim: 'Shell exec risk',
+            requiredTools: ['trace_flow_cross_file'],
+            requiredEvidence: ['Trace the flow'],
+            status: 'pending',
+        }]);
+        state.updateTaskStatus('risk-1', 'refuted');
+        expect(state.getUnresolvedTasks()).toHaveLength(0);
+        expect(state.getCompletedSteps()).toContain('architecture-risks-addressed');
     });
 });
