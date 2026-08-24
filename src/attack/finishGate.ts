@@ -107,21 +107,47 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
         }
     }
 
-    // Check 3: Non-terminal candidates
+    // Check 3: Non-terminal candidates — unsupported candidates block finish
+    // when budget remains. When budget is exhausted, they become coverage gaps.
     if (!candidates.allReadyForJuror()) {
         const underInvestigation = candidates.getUnderInvestigation();
         for (const candidate of underInvestigation) {
+            const missingDims = candidate.requiredProofDimensions?.filter(d =>
+                !candidate.satisfiedDimensions?.includes(d),
+            ) || [];
+            const dimInfo = missingDims.length > 0
+                ? ` (missing proof dimensions: ${missingDims.join(', ')})`
+                : ` (${candidate.evidenceRefs.length} evidence ref(s))`;
             reasons.push({
                 code: 'non-terminal-candidate',
-                description: `Candidate needs more evidence: ${candidate.claim} (status: ${candidate.status}, ${candidate.evidenceRefs.length} evidence ref(s))`,
+                description: `Candidate needs more evidence: ${candidate.claim} (status: ${candidate.status}${dimInfo})`,
             });
             coverageGaps.push({
                 title: `Candidate needs more evidence: ${candidate.claim}`,
-                detail: `This vulnerability candidate at ${candidate.locations.map(l => `${l.filePath}:${l.line}`).join(', ')} has status "${candidate.status}" with ${candidate.evidenceRefs.length} evidence reference(s). Run trace_flow, check_guard, or check_policy on the finding location to gather more evidence before finishing.`,
+                detail: `This vulnerability candidate at ${candidate.locations.map(l => `${l.filePath}:${l.line}`).join(', ')} has status "${candidate.status}" with ${candidate.evidenceRefs.length} evidence reference(s). Missing proof dimensions: ${missingDims.join(', ') || 'none'}. Run trace_flow, check_guard, or check_policy on the finding location to gather more evidence before finishing.`,
                 file: candidate.locations[0]?.filePath || target.filePath,
                 requiredEvidence: candidate.requiredEvidence.map(e => `${e.description} (tools: ${(e.requiredTools || []).join(', ')})`),
                 suggestedNextAction: (candidate.requiredEvidence[0]?.requiredTools || ['trace_flow_cross_file'])[0],
-                priority: 'high',
+                priority: candidate.severity === 'high' || candidate.severity === 'critical' ? 'high' : 'medium',
+            });
+        }
+    }
+
+    // Check 3b: Unsatisfied evidence-ledger requirements
+    const unsatisfiedReqs = evidence.getUnsatisfiedRequirements();
+    if (unsatisfiedReqs.length > 0) {
+        for (const req of unsatisfiedReqs) {
+            reasons.push({
+                code: 'unsatisfied-evidence-requirement',
+                description: `Evidence requirement not satisfied: ${req.description}`,
+            });
+            coverageGaps.push({
+                title: `Evidence requirement not satisfied: ${req.description}`,
+                detail: `The evidence ledger requirement "${req.description}" was not satisfied. Required tools: ${(req.requiredTools || []).join(', ')}. Accepted kinds: ${req.acceptedKinds.join(', ')}.`,
+                file: req.targetFiles?.[0] || target.filePath,
+                requiredEvidence: [req.description],
+                suggestedNextAction: req.requiredTools?.[0] || 'continue investigation',
+                priority: 'medium',
             });
         }
     }

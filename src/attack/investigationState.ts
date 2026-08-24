@@ -21,7 +21,7 @@ export interface LineRange {
     end: number;
 }
 
-export type InvestigationTaskStatus = 'pending' | 'investigated' | 'verified' | 'unproven' | 'blocked';
+export type InvestigationTaskStatus = 'pending' | 'investigated' | 'verified' | 'refuted' | 'unproven' | 'blocked';
 
 export interface InvestigationTask {
     id: string;
@@ -718,7 +718,9 @@ export class InvestigationState {
         const task = this.tasks.get(taskId);
         if (task) {
             task.status = status;
-            if (this.tasks.size > 0 && [...this.tasks.values()].every(t => t.status !== 'pending')) {
+            if (this.tasks.size > 0 && [...this.tasks.values()].every(t =>
+                t.status === 'verified' || t.status === 'refuted' || t.status === 'blocked',
+            )) {
                 this.markStepComplete('architecture-risks-addressed');
             }
         }
@@ -730,7 +732,7 @@ export class InvestigationState {
 
     getUnresolvedTasks(): InvestigationTask[] {
         return [...this.tasks.values()].filter(t =>
-            t.status === 'pending' || t.status === 'blocked',
+            t.status === 'pending' || t.status === 'blocked' || t.status === 'unproven',
         );
     }
 

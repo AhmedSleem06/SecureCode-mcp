@@ -723,10 +723,30 @@ export async function runAgentScan(
                     qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
                     qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
 
+                    const investigationNotes = [...(action.investigationNotes ?? [])];
+                    for (const candidate of candidateStore.getActive()) {
+                        if (candidate.status === 'discovered' || candidate.status === 'investigating' || candidate.status === 'supported') {
+                            const missingDims = candidate.requiredProofDimensions?.filter(d =>
+                                !candidate.satisfiedDimensions?.includes(d),
+                            ) || [];
+                            investigationNotes.push({
+                                title: candidate.claim,
+                                detail: `Candidate was not fully verified. Status: ${candidate.status}. Missing proof dimensions: ${missingDims.join(', ') || 'none'}. Evidence refs: ${candidate.evidenceRefs.length}.`,
+                                file: candidate.locations[0]?.filePath || target.filePath,
+                                line: candidate.locations[0]?.line,
+                                verificationLevel: 'logic-confirmed' as any,
+                                rootCauseId: candidate.rootCauseId,
+                                requiredEvidence: missingDims.map(d => `Satisfy the ${d} proof dimension`),
+                                priority: candidate.severity === 'critical' || candidate.severity === 'high' ? 'high' : 'medium',
+                            });
+                            candidateStore.setUnproven(candidate.id, `Converted to note: missing proof dimensions ${missingDims.join(', ')}`);
+                        }
+                    }
+
                     return {
                         status: 'completed',
                         findings: sanitizeFindings(action.findings),
-                        investigationNotes: action.investigationNotes ?? [],
+                        investigationNotes,
                         coverageGaps,
                         transcript,
                         stepsUsed: stepsTaken,

@@ -130,7 +130,7 @@ export interface InvestigationTask {
     claim: string;
     requiredTools: string[];
     requiredEvidence: string[];
-    status: 'pending' | 'investigated' | 'verified' | 'unproven' | 'blocked';
+    status: 'pending' | 'investigated' | 'verified' | 'refuted' | 'unproven' | 'blocked';
     entryFiles?: string[];
     relatedFiles?: string[];
     sourceSymbols?: string[];
