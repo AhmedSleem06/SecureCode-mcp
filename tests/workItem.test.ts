@@ -87,9 +87,31 @@ describe('WorkItem', () => {
                 [],
             );
             queue.add(item);
+            queue.addEvidenceForRequirement(item.id, 'req-1', 'ev-1');
             queue.resolve(item.id);
             expect(queue.get(item.id)!.status).toBe('resolved');
             expect(queue.getUnresolved()).toHaveLength(0);
+        });
+
+        it('does NOT resolve when requirements are not satisfied', () => {
+            const item = createProfileWorkItem(
+                { id: 'req-1', description: 'test', acceptedKinds: ['source-range'], minimumCount: 1 },
+                [],
+            );
+            queue.add(item);
+            queue.addEvidence(item.id, 'ev-1');
+            queue.resolve(item.id);
+            expect(queue.get(item.id)!.status).toBe('pending');
+        });
+
+        it('forceResolve bypasses requirement checks', () => {
+            const item = createProfileWorkItem(
+                { id: 'req-1', description: 'test', acceptedKinds: ['source-range'], minimumCount: 1 },
+                [],
+            );
+            queue.add(item);
+            queue.forceResolve(item.id);
+            expect(queue.get(item.id)!.status).toBe('resolved');
         });
 
         it('highestPriority returns the highest-priority executable item', () => {
@@ -107,7 +129,7 @@ describe('WorkItem', () => {
                 [],
             );
             queue.add(item);
-            queue.resolve(item.id);
+            queue.forceResolve(item.id);
             expect(queue.highestPriority()).toBeNull();
         });
 
@@ -127,10 +149,49 @@ describe('WorkItem', () => {
             const item2 = createProfileWorkItem({ id: 'r2', description: 'b', acceptedKinds: [], minimumCount: 1 }, []);
             const item3 = createProfileWorkItem({ id: 'r3', description: 'c', acceptedKinds: [], minimumCount: 1 }, []);
             queue.addAll([item1, item2, item3]);
-            queue.resolve(item1.id);
+            queue.forceResolve(item1.id);
             queue.update(item2.id, { status: 'blocked' });
             const unresolved = queue.getUnresolved();
             expect(unresolved).toHaveLength(2);
+        });
+
+        it('addEvidenceForRequirement links evidence to specific requirement', () => {
+            const item = createArchitectureRiskWorkItem('Shell exec risk', ['wsRpc.ts'], [
+                { id: 'req-source', description: 'Find source', acceptedKinds: ['source-range'], minimumCount: 1 },
+                { id: 'req-flow', description: 'Trace flow', acceptedKinds: ['cross-file-flow'], minimumCount: 1 },
+            ]);
+            queue.add(item);
+            queue.addEvidenceForRequirement(item.id, 'req-source', 'ev-source-1');
+            expect(queue.isRequirementSatisfied(item.id, 'req-source')).toBe(true);
+            expect(queue.isRequirementSatisfied(item.id, 'req-flow')).toBe(false);
+            expect(queue.isFullyResolved(item.id)).toBe(false);
+        });
+
+        it('two source reads do NOT satisfy one source and one flow requirement', () => {
+            const item = createArchitectureRiskWorkItem('Shell exec risk', ['wsRpc.ts'], [
+                { id: 'req-source', description: 'Find source', acceptedKinds: ['source-range'], minimumCount: 1 },
+                { id: 'req-flow', description: 'Trace flow', acceptedKinds: ['cross-file-flow'], minimumCount: 1 },
+            ]);
+            queue.add(item);
+            queue.addEvidenceForRequirement(item.id, 'req-source', 'ev-1');
+            queue.addEvidenceForRequirement(item.id, 'req-source', 'ev-2');
+            expect(queue.isFullyResolved(item.id)).toBe(false);
+            expect(queue.getUnsatisfiedRequirements(item.id)).toHaveLength(1);
+            expect(queue.getUnsatisfiedRequirements(item.id)[0].id).toBe('req-flow');
+        });
+
+        it('resolves only when ALL requirements are satisfied', () => {
+            const item = createArchitectureRiskWorkItem('Shell exec risk', ['wsRpc.ts'], [
+                { id: 'req-source', description: 'Find source', acceptedKinds: ['source-range'], minimumCount: 1 },
+                { id: 'req-flow', description: 'Trace flow', acceptedKinds: ['cross-file-flow'], minimumCount: 1 },
+            ]);
+            queue.add(item);
+            queue.addEvidenceForRequirement(item.id, 'req-source', 'ev-1');
+            queue.resolve(item.id);
+            expect(queue.get(item.id)!.status).toBe('pending');
+            queue.addEvidenceForRequirement(item.id, 'req-flow', 'ev-2');
+            queue.resolve(item.id);
+            expect(queue.get(item.id)!.status).toBe('resolved');
         });
     });
 });

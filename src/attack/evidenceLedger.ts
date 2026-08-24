@@ -24,7 +24,11 @@ export type EvidenceKind =
     | 'test-location'
     | 'test-result'
     | 'implementation-resolution'
-    | 'proof-result';
+    | 'proof-result'
+    | 'threat-model-result'
+    | 'reachability-result'
+    | 'ownership-result'
+    | 'capability-result';
 
 export type EvidenceOutcome = 'positive' | 'negative' | 'empty' | 'blocked' | 'error';
 

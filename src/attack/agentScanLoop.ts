@@ -1083,15 +1083,45 @@ export async function runAgentScan(
             if (!wasBlocked && workItemQueue.size() > 0) {
                 const actionFile = (action as any).filePath || (action as any).path || target.filePath;
                 const actionFileNorm = String(actionFile).replace(/\\/g, '/').toLowerCase();
+                const evidenceKindMap: Record<string, string> = {
+                    read_file: 'source-range',
+                    search_code: 'symbol-reference',
+                    trace_flow: 'cross-file-flow',
+                    trace_flow_cross_file: 'cross-file-flow',
+                    check_guard: 'guard-result',
+                    check_policy: 'policy-result',
+                    get_endpoints: 'handler-inventory',
+                    list_imports: 'symbol-reference',
+                    find_definition: 'symbol-definition',
+                    find_references: 'symbol-reference',
+                    find_tests: 'test-location',
+                    run_tests: 'test-result',
+                    read_config: 'config-result',
+                    call_graph: 'cross-file-flow',
+                };
+                const evidenceKind = evidenceKindMap[action.type] || 'source-range';
                 for (const item of workItemQueue.getExecutable()) {
-                    const matchesFile = item.targetFiles.some(
-                        f => f.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
-                    );
+                    const matchesFile = item.targetFiles.length === 0 ||
+                        item.targetFiles.some(
+                            f => f.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
+                        );
                     if (matchesFile) {
                         const evidenceId = `${action.type}:${actionFileNorm}:${stepsTaken}`;
                         workItemQueue.addEvidence(item.id, evidenceId);
-                        // Resolve if enough evidence collected
-                        if (item.evidenceRefs.length >= item.requirements.length) {
+                        for (const req of item.requirements) {
+                            if (!req.acceptedKinds.includes(evidenceKind as any)) continue;
+                            if (req.targetFiles && req.targetFiles.length > 0) {
+                                const reqMatches = req.targetFiles.some(
+                                    f => f.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
+                                );
+                                if (!reqMatches) continue;
+                            }
+                            if (req.requiredTools && req.requiredTools.length > 0) {
+                                if (!req.requiredTools.includes(action.type as any)) continue;
+                            }
+                            workItemQueue.addEvidenceForRequirement(item.id, req.id, evidenceId);
+                        }
+                        if (workItemQueue.isFullyResolved(item.id)) {
                             workItemQueue.resolve(item.id);
                         }
                     }
