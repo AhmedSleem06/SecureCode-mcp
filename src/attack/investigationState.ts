@@ -30,6 +30,11 @@ export interface InvestigationTask {
     requiredTools: string[];
     requiredEvidence: string[];
     status: InvestigationTaskStatus;
+    entryFiles?: string[];
+    relatedFiles?: string[];
+    sourceSymbols?: string[];
+    sinkSymbols?: string[];
+    requiredProofDimensions?: string[];
 }
 
 export interface FileCoverage {

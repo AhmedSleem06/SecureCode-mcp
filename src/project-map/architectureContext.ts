@@ -131,6 +131,11 @@ export interface InvestigationTask {
     requiredTools: string[];
     requiredEvidence: string[];
     status: 'pending' | 'investigated' | 'verified' | 'unproven' | 'blocked';
+    entryFiles?: string[];
+    relatedFiles?: string[];
+    sourceSymbols?: string[];
+    sinkSymbols?: string[];
+    requiredProofDimensions?: string[];
 }
 
 export interface ArchitectureContext {
@@ -435,21 +440,34 @@ export function createInvestigationTasksFromRisks(
     if (!ctx || !ctx.architectureRisks || ctx.architectureRisks.length === 0) return [];
 
     const normalizedTarget = targetFilePath.replace(/\\/g, '/').toLowerCase();
+    const allImportantFiles = (ctx.importantFiles || []).map(f => f.file);
     const relevant = ctx.architectureRisks.filter(r => {
         if (!r.files || r.files.length === 0) return true;
         return r.files.some(f => {
             const nf = f.replace(/\\/g, '/').toLowerCase();
-            return nf === normalizedTarget ||
-                nf.includes(normalizedTarget) ||
-                normalizedTarget.includes(nf);
+            if (nf === normalizedTarget || nf.includes(normalizedTarget) || normalizedTarget.includes(nf)) {
+                return true;
+            }
+            if (allImportantFiles.some(imp => {
+                const impN = imp.replace(/\\/g, '/').toLowerCase();
+                return impN === nf && (impN === normalizedTarget || impN.includes(normalizedTarget) || normalizedTarget.includes(impN));
+            })) {
+                return true;
+            }
+            return false;
         });
     });
 
     return relevant.map((r, i) => {
         const id = `arch-risk-${i + 1}-${r.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}`;
+        const riskFiles = r.files.length > 0 ? r.files : [targetFilePath];
+        const relatedFiles = riskFiles.filter(f => f !== targetFilePath);
+        const sourceSymbols = inferSourceSymbols(r);
+        const sinkSymbols = inferSinkSymbols(r);
+        const proofDimensions = inferProofDimensions(r);
         return {
             id,
-            targetFiles: r.files.length > 0 ? r.files : [targetFilePath],
+            targetFiles: riskFiles,
             claim: r.title,
             requiredTools: inferRequiredTools(r),
             requiredEvidence: [
@@ -458,8 +476,62 @@ export function createInvestigationTasksFromRisks(
                 'Establish the threat model (is the attacker in scope?)',
             ],
             status: 'pending' as const,
+            entryFiles: [targetFilePath],
+            relatedFiles,
+            sourceSymbols,
+            sinkSymbols,
+            requiredProofDimensions: proofDimensions,
         };
     });
+}
+
+function inferSourceSymbols(risk: ArchitectureRisk): string[] {
+    const text = (risk.title + ' ' + risk.description).toLowerCase();
+    const symbols: string[] = [];
+    if (/shell|exec|spawn|child_process|command/i.test(text)) {
+        symbols.push('execFile', 'spawn', 'exec', 'child_process');
+    }
+    if (/auth|token|session|login|credential/i.test(text)) {
+        symbols.push('authenticate', 'authorize', 'verifyToken', 'createSession');
+    }
+    if (/origin|csrf|cors/i.test(text)) {
+        symbols.push('isTrustedAppOrigin', 'shouldRejectUntrustedRequestOrigin');
+    }
+    if (/mcp|gateway|external/i.test(text)) {
+        symbols.push('ExternalMcpGateway', 'connectExternal');
+    }
+    return symbols;
+}
+
+function inferSinkSymbols(risk: ArchitectureRisk): string[] {
+    const text = (risk.title + ' ' + risk.description).toLowerCase();
+    const symbols: string[] = [];
+    if (/shell|exec|spawn|child_process|command/i.test(text)) {
+        symbols.push('execFile', 'spawn', 'exec', 'child_process');
+    }
+    if (/file|write|read|unlink|path/i.test(text)) {
+        symbols.push('writeFile', 'readFile', 'unlink', 'mkdir');
+    }
+    if (/sql|query|database/i.test(text)) {
+        symbols.push('query', 'queryRaw', 'execute');
+    }
+    return symbols;
+}
+
+function inferProofDimensions(risk: ArchitectureRisk): string[] {
+    const text = (risk.title + ' ' + risk.description).toLowerCase();
+    const dims: string[] = ['source', 'reachability', 'control', 'threat-model'];
+    if (/shell|exec|spawn|child_process|command/i.test(text)) {
+        dims.push('impact');
+        dims.push('verification');
+    }
+    if (/auth|token|session|login|credential|bypass/i.test(text)) {
+        dims.push('impact');
+    }
+    if (/external|mcp|gateway|ssrf/i.test(text)) {
+        dims.push('impact');
+    }
+    return [...new Set(dims)];
 }
 
 function inferRequiredTools(risk: ArchitectureRisk): string[] {

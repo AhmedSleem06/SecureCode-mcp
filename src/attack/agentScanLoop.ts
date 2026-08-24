@@ -179,15 +179,72 @@ export async function runAgentScan(
         // Create work items for architecture-risk tasks so the scheduler
         // can prioritize them and suggest deterministic actions.
         for (const task of archTasks) {
+            const requirements = [];
+            if (task.requiredProofDimensions?.includes('source') || task.requiredProofDimensions?.includes('reachability')) {
+                requirements.push({
+                    id: `${task.id}-req-source`,
+                    description: 'Trace the code path from input to the sensitive operation',
+                    acceptedKinds: ['source-range', 'cross-file-flow'] as any,
+                    targetFiles: task.targetFiles,
+                    requiredTools: ['read_file', 'trace_flow_cross_file', 'trace_flow'] as any,
+                    minimumCount: 1,
+                });
+            }
+            if (task.requiredProofDimensions?.includes('control')) {
+                requirements.push({
+                    id: `${task.id}-req-control`,
+                    description: 'Determine whether the control is present, bypassed, or missing',
+                    acceptedKinds: ['guard-result', 'policy-result', 'config-result'] as any,
+                    targetFiles: task.targetFiles,
+                    requiredTools: ['check_guard', 'check_policy', 'read_config'] as any,
+                    minimumCount: 1,
+                    acceptsNegative: true,
+                });
+            }
+            if (task.requiredProofDimensions?.includes('threat-model')) {
+                requirements.push({
+                    id: `${task.id}-req-threat-model`,
+                    description: 'Establish the threat model (is the attacker in scope?)',
+                    acceptedKinds: ['threat-model-result', 'config-result', 'source-range'] as any,
+                    targetFiles: task.targetFiles,
+                    requiredTools: ['read_config', 'read_file', 'search_code'] as any,
+                    minimumCount: 1,
+                    acceptsNegative: true,
+                });
+            }
+            if (task.requiredProofDimensions?.includes('impact')) {
+                requirements.push({
+                    id: `${task.id}-req-impact`,
+                    description: 'Verify the impact: trace to the actual sensitive sink and confirm reachability',
+                    acceptedKinds: ['cross-file-flow', 'capability-result', 'source-range'] as any,
+                    targetFiles: task.targetFiles,
+                    requiredTools: ['trace_flow_cross_file', 'trace_flow'] as any,
+                    minimumCount: 1,
+                });
+            }
+            if (task.requiredProofDimensions?.includes('verification')) {
+                requirements.push({
+                    id: `${task.id}-req-verification`,
+                    description: 'Verify the vulnerability with a test or exploit proof',
+                    acceptedKinds: ['test-location', 'test-result', 'proof-result'] as any,
+                    targetFiles: task.targetFiles,
+                    requiredTools: ['find_tests', 'run_tests'] as any,
+                    minimumCount: 1,
+                    acceptsNegative: true,
+                });
+            }
+            if (requirements.length === 0) {
+                requirements.push({
+                    id: `${task.id}-req-0`,
+                    description: task.requiredEvidence[0] || 'Investigate the risk',
+                    acceptedKinds: ['source-range', 'cross-file-flow', 'policy-result'] as any,
+                    minimumCount: 1,
+                });
+            }
             workItemQueue.add(createArchitectureRiskWorkItem(
                 task.claim,
                 task.targetFiles,
-                task.requiredEvidence.map((req, i) => ({
-                    id: `${task.id}-req-${i}`,
-                    description: req,
-                    acceptedKinds: ['source-range', 'cross-file-flow', 'policy-result'] as any,
-                    minimumCount: 1,
-                })),
+                requirements,
             ));
         }
         const readFiles = new Set<string>();
