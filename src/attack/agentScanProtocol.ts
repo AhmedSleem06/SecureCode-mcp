@@ -280,6 +280,45 @@ export interface AgentScanRunTestsAction {
 //
 // Mirror: api/src/attacker/agentScanProtocol.ts — keep in step.
 
+export type ProofDimension =
+    | 'source'
+    | 'reachability'
+    | 'control'
+    | 'threat-model'
+    | 'impact'
+    | 'verification';
+
+export interface FlowEndpoint {
+    filePath: string;
+    symbol?: string;
+    line?: number;
+}
+
+export interface FlowHop {
+    filePath: string;
+    symbol?: string;
+    line?: number;
+    description?: string;
+}
+
+export interface StructuredFlowResult {
+    status: 'confirmed' | 'refuted' | 'inconclusive' | 'blocked';
+    source?: FlowEndpoint;
+    sink?: FlowEndpoint;
+    hops: FlowHop[];
+    truncated: boolean;
+    error?: string;
+    riskId?: string;
+    candidateId?: string;
+}
+
+export interface RiskProofState {
+    riskId: string;
+    candidateId?: string;
+    satisfiedDimensions: ProofDimension[];
+    missingDimensions: ProofDimension[];
+}
+
 export type VerificationLevel =
     | 'logic-confirmed'
     | 'path-confirmed'

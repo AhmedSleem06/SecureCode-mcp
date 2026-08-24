@@ -49,6 +49,13 @@ export interface FlowVerification {
     flowCount: number;
     reason: string;
     timestamp: number;
+    riskId?: string;
+    candidateId?: string;
+    source?: { filePath: string; symbol?: string; line?: number };
+    sink?: { filePath: string; symbol?: string; line?: number };
+    hops?: Array<{ filePath: string; symbol?: string; line?: number; description?: string }>;
+    truncated?: boolean;
+    error?: string;
 }
 
 export type ReadValueClassification =
@@ -613,7 +620,22 @@ export class InvestigationState {
         }
     }
 
-    recordFlowVerification(filePath: string, tool: string, status: FlowVerificationStatus, flowCount: number, reason: string): void {
+    recordFlowVerification(
+        filePath: string,
+        tool: string,
+        status: FlowVerificationStatus,
+        flowCount: number,
+        reason: string,
+        structured?: {
+            riskId?: string;
+            candidateId?: string;
+            source?: { filePath: string; symbol?: string; line?: number };
+            sink?: { filePath: string; symbol?: string; line?: number };
+            hops?: Array<{ filePath: string; symbol?: string; line?: number; description?: string }>;
+            truncated?: boolean;
+            error?: string;
+        },
+    ): void {
         this.flowVerifications.push({
             filePath,
             tool,
@@ -621,8 +643,15 @@ export class InvestigationState {
             flowCount,
             reason,
             timestamp: Date.now(),
+            riskId: structured?.riskId,
+            candidateId: structured?.candidateId,
+            source: structured?.source,
+            sink: structured?.sink,
+            hops: structured?.hops,
+            truncated: structured?.truncated,
+            error: structured?.error,
         });
-        if (status === 'confirmed' || status === 'refuted' || status === 'inconclusive') {
+        if (status === 'confirmed' || status === 'refuted') {
             this.markStepComplete('cross-file-flow');
         }
     }
@@ -633,6 +662,13 @@ export class InvestigationState {
 
     hasClassifiedFlow(): boolean {
         return this.flowVerifications.some(v => v.status !== 'blocked');
+    }
+
+    hasResolvedFlow(riskId?: string): boolean {
+        if (riskId) {
+            return this.flowVerifications.some(v => v.riskId === riskId && (v.status === 'confirmed' || v.status === 'refuted'));
+        }
+        return this.flowVerifications.some(v => v.status === 'confirmed' || v.status === 'refuted');
     }
 
     recordSymbolSearch(symbol: string): void {

@@ -85,6 +85,60 @@ describe('InvestigationState', () => {
         expect(state.getCompletedSteps()).toContain('cross-file-flow');
     });
 
+    it('does NOT mark cross-file-flow from inconclusive flow (incomplete trace)', () => {
+        const state = new InvestigationState();
+        state.recordToolUse('trace_flow_cross_file');
+        state.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'inconclusive', 0, 'truncated');
+        expect(state.getCompletedSteps()).not.toContain('cross-file-flow');
+    });
+
+    it('hasResolvedFlow returns true for confirmed or refuted', () => {
+        const state = new InvestigationState();
+        state.recordFlowVerification('test.ts', 'trace_flow', 'confirmed', 1, 'flows found');
+        expect(state.hasResolvedFlow()).toBe(true);
+    });
+
+    it('hasResolvedFlow returns false for inconclusive only', () => {
+        const state = new InvestigationState();
+        state.recordFlowVerification('test.ts', 'trace_flow', 'inconclusive', 0, 'truncated');
+        expect(state.hasResolvedFlow()).toBe(false);
+    });
+
+    it('hasResolvedFlow(riskId) matches only that risk', () => {
+        const state = new InvestigationState();
+        state.recordFlowVerification('test.ts', 'trace_flow', 'confirmed', 1, 'flows', {
+            riskId: 'risk-shell-exec',
+        });
+        state.recordFlowVerification('test.ts', 'trace_flow', 'inconclusive', 0, 'truncated', {
+            riskId: 'risk-mcp-gateway',
+        });
+        expect(state.hasResolvedFlow('risk-shell-exec')).toBe(true);
+        expect(state.hasResolvedFlow('risk-mcp-gateway')).toBe(false);
+    });
+
+    it('stores structured flow data (source, sink, hops, truncated)', () => {
+        const state = new InvestigationState();
+        state.recordFlowVerification('wsRpc.ts', 'trace_flow_cross_file', 'confirmed', 1, '1 flow', {
+            riskId: 'risk-cmd-exec',
+            candidateId: 'cand-1',
+            source: { filePath: 'wsRpc.ts', symbol: 'handleRpc', line: 42 },
+            sink: { filePath: 'ProviderCommandReactor.ts', symbol: 'execFile', line: 88 },
+            hops: [
+                { filePath: 'wsRpc.ts', symbol: 'handleRpc', line: 42 },
+                { filePath: 'orchestrator.ts', symbol: 'dispatch', line: 15 },
+                { filePath: 'ProviderCommandReactor.ts', symbol: 'execFile', line: 88 },
+            ],
+            truncated: false,
+        });
+        const flows = state.getFlowVerifications();
+        expect(flows).toHaveLength(1);
+        expect(flows[0].source?.symbol).toBe('handleRpc');
+        expect(flows[0].sink?.symbol).toBe('execFile');
+        expect(flows[0].hops).toHaveLength(3);
+        expect(flows[0].truncated).toBe(false);
+        expect(flows[0].riskId).toBe('risk-cmd-exec');
+    });
+
     it('marks config-inspection after read_config', () => {
         const state = new InvestigationState();
         state.recordToolUse('read_config');
