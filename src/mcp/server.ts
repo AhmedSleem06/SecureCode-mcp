@@ -18,7 +18,7 @@ import { toolReviewFindings, toolDecideFinding, toolClearFindingReviews } from '
 
 const PROTOCOL_VERSION = '2025-03-26';
 const SERVER_NAME = 'securecode-mcp';
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = require('../../package.json').version || '0.0.0';
 
 let initialized = false;
 let clientSupportsRoots = false;
