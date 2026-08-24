@@ -57,7 +57,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
         return { kind: 'finish-ready', reason: 'No budget or wall-clock remaining' };
     }
 
-    // 1. Candidate missing critical evidence
+    // 1. Active high/critical candidate missing critical evidence
     const activeCandidates = candidates.getActive();
     for (const candidate of activeCandidates) {
         if (candidate.severity === 'critical' || candidate.severity === 'high') {
@@ -73,11 +73,28 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
         }
     }
 
-    // 2. Next unread critical range — raised above architecture tasks and
-    // evidence requirements because source coverage is the foundation
-    // for all analysis. Without reading the code, the agent cannot
-    // produce quality findings. Uses security-keyword prioritization
-    // to read the most security-relevant uncovered range first.
+    // 2. Unresolved critical/high architecture work items with unsatisfied
+    // proof requirements — raised above unread ranges because cross-file
+    // proof is the highest-value security work. Without tracing the path
+    // to the sink, the agent cannot determine whether the risk is real.
+    const topWorkItem = workItems.highestPriority();
+    if (topWorkItem && (topWorkItem.priority === 'critical' || topWorkItem.priority === 'high')) {
+        if (topWorkItem.status === 'pending' || topWorkItem.status === 'active') {
+            const action = actionForWorkItem(topWorkItem, target, workItems);
+            if (action) {
+                return {
+                    kind: 'deterministic-action',
+                    action,
+                    workItemId: topWorkItem.id,
+                    reason: `Unresolved ${topWorkItem.priority} proof work item: ${topWorkItem.title}`,
+                };
+            }
+        }
+    }
+
+    // 3. Next unread critical range — source coverage is the foundation
+    // for all analysis. Uses security-keyword prioritization to read the
+    // most security-relevant uncovered range first.
     const candidateLocations = candidates.getAll().flatMap(c => c.locations.map(l => ({ start: l.line, end: l.line })));
     const nextRange = target.fileContent
         ? investigation.getPrioritizedUnreadRange(target.filePath, target.fileContent, undefined, candidateLocations, input.functionBoundaries)
@@ -100,22 +117,6 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
         };
     }
 
-    // 3. Unresolved critical/high architecture task
-    const topWorkItem = workItems.highestPriority();
-    if (topWorkItem && (topWorkItem.priority === 'critical' || topWorkItem.priority === 'high')) {
-        if (topWorkItem.status === 'pending' || topWorkItem.status === 'active') {
-            const action = actionForWorkItem(topWorkItem, target);
-            if (action) {
-                return {
-                    kind: 'deterministic-action',
-                    action,
-                    workItemId: topWorkItem.id,
-                    reason: `Unresolved ${topWorkItem.priority} work item: ${topWorkItem.title}`,
-                };
-            }
-        }
-    }
-
     // 4. Contract/interface target requiring implementation resolution
     const implRequirement = evidence.getUnsatisfiedRequirements().find(r =>
         r.acceptedKinds.includes('implementation-resolution'),
@@ -132,7 +133,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
         };
     }
 
-    // 4. Unreviewed security-sensitive handler
+    // 5. Unreviewed security-sensitive handler
     const unreviewedHandlers = handlers.getUnreviewed();
     const sensitiveUnreviewed = unreviewedHandlers.filter(h => h.securitySensitive);
     if (sensitiveUnreviewed.length > 0) {
@@ -154,7 +155,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
         }
     }
 
-    // 5-8. Missing evidence from unsatisfied requirements
+    // 6-8. Missing evidence from unsatisfied requirements
     const unsatisfied = evidence.getUnsatisfiedRequirements();
     if (unsatisfied.length > 0) {
         const action = actionForRequirement(unsatisfied[0], target);
@@ -167,10 +168,10 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
         }
     }
 
-    // 10. Lower-priority pending work items
+    // 9. Lower-priority pending work items
     const pending = workItems.getPending();
     if (pending.length > 0) {
-        const action = actionForWorkItem(pending[0], target);
+        const action = actionForWorkItem(pending[0], target, workItems);
         if (action) {
             return {
                 kind: 'deterministic-action',
@@ -181,7 +182,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
         }
     }
 
-    // 11. No executable work remains — finish is ready
+    // 10. No executable work remains — finish is ready
     if (candidates.allTerminal() && workItems.getExecutable().length === 0) {
         return { kind: 'finish-ready', reason: 'All candidates terminal and no executable work items remain' };
     }
@@ -224,28 +225,33 @@ function actionForCandidateEvidence(candidate: any, target: AgentScanTarget): Ag
     } as AgentScanAction;
 }
 
-function actionForWorkItem(item: WorkItem, target: AgentScanTarget): AgentScanAction | null {
-    // Special case: implementation review needs search_code to find implementations
+function actionForWorkItem(item: WorkItem, target: AgentScanTarget, queue?: WorkItemQueue): AgentScanAction | null {
     if (item.kind === 'implementation-review') {
+        const symbol = item.title.replace('Resolve implementation for: ', '');
         return {
             type: 'search_code',
-            pattern: `make${item.title.replace('Resolve implementation for: ', '')}|Layer\\.effect.*${item.title.replace('Resolve implementation for: ', '')}`,
+            pattern: `make${symbol}|Layer\\.effect.*${symbol}`,
             rationale: item.title,
         } as AgentScanAction;
     }
     if (item.requirements.length === 0) return null;
-    return actionForRequirement(item.requirements[0], target);
+    const unsatisfied = queue ? queue.getUnsatisfiedRequirements(item.id) : item.requirements;
+    if (unsatisfied.length === 0) return null;
+    const req = unsatisfied[0];
+    const targetFile = req.targetFiles?.[0] || item.targetFiles[0] || target.filePath;
+    return actionForRequirement(req, target, targetFile);
 }
 
-function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget): AgentScanAction | null {
+function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget, explicitTargetFile?: string): AgentScanAction | null {
     const tool = req.requiredTools?.[0];
     if (!tool) return null;
+    const targetFile = explicitTargetFile || req.targetFiles?.[0] || target.filePath;
 
     switch (tool) {
         case 'read_file':
             return {
                 type: 'read_file',
-                path: req.targetFiles?.[0] || target.filePath,
+                path: targetFile,
                 rationale: req.description,
             } as AgentScanAction;
         case 'search_code':
@@ -257,7 +263,15 @@ function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget)
         case 'check_policy':
             return {
                 type: 'check_policy',
-                filePath: req.targetFiles?.[0] || target.filePath,
+                filePath: targetFile,
+                rationale: req.description,
+            } as AgentScanAction;
+        case 'check_guard':
+            return {
+                type: 'check_guard',
+                filePath: targetFile,
+                guardName: 'auth',
+                attackType: 'broken_access_control',
                 rationale: req.description,
             } as AgentScanAction;
         case 'get_endpoints':
@@ -269,7 +283,7 @@ function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget)
         case 'trace_flow_cross_file':
             return {
                 type: 'trace_flow_cross_file',
-                filePath: req.targetFiles?.[0] || target.filePath,
+                filePath: targetFile,
                 rationale: req.description,
             } as AgentScanAction;
         case 'read_config':
@@ -281,23 +295,13 @@ function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget)
         case 'find_tests':
             return {
                 type: 'find_tests',
-                filePath: req.targetFiles?.[0] || target.filePath,
+                filePath: targetFile,
                 rationale: req.description,
             } as AgentScanAction;
         case 'find_definition':
-            return {
-                type: 'find_definition',
-                filePath: req.targetFiles?.[0] || target.filePath,
-                symbol: '',
-                rationale: req.description,
-            } as AgentScanAction;
+            return null;
         case 'find_references':
-            return {
-                type: 'find_references',
-                filePath: req.targetFiles?.[0] || target.filePath,
-                symbol: '',
-                rationale: req.description,
-            } as AgentScanAction;
+            return null;
         default:
             return null;
     }
