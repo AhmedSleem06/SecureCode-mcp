@@ -8,6 +8,12 @@ Standalone MCP (Model Context Protocol) server for SecureCode AI. Provides secur
 npm install -g @securecode-ai/mcp
 ```
 
+Or use directly with npx (no install needed):
+
+```bash
+npx @securecode-ai/mcp scan src/app.ts
+```
+
 ## Quick Start
 
 ```bash
@@ -65,6 +71,22 @@ securecode-mcp scan src/app.ts --json
 {
   "mcpServers": {
     "securecode": {
+      "command": "npx",
+      "args": ["-y", "@securecode-ai/mcp@latest", "serve", "--workspace", "/path/to/your/project"],
+      "env": {
+        "SECURECODE_API_TOKEN": "your-api-token-here"
+      }
+    }
+  }
+}
+```
+
+Or if installed globally:
+
+```json
+{
+  "mcpServers": {
+    "securecode": {
       "command": "securecode-mcp",
       "args": ["serve", "--workspace", "/path/to/your/project"]
     }
@@ -78,14 +100,14 @@ securecode-mcp scan src/app.ts --json
 claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/your/project
 ```
 
-## Tools (11)
+## Tools (16)
 
 ### Scanning
 
 | Tool | Description | Approval |
 |------|-------------|----------|
 | `securecode.scan` | Scan code for vulnerabilities (AI pipeline) | No |
-| `securecode.agent-scan` | Agent-mode deep scan with 10 tools + sandbox proof | No |
+| `securecode.agent-scan` | Agent-mode deep scan with 20+ tools, structured proof, and sandbox verification | No |
 | `securecode.scan-batch` | Scan multiple files in one call | No |
 | `securecode.scan-secrets` | Scan for hardcoded secrets and PII (local, no AI) | No |
 | `securecode.scan-dependencies` | Scan lockfiles for known vulnerabilities (OSV/NVD) | No |
@@ -94,7 +116,7 @@ claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/y
 
 | Tool | Description | Approval |
 |------|-------------|----------|
-| `securecode.map` | Get the Project Map (endpoints, middleware, auth) | No |
+| `securecode.map` | Build project map: endpoints, middleware, auth, architecture context | No |
 
 ### Fixes & Testing
 
@@ -102,6 +124,7 @@ claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/y
 |------|-------------|----------|
 | `securecode.fix` | Generate a patch for a specific finding | Yes |
 | `securecode.attack` | Endpoint red-team testing (beta) | Yes |
+| `securecode.run-tests` | Run tests in sandbox for verification | Yes |
 
 ### Agent Memory (FP Learning)
 
@@ -111,6 +134,14 @@ claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/y
 | `securecode.get-agent-memory` | View learned false positives and known facts | No |
 | `securecode.clear-agent-memory` | Clear all agent memory (or one FP by ID) | No |
 | `securecode.add-known-fact` | Add a project fact for faster investigations | No |
+
+### Finding Review
+
+| Tool | Description | Approval |
+|------|-------------|----------|
+| `securecode.review-findings` | Review the finding queue for a workspace | No |
+| `securecode.decide-finding` | Accept or reject a finding in the review queue | No |
+| `securecode.clear-finding-reviews` | Clear all finding reviews for a workspace | No |
 
 ### How Agent Memory Works
 
@@ -125,17 +156,25 @@ Memory is per-workspace, user-owned, and deletable. No cross-tenant leakage.
 
 ## Agent Scan Architecture
 
-The agent scan (`securecode.agent-scan`) is an AI investigator that:
+The agent scan (`securecode.agent-scan`) is an AI security investigator that:
 
-1. **Reads** the target file and related files (10 tools)
-2. **Traces** data flows (taint tracking, cross-file)
-3. **Checks** guards and endpoint policies
-4. **Self-critiques** before reporting (selfCritique field)
-5. **Gets reviewed** by an independent critique LLM
-6. **Proves** findings in a sandbox (PROVEN/UNPROVEN)
-7. **Generates fixes** for proven findings
+1. **Maps** the project architecture (architecture scout with trust boundaries, security controls, risks)
+2. **Reads** the target file and related files across the codebase
+3. **Traces** data flows (taint tracking, cross-file flow with structured source→sink→hop chains)
+4. **Checks** guards, endpoint policies, and configuration
+5. **Verifies** threat model applicability and capability reachability
+6. **Self-critiques** before reporting (selfCritique field)
+7. **Gets reviewed** by an independent critique LLM
+8. **Proves** findings in a sandbox (PROVEN/UNPROVEN)
+9. **Generates fixes** for proven findings
 
-Agent tools: `read_file`, `search_code`, `trace_flow`, `trace_flow_cross_file`, `check_guard`, `check_policy`, `get_endpoints`, `list_imports`, `list_files`, `finish`.
+Agent tools (20+): `read_file`, `search_code`, `trace_flow`, `trace_flow_cross_file`, `check_guard`, `check_policy`, `get_endpoints`, `list_imports`, `list_files`, `call_graph`, `git_blame`, `git_history`, `git_diff`, `check_dependencies`, `read_config`, `find_definition`, `find_references`, `find_tests`, `run_tests`, `finish`.
+
+The deterministic control plane enforces proof quality:
+- Every finding requires source, reachability, control, threat-model, and impact evidence
+- Unproven concerns become investigation notes, not findings
+- Architecture risks expand across related files (callers, implementations, sinks)
+- The finish gate rejects finish while proof requirements remain unsatisfied
 
 Languages: JavaScript, TypeScript, Python (partial).
 
@@ -145,6 +184,7 @@ Languages: JavaScript, TypeScript, Python (partial).
 |----------|---------|-------------|
 | `SECURECODE_API_TOKEN` | — | API token (alternative to login) |
 | `SECURECODE_API_URL` | `https://api.usesecurecode.tech` | API base URL |
+| `SECURECODE_ATTACK_ENABLED` | — | Set to `1` to enable the attack tool |
 
 ## Security
 
