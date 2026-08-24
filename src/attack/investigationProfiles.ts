@@ -41,6 +41,8 @@ export const HTTP_ROUTE_PROFILE: InvestigationProfile = {
         { id: 'http-all-handlers', description: 'Review all discovered handlers', acceptedKinds: ['handler-inventory'], minimumCount: 2 },
         { id: 'http-authz-check', description: 'Verify authorization on authenticated vs unauthenticated paths', acceptedKinds: ['policy-result', 'guard-result'], requiredTools: ['check_policy', 'check_guard'], minimumCount: 1, acceptsNegative: true },
         { id: 'http-csrf-check', description: 'Verify CSRF/origin checks on mutation endpoints', acceptedKinds: ['guard-result', 'policy-result'], requiredTools: ['check_guard', 'check_policy'], minimumCount: 1, acceptsNegative: true },
+        { id: 'http-threat-model', description: 'Establish threat model: is the attacker in scope for this endpoint?', acceptedKinds: ['threat-model-result', 'config-result'], requiredTools: ['read_config', 'search_code'], minimumCount: 1, acceptsNegative: true },
+        { id: 'http-config-reachability', description: 'Verify configuration-dependent claims: is the unsafe config reachable in production?', acceptedKinds: ['reachability-result', 'config-result'], requiredTools: ['read_config', 'search_code'], minimumCount: 1, acceptsNegative: true },
     ],
 };
 
@@ -67,6 +69,8 @@ export const WEBSOCKET_RPC_PROFILE: InvestigationProfile = {
         { id: 'ws-all-handlers', description: 'Review all RPC methods', acceptedKinds: ['handler-inventory'], minimumCount: 2 },
         { id: 'ws-per-method-authz', description: 'Verify per-method authorization (owner vs client roles)', acceptedKinds: ['guard-result', 'policy-result'], requiredTools: ['check_guard', 'check_policy'], minimumCount: 1, acceptsNegative: true },
         { id: 'ws-cmd-execution', description: 'Trace command execution paths (execFile, spawn, child_process)', acceptedKinds: ['cross-file-flow', 'source-range'], requiredTools: ['trace_flow_cross_file', 'trace_flow'], minimumCount: 1, acceptsNegative: true },
+        { id: 'ws-threat-model', description: 'Establish threat model: are untrusted local processes in scope? Is the binding address exposed?', acceptedKinds: ['threat-model-result', 'config-result'], requiredTools: ['read_config', 'search_code'], minimumCount: 1, acceptsNegative: true },
+        { id: 'ws-cmd-capability', description: 'Verify command capability: trace untrusted input to a real execution sink, verify per-method authorization and argument validation', acceptedKinds: ['capability-result', 'cross-file-flow'], requiredTools: ['trace_flow_cross_file', 'trace_flow'], minimumCount: 1, acceptsNegative: true },
     ],
 };
 
@@ -91,6 +95,8 @@ export const AUTH_SERVICE_PROFILE: InvestigationProfile = {
         { id: 'auth-all-handlers', description: 'Review all auth operations', acceptedKinds: ['handler-inventory'], minimumCount: 1 },
         { id: 'auth-credential-lifecycle', description: 'Verify credential lifecycle (issue, verify, revoke, expire)', acceptedKinds: ['guard-result', 'cross-file-flow'], requiredTools: ['check_guard', 'trace_flow_cross_file'], minimumCount: 1, acceptsNegative: true },
         { id: 'auth-bootstrap-token', description: 'Verify bootstrap/pairing token handling', acceptedKinds: ['guard-result', 'policy-result'], requiredTools: ['check_guard', 'check_policy'], minimumCount: 1, acceptsNegative: true },
+        { id: 'auth-threat-model', description: 'Establish threat model: is the attacker in scope for the auth flow?', acceptedKinds: ['threat-model-result', 'config-result'], requiredTools: ['read_config', 'search_code'], minimumCount: 1, acceptsNegative: true },
+        { id: 'auth-config-reachability', description: 'Verify configuration-dependent claims: is the auth config reachable in production?', acceptedKinds: ['reachability-result', 'config-result'], requiredTools: ['read_config', 'search_code'], minimumCount: 1, acceptsNegative: true },
     ],
 };
 
@@ -107,6 +113,7 @@ export const GENERIC_UTILITY_PROFILE: InvestigationProfile = {
         { id: 'util-initial-read', description: 'Read the target file source', acceptedKinds: ['source-range'], requiredTools: ['read_file'], minimumCount: 1 },
         { id: 'util-cross-file-flow', description: 'Trace data flow to sensitive sinks', acceptedKinds: ['cross-file-flow'], requiredTools: ['trace_flow_cross_file', 'trace_flow'], minimumCount: 1, acceptsNegative: true },
         { id: 'util-tests-found', description: 'Find tests for the utility', acceptedKinds: ['test-location'], requiredTools: ['find_tests'], minimumCount: 1, acceptsNegative: true },
+        { id: 'util-threat-model', description: 'Establish threat model: is the attacker in scope for this code path?', acceptedKinds: ['threat-model-result', 'config-result'], requiredTools: ['read_config', 'search_code'], minimumCount: 1, acceptsNegative: true },
     ],
 };
 
