@@ -19,7 +19,7 @@
 
 import { ApiClient } from '../api/client';
 import type { ServerContext } from '../mcp/types';
-import { executeAction, executeReadFileAction } from './agentScanExecutor';
+import { executeAction, executeReadFileAction, executeFlowAction } from './agentScanExecutor';
 import { AgentTraceLogger } from './agentTrace';
 import { InvestigationState } from './investigationState';
 import { selectInvestigationProfile } from './investigationProfiles';
@@ -736,6 +736,7 @@ export async function runAgentScan(
             // Execute the action locally
             let observation: string;
             let wasBlocked = false;
+            let flowResult: import('./agentScanProtocol').StructuredFlowResult | null = null;
             // Reset progress flag — only set to true when actual progress is made
             meaningfulProgressSinceRecovery = false;
 
@@ -893,7 +894,13 @@ export async function runAgentScan(
                         observation = `You have already called this exact tool with the same arguments ${MAX_SAME_TOOL_CALL} times. The result is in the transcript above. Use a DIFFERENT tool, different arguments, or call finish to report your findings.`;
                         wasBlocked = true;
                     } else {
-                        observation = await executeAction(action, ctx, startResp.runId, client, target);
+                        if (action.type === 'trace_flow' || action.type === 'trace_flow_cross_file') {
+                            const flowAction = await executeFlowAction(action, ctx, startResp.runId, client, target);
+                            observation = flowAction.observation;
+                            flowResult = flowAction.flowResult;
+                        } else {
+                            observation = await executeAction(action, ctx, startResp.runId, client, target);
+                        }
                         qualityTracker.recordToolUse(action.type); investigationState.recordToolUse(action.type);
                         if (action.type === 'search_code') {
                             investigationState.recordSymbolSearch((action as any).pattern || '');
@@ -907,7 +914,13 @@ export async function runAgentScan(
                         }
                     }
                 } else {
-                    observation = await executeAction(action, ctx, startResp.runId, client, target);
+                    if (action.type === 'trace_flow' || action.type === 'trace_flow_cross_file') {
+                        const flowAction = await executeFlowAction(action, ctx, startResp.runId, client, target);
+                        observation = flowAction.observation;
+                        flowResult = flowAction.flowResult;
+                    } else {
+                        observation = await executeAction(action, ctx, startResp.runId, client, target);
+                    }
                     qualityTracker.recordToolUse(action.type); investigationState.recordToolUse(action.type);
                     meaningfulProgressSinceLastExtension = true;
                     meaningfulProgressSinceRecovery = true;
@@ -1129,23 +1142,30 @@ export async function runAgentScan(
             }
 
             // Flow verification: classify trace_flow/trace_flow_cross_file
-            // results as confirmed, refuted, inconclusive, or blocked.
-            // This prevents the cross-file-flow checklist step from completing
-            // until a flow result has been explicitly classified.
+            // results using structured data from the executor, not observation
+            // text heuristics. This prevents the cross-file-flow checklist step
+            // from completing until a flow result has been explicitly classified.
             if (action.type === 'trace_flow' || action.type === 'trace_flow_cross_file') {
                 const flowFile = String((action as any).filePath || target.filePath);
                 if (wasBlocked) {
                     investigationState.recordFlowVerification(flowFile, action.type, 'blocked', 0, 'Action was blocked');
+                } else if (flowResult) {
+                    investigationState.recordFlowVerification(
+                        flowFile,
+                        action.type,
+                        flowResult.status,
+                        flowResult.hops.length,
+                        flowResult.error || `${flowResult.hops.length} hop(s)`,
+                        {
+                            source: flowResult.source,
+                            sink: flowResult.sink,
+                            hops: flowResult.hops,
+                            truncated: flowResult.truncated,
+                            error: flowResult.error,
+                        },
+                    );
                 } else {
-                    const obsLower = observation.toLowerCase();
-                    if (obsLower.includes('no taint flows') || obsLower.includes('no flows found') || obsLower.includes('no data flow')) {
-                        investigationState.recordFlowVerification(flowFile, action.type, 'refuted', 0, 'No taint flows found — negative result');
-                    } else if (obsLower.includes('truncat') || obsLower.includes('error') || obsLower.includes('incomplete')) {
-                        investigationState.recordFlowVerification(flowFile, action.type, 'inconclusive', 0, 'Result was truncated or errored');
-                    } else {
-                        const flowCount = (observation.match(/L\d+.*:/g) || []).length;
-                        investigationState.recordFlowVerification(flowFile, action.type, 'confirmed', flowCount, `${flowCount} flow path(s) found`);
-                    }
+                    investigationState.recordFlowVerification(flowFile, action.type, 'inconclusive', 0, 'No structured flow result available');
                 }
             }
             // handlers and populate the handler inventory. Create handler

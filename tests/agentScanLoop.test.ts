@@ -21,12 +21,13 @@ vi.mock('../src/api/client', () => ({
 vi.mock('../src/attack/agentScanExecutor', () => ({
     executeAction: vi.fn(),
     executeReadFileAction: vi.fn(),
+    executeFlowAction: vi.fn(),
 }));
 
 import { runAgentScan } from '../src/attack/agentScanLoop';
 import { sanitizeFindings, isCoherentText, estimateTranscriptSize, compactTranscript, compactTranscriptAggressive } from '../src/attack/agentScanLoop';
 import { ApiClient } from '../src/api/client';
-import { executeAction, executeReadFileAction } from '../src/attack/agentScanExecutor';
+import { executeAction, executeReadFileAction, executeFlowAction } from '../src/attack/agentScanExecutor';
 
 const ctx = { workspaceRoot: '/tmp', apiUrl: 'http://localhost:3000', apiToken: 'test' };
 const target = {
@@ -68,6 +69,7 @@ describe('runAgentScan — termination', () => {
             observation: 'file content here', actualStart: 1, actualEnd: 100, totalLines: 100, truncated: false,
         });
         (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const result = await runAgentScan(ctx, target, {});
 
@@ -145,6 +147,7 @@ describe('runAgentScan — termination', () => {
             observation: 'content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const result = await runAgentScan(ctx, target, {});
 
@@ -161,6 +164,7 @@ describe('runAgentScan — termination', () => {
             observation: 'content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const progressCalls: any[] = [];
         const result = await runAgentScan(ctx, target, {
@@ -181,6 +185,7 @@ describe('runAgentScan — termination', () => {
             observation: 'file content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValueOnce('flow result').mockResolvedValueOnce('test result');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const result = await runAgentScan(ctx, target, {});
 
@@ -219,6 +224,7 @@ describe('runAgentScan — termination', () => {
             observation: 'content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const result = await runAgentScan(ctx, target, {});
 
@@ -242,6 +248,7 @@ describe('runAgentScan — termination', () => {
             observation: 'content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const result = await runAgentScan(ctx, target, {});
 
@@ -266,6 +273,7 @@ describe('runAgentScan — adaptive budget fields', () => {
             observation: 'content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const result = await runAgentScan(ctx, target, {});
 
@@ -300,6 +308,7 @@ describe('runAgentScan — adaptive budget fields', () => {
             observation: 'file content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const result = await runAgentScan(ctx, target, {});
 
@@ -330,6 +339,7 @@ describe('runAgentScan — blocked-read recovery', () => {
             observation: 'content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValue('recovery observation');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         await runAgentScan(ctx, target, {});
 
@@ -362,6 +372,7 @@ describe('runAgentScan — blocked-read recovery', () => {
             observation: 'content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValue('recovery observation');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const result = await runAgentScan(ctx, target, {});
 
@@ -401,6 +412,7 @@ describe('runAgentScan — blocked-read recovery', () => {
             observation: 'content', actualStart: 1, actualEnd: 50, totalLines: 50, truncated: false,
         });
         (executeAction as any).mockResolvedValue('recovery observation');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
 
         const result = await runAgentScan(ctx, target, {});
 

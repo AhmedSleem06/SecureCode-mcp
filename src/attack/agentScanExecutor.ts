@@ -36,6 +36,9 @@ import type {
     AgentScanToolResponse,
     AgentScanTarget,
     ReadFileObservation,
+    StructuredFlowResult,
+    FlowEndpoint,
+    FlowHop,
 } from './agentScanProtocol';
 
 export const MAX_OBSERVATION_CHARS = 16000;
@@ -588,4 +591,139 @@ export async function executeAction(
             return '';
         }
     }
+}
+
+export interface FlowActionResult {
+    observation: string;
+    flowResult: StructuredFlowResult;
+}
+
+export async function executeFlowAction(
+    action: AgentScanAction,
+    ctx: ServerContext,
+    runId: string,
+    client: ApiClient,
+    target: AgentScanTarget,
+): Promise<FlowActionResult> {
+    const empty: StructuredFlowResult = {
+        status: 'inconclusive',
+        hops: [],
+        truncated: false,
+    };
+
+    if (action.type === 'trace_flow') {
+        try {
+            const absPath = resolveWorkspacePath(ctx.workspaceRoot, action.filePath);
+            const content = fs.readFileSync(absPath, 'utf8');
+            const { language } = readFileFromWorkspace(ctx.workspaceRoot, action.filePath);
+            const sinkLang = toSinkLanguage(language);
+            if (!sinkLang) {
+                return {
+                    observation: `Unsupported language for taint tracking: ${language}`,
+                    flowResult: { ...empty, status: 'inconclusive', error: `Unsupported language: ${language}` },
+                };
+            }
+            const results = await trackTaint(content, sinkLang);
+            if (results.length === 0) {
+                return {
+                    observation: `No taint flows found in ${action.filePath}.`,
+                    flowResult: {
+                        status: 'refuted',
+                        source: undefined,
+                        sink: undefined,
+                        hops: [],
+                        truncated: false,
+                    },
+                };
+            }
+            const first = results[0];
+            const hops: FlowHop[] = first.propagationPath.map(p => ({
+                filePath: action.filePath,
+                symbol: p.variable,
+                line: p.line,
+                description: p.description,
+            }));
+            const source: FlowEndpoint = { filePath: action.filePath, symbol: first.source, line: first.sourceLine };
+            const sink: FlowEndpoint = { filePath: action.filePath, symbol: first.sink, line: first.sinkLine };
+            const formatted = results.map(r => {
+                const path = r.propagationPath
+                    .map(p => `  L${p.line} ${p.operation}: ${p.description}`)
+                    .join('\n');
+                return `${r.source} (L${r.sourceLine}) → ${r.sink} (L${r.sinkLine}) [${r.canonicalType}]${r.isTainted ? ' TAINTED' : ' (sanitized)'}\n${path}`;
+            }).join('\n\n');
+            return {
+                observation: redact(formatted),
+                flowResult: {
+                    status: 'confirmed',
+                    source,
+                    sink,
+                    hops,
+                    truncated: false,
+                },
+            };
+        } catch (e: any) {
+            return {
+                observation: `Error tracing flow in "${action.filePath}": ${e.message || e}`,
+                flowResult: { ...empty, status: 'inconclusive', error: e.message || String(e) },
+            };
+        }
+    }
+
+    if (action.type === 'trace_flow_cross_file') {
+        try {
+            const results = await trackTaintCrossFile({
+                workspaceRoot: ctx.workspaceRoot,
+                filePath: action.filePath,
+                maxDepth: (action as any).maxDepth ?? 3,
+            });
+            if (results.length === 0) {
+                return {
+                    observation: `No cross-file taint flows found starting from ${action.filePath}.`,
+                    flowResult: {
+                        status: 'refuted',
+                        source: undefined,
+                        sink: undefined,
+                        hops: [],
+                        truncated: false,
+                    },
+                };
+            }
+            const first = results[0];
+            const hops: FlowHop[] = first.crossFileSteps.map(s => ({
+                filePath: s.file,
+                symbol: s.variable,
+                line: s.line,
+                description: s.description,
+            }));
+            const source: FlowEndpoint = { filePath: first.sourceFile, symbol: first.source, line: first.sourceLine };
+            const sink: FlowEndpoint = { filePath: first.sinkFile, symbol: first.sink, line: first.sinkLine };
+            const formatted = results.map(r => {
+                const path = r.crossFileSteps
+                    .map(s => `  ${s.file}:${s.line} ${s.operation}: ${s.description}`)
+                    .join('\n');
+                return `${r.source} (${r.sourceFile}:${r.sourceLine}) → ${r.sink} (${r.sinkFile}:${r.sinkLine}) [${r.canonicalType}]\n${path}`;
+            }).join('\n\n');
+            const truncated = formatted.length > MAX_OBSERVATION_CHARS;
+            return {
+                observation: redact(formatted),
+                flowResult: {
+                    status: 'confirmed',
+                    source,
+                    sink,
+                    hops,
+                    truncated,
+                },
+            };
+        } catch (e: any) {
+            return {
+                observation: `Error tracing cross-file flow from "${action.filePath}": ${e.message || e}`,
+                flowResult: { ...empty, status: 'inconclusive', error: e.message || String(e) },
+            };
+        }
+    }
+
+    return {
+        observation: await executeAction(action, ctx, runId, client, target),
+        flowResult: empty,
+    };
 }
