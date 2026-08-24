@@ -1,11 +1,12 @@
 {
   "name": "@securecode-ai/mcp",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "description": "Standalone SecureCode MCP server — scan, map, fix, and attack tools for AI coding assistants. Works without the VS Code extension.",
   "main": "dist/index.js",
   "bin": {
     "securecode-mcp": "dist/index.js"
   },
+  "icon": "icon.svg",
   "scripts": {
     "build": "tsc -p ./",
     "start": "node dist/index.js serve",
@@ -16,7 +17,8 @@
   },
   "files": [
     "dist/",
-    "resources/tree-sitter/"
+    "resources/tree-sitter/",
+    "icon.svg"
   ],
   "keywords": [
     "mcp",
