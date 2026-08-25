@@ -59,6 +59,12 @@ export interface RecoveryState {
     lastRecoveryAction?: string;
     recoveryAttempts: number;
     meaningfulProgressSinceRecovery: boolean;
+    consecutiveModelBlockedActions: number;
+    totalModelBlockedActions: number;
+    consecutiveRecoveryFailures: number;
+    totalRecoveryAttempts: number;
+    successfulRecoveryAttempts: number;
+    lastFailureReason?: string;
 }
 
 export interface ScanRunState {
@@ -113,6 +119,11 @@ export function createScanRunState(
             totalBlockedActions: 0,
             recoveryAttempts: 0,
             meaningfulProgressSinceRecovery: true,
+            consecutiveModelBlockedActions: 0,
+            totalModelBlockedActions: 0,
+            consecutiveRecoveryFailures: 0,
+            totalRecoveryAttempts: 0,
+            successfulRecoveryAttempts: 0,
         },
         finishAttempts: 0,
         verificationCycles: 0,

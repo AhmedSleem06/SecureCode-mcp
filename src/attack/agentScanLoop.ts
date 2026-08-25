@@ -39,7 +39,7 @@ import { EvidenceLedger } from './evidenceLedger';
 import { WorkItemQueue, createArchitectureRiskWorkItem, createHandlerReviewWorkItem } from './workItem';
 import { HandlerInventory } from '../project-map/handlerInventory';
 import { CandidateStore } from './candidateStore';
-import { schedule as schedulerDecision } from './scanScheduler';
+import { schedule as schedulerDecision, actionFingerprint } from './scanScheduler';
 import { evaluateFinishGate } from './finishGate';
 import { QualityMetricsTracker } from './qualityMetrics';
 import { extractFunctionBoundaries } from './agentScanExecutor';
@@ -291,6 +291,8 @@ export async function runAgentScan(
         let consecutiveBlockedReads = 0;
         let meaningfulProgressSinceRecovery = true;
         let aggressiveCompaction = false;
+        const attemptedRecoveryFingerprints = new Set<string>();
+        const RECOVERY_FAILURE_LIMIT = 3;
 
         while (true) {
             // Wall clock check
@@ -334,23 +336,24 @@ export async function runAgentScan(
             //   2 blocked reads: recovery mode — if unread ranges exist,
             //     require the next unread range; if no unread ranges remain,
             //     forbid read_file entirely and require an analysis tool.
-            //   3 blocked reads: MCP selects a deterministic recovery action (skip API)
+            //   3+ blocked reads: MCP selects a deterministic recovery action via scheduler
             let actionConstraint: AgentActionConstraint | undefined;
             if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
-                const nextRange = target.fileContent
-                    ? investigationState.getPrioritizedUnreadRange(target.filePath, target.fileContent)
-                    : investigationState.getNextUnreadRange(target.filePath);
-                if (nextRange) {
+                const schedDecision = schedulerDecision({
+                    state: scanState,
+                    evidence: evidenceLedger,
+                    workItems: workItemQueue,
+                    handlers: handlerInventory,
+                    candidates: candidateStore,
+                    investigation: investigationState,
+                    target,
+                    functionBoundaries,
+                });
+                if (schedDecision.action) {
                     actionConstraint = {
                         mode: 'recovery',
-                        requiredAction: {
-                            type: 'read_file',
-                            path: target.filePath,
-                            startLine: nextRange.start,
-                            endLine: nextRange.end,
-                            rationale: `Read next unread range: lines ${nextRange.start}-${nextRange.end}`,
-                        } as any,
-                        reason: `You have been blocked by duplicate/overlapping reads. Read the next unread range: lines ${nextRange.start}-${nextRange.end}, or use an analysis tool (trace_flow, check_guard, check_policy).`,
+                        requiredAction: schedDecision.action.type as any,
+                        reason: `You have been blocked by duplicate/overlapping reads. Next required action: ${schedDecision.action.type}. ${schedDecision.reason}`,
                     };
                 } else {
                     const recoveryAction = investigationState.getRecommendedRecoveryAction();
@@ -1020,41 +1023,30 @@ export async function runAgentScan(
                 consecutiveBlockedReads++;
                 scanState.recovery.consecutiveBlockedActions = consecutiveBlockedReads;
                 scanState.recovery.totalBlockedActions++;
+                scanState.recovery.consecutiveModelBlockedActions = consecutiveBlockedReads;
+                scanState.recovery.totalModelBlockedActions++;
                 scanState.recovery.lastBlockedAction = action.type;
                 scanState.recovery.meaningfulProgressSinceRecovery = false;
                 const recoveryLimit = AGENT_SCAN_DEFAULTS.blockedReadRecoveryLimit;
 
                 if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
-                    const nextRange = target.fileContent
-                        ? investigationState.getPrioritizedUnreadRange(target.filePath, target.fileContent)
-                        : investigationState.getNextUnreadRange(target.filePath);
-                    if (nextRange) {
-                        observation += `\n\nRECOVERY REQUIRED: You have been blocked ${consecutiveBlockedReads} time(s). Read the next unread range: lines ${nextRange.start}-${nextRange.end}, or use an analysis tool (trace_flow, check_guard, check_policy).`;
-                    } else {
-                        const recommendedTool = investigationState.getRecommendedRecoveryAction();
-                        if (recommendedTool) {
-                            observation += `\n\nRECOVERY REQUIRED: You have been blocked ${consecutiveBlockedReads} time(s). No unread ranges remain. Your next action MUST be: ${recommendedTool}. If you have enough evidence, call finish.`;
-                        }
-                    }
+                    observation += `\n\nRECOVERY REQUIRED: You have been blocked ${consecutiveBlockedReads} time(s). Use an analysis tool (trace_flow, check_guard, check_policy) or read a different file.`;
                 }
 
                 if (consecutiveBlockedReads >= recoveryLimit) {
-                    const nextRange = target.fileContent
-                        ? investigationState.getPrioritizedUnreadRange(target.filePath, target.fileContent)
-                        : investigationState.getNextUnreadRange(target.filePath);
                     const hasBudget = budget.stepsRemaining > 0 && costSpentUsd < budget.costCapUsd;
                     const hasWallClock = Date.now() - startTime < wallClockMs;
 
-                    if (nextRange && hasBudget && hasWallClock) {
-                        console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — forcing deterministic recovery to unread range ${nextRange.start}-${nextRange.end}.`);
+                    if (hasBudget && hasWallClock) {
+                        console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — forcing deterministic recovery via scheduler.`);
                     } else {
-                        console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — no recovery available, force-finishing.`);
+                        console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — no recovery available, terminating as incomplete.`);
                         transcript.push({ action, observation });
                         trace.logRunCompleted('incomplete');
                         const incompleteSteps = investigationState.getIncompleteSteps();
                         const autoGaps = incompleteSteps.map(step => ({
                             title: `Investigation step not completed: ${step}`,
-                            detail: `The agent was force-finished after repeated blocked reads without completing this required investigation step: ${step}. The investigation was incomplete and vulnerabilities may have been missed.`,
+                            detail: `The agent was terminated after repeated blocked reads without completing this required investigation step: ${step}. The investigation was incomplete and vulnerabilities may have been missed.`,
                             file: target.filePath,
                             requiredEvidence: [`Complete the ${step} step before concluding no vulnerabilities exist`],
                             suggestedNextAction: step === 'config-inspection' ? 'read_config'
@@ -1113,6 +1105,8 @@ export async function runAgentScan(
                 if (meaningfulProgressSinceRecovery) {
                     consecutiveBlockedReads = 0;
                     scanState.recovery.consecutiveBlockedActions = 0;
+                    scanState.recovery.consecutiveModelBlockedActions = 0;
+                    scanState.recovery.consecutiveRecoveryFailures = 0;
                     scanState.recovery.meaningfulProgressSinceRecovery = true;
                 }
             }
@@ -1335,42 +1329,155 @@ export async function runAgentScan(
 
             // Deterministic recovery: on the third consecutive blocked read,
             // skip the API and directly execute a recovery action selected by
-            // the MCP. This prevents wasting API calls on an agent that is
-            // stuck re-reading files.
+            // the scheduler. This prevents wasting API calls on an agent that
+            // is stuck re-reading files. Track recovery fingerprints to avoid
+            // repeating the same recovery action. Terminate after
+            // RECOVERY_FAILURE_LIMIT failures without progress.
             if (wasBlocked && consecutiveBlockedReads >= 3) {
-                const recoveryAction = selectDeterministicRecoveryAction(
-                    investigationState, target, ctx,
-                );
-                if (recoveryAction) {
-                    stepsTaken++;
-                    budget.stepsRemaining--;
-                    trace.nextStep();
-                    trace.logActionSelected(recoveryAction.type, 'deterministic-recovery', false);
-                    if (options.onProgress) {
-                        options.onProgress(stepsTaken, stepsGranted, `Step ${stepsTaken}: deterministic recovery: ${describeAction(recoveryAction)}`);
-                    }
+                const schedDecision = schedulerDecision({
+                    state: scanState,
+                    evidence: evidenceLedger,
+                    workItems: workItemQueue,
+                    handlers: handlerInventory,
+                    candidates: candidateStore,
+                    investigation: investigationState,
+                    target,
+                    functionBoundaries,
+                });
 
-                    let recoveryObservation: string;
-                    if (recoveryAction.type === 'read_file') {
-                        const readResult = await executeReadFileAction(recoveryAction, ctx);
-                        recoveryObservation = readResult.observation;
-                        if (readResult.totalLines > 0) {
-                            investigationState.recordActualRead(
-                                (recoveryAction as any).path,
-                                readResult.actualStart,
-                                readResult.actualEnd,
-                                readResult.totalLines,
-                                readResult.truncated,
-                            );
+                const recoveryAction = schedDecision.action || null;
+                if (recoveryAction) {
+                    const fp = actionFingerprint(recoveryAction);
+                    const isDuplicate = attemptedRecoveryFingerprints.has(fp);
+                    scanState.recovery.totalRecoveryAttempts++;
+                    scanState.recovery.lastRecoveryAction = recoveryAction.type;
+
+                    if (isDuplicate) {
+                        scanState.recovery.consecutiveRecoveryFailures++;
+                        scanState.recovery.lastFailureReason = `Duplicate recovery action: ${fp}`;
+                        console.warn(`[Agent Scan Loop] Duplicate recovery action rejected: ${fp}. Failures: ${scanState.recovery.consecutiveRecoveryFailures}/${RECOVERY_FAILURE_LIMIT}`);
+
+                        if (scanState.recovery.consecutiveRecoveryFailures >= RECOVERY_FAILURE_LIMIT) {
+                            console.warn(`[Agent Scan Loop] ${RECOVERY_FAILURE_LIMIT} recovery failures without progress — terminating as incomplete.`);
+                            transcript.push({ action, observation });
+                            trace.logRunCompleted('incomplete');
+                            terminateScan(scanState, 'blocked_read_recovery', `${RECOVERY_FAILURE_LIMIT} recovery failures without progress.`);
+                            qualityTracker.recordForcedTermination('blocked_read_recovery');
+                            const covSummary = investigationState.getCoverageSummary(target.filePath);
+                            qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
+                            qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
+                            const incompleteSteps = investigationState.getIncompleteSteps();
+                            const autoGaps = incompleteSteps.map(step => ({
+                                title: `Investigation step not completed: ${step}`,
+                                detail: `The agent was terminated after ${RECOVERY_FAILURE_LIMIT} recovery failures without completing this required step: ${step}.`,
+                                file: target.filePath,
+                                requiredEvidence: [`Complete the ${step} step`],
+                                suggestedNextAction: 'continue investigation',
+                                priority: 'high' as const,
+                            }));
+                            const unresolvedTasks = investigationState.getUnresolvedTasks();
+                            const taskGaps = unresolvedTasks.map(task => ({
+                                title: `Architecture risk unresolved: ${task.claim}`,
+                                detail: `This architecture-risk task was not resolved: ${task.claim}. Required evidence: ${task.requiredEvidence.join('; ')}.`,
+                                file: task.targetFiles[0] || target.filePath,
+                                requiredEvidence: task.requiredEvidence,
+                                suggestedNextAction: task.requiredTools[0] || 'continue investigation',
+                                priority: 'high' as const,
+                            }));
+                            const uncoveredRanges = investigationState.getUncoveredRanges(target.filePath);
+                            const rangeGaps = uncoveredRanges.map(r => ({
+                                title: `Unread range: lines ${r.start}-${r.end} of ${target.filePath}`,
+                                detail: `This range was never read during the investigation.`,
+                                file: target.filePath,
+                                requiredEvidence: [`Read lines ${r.start}-${r.end}`],
+                                suggestedNextAction: 'read_file',
+                                priority: 'high' as const,
+                            }));
+                            return {
+                                status: 'incomplete',
+                                findings: [],
+                                transcript,
+                                stepsUsed: stepsTaken,
+                                stepsGranted,
+                                extensionsGranted,
+                                costSpentUsd,
+                                terminationReason: 'blocked_read_recovery',
+                                summary: `Investigation incomplete — ${RECOVERY_FAILURE_LIMIT} recovery failures without progress. Model blocked ${scanState.recovery.totalModelBlockedActions} time(s), recovery attempted ${scanState.recovery.totalRecoveryAttempts} time(s).`,
+                                investigationNotes: [],
+                                coverageGaps: [...autoGaps, ...taskGaps, ...rangeGaps],
+                            };
                         }
                     } else {
-                        recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
+                        attemptedRecoveryFingerprints.add(fp);
+                        stepsTaken++;
+                        budget.stepsRemaining--;
+                        scanState.budget.stepsUsed = stepsTaken;
+                        scanState.budget.stepsRemaining = budget.stepsRemaining;
+                        trace.nextStep();
+                        trace.logActionSelected(recoveryAction.type, 'deterministic-recovery', false);
+                        if (options.onProgress) {
+                            options.onProgress(stepsTaken, stepsGranted, `Step ${stepsTaken}: deterministic recovery: ${describeAction(recoveryAction)}`);
+                        }
+
+                        let recoveryObservation: string;
+                        let recoveryMadeProgress = false;
+                        if (recoveryAction.type === 'read_file') {
+                            const readResult = await executeReadFileAction(recoveryAction, ctx);
+                            recoveryObservation = readResult.observation;
+                            if (readResult.totalLines > 0 && !readResult.truncated) {
+                                investigationState.recordActualRead(
+                                    (recoveryAction as any).path,
+                                    readResult.actualStart,
+                                    readResult.actualEnd,
+                                    readResult.totalLines,
+                                    readResult.truncated,
+                                );
+                                recoveryMadeProgress = true;
+                            }
+                        } else {
+                            recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
+                            recoveryMadeProgress = true;
+                        }
+                        qualityTracker.recordToolUse(recoveryAction.type); investigationState.recordToolUse(recoveryAction.type);
+
+                        if (recoveryMadeProgress) {
+                            scanState.recovery.successfulRecoveryAttempts++;
+                            scanState.recovery.consecutiveRecoveryFailures = 0;
+                            consecutiveBlockedReads = 0;
+                            scanState.recovery.consecutiveBlockedActions = 0;
+                            scanState.recovery.consecutiveModelBlockedActions = 0;
+                            meaningfulProgressSinceRecovery = true;
+                        } else {
+                            scanState.recovery.consecutiveRecoveryFailures++;
+                            scanState.recovery.lastFailureReason = `Recovery action made no progress: ${recoveryAction.type}`;
+                        }
+                        trace.logToolCompleted(recoveryAction.type, recoveryObservation);
+                        transcript.push({ action: recoveryAction, observation: `[DETERMINISTIC RECOVERY] ${recoveryObservation}` });
                     }
-                    qualityTracker.recordToolUse(recoveryAction.type); investigationState.recordToolUse(recoveryAction.type);
-                    consecutiveBlockedReads = 0; // recovery resets the counter
-                    meaningfulProgressSinceRecovery = true; // recovery is meaningful progress
-                    trace.logToolCompleted(recoveryAction.type, recoveryObservation);
-                    transcript.push({ action: recoveryAction, observation: `[DETERMINISTIC RECOVERY] ${recoveryObservation}` });
+                } else {
+                    // Scheduler has no action — finish or let model try
+                    if (schedDecision.kind === 'finish-ready') {
+                        console.warn(`[Agent Scan Loop] Scheduler says finish-ready during recovery — terminating as incomplete.`);
+                        transcript.push({ action, observation });
+                        trace.logRunCompleted('incomplete');
+                        terminateScan(scanState, 'blocked_read_recovery', 'Scheduler has no executable work during recovery.');
+                        const covSummary = investigationState.getCoverageSummary(target.filePath);
+                        qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
+                        qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
+                        return {
+                            status: 'incomplete',
+                            findings: [],
+                            transcript,
+                            stepsUsed: stepsTaken,
+                            stepsGranted,
+                            extensionsGranted,
+                            costSpentUsd,
+                            terminationReason: 'blocked_read_recovery',
+                            summary: 'Investigation incomplete — scheduler determined no executable work remains during recovery.',
+                            investigationNotes: [],
+                            coverageGaps: [],
+                        };
+                    }
                 }
             }
         }
@@ -1565,55 +1672,3 @@ function describeAction(action: AgentScanAction): string {
 // Local type alias to avoid importing from api/types (which uses a different
 // AgentScanStepResponse shape — the one here is the same as agentScanProtocol).
 type AgentStepResponse = AgentScanStepResponse;
-
-/**
- * Select a deterministic recovery action based on investigation state.
- *
- * Priority:
- *   1. Unread range exists on the target file → read_file(next unread range)
- *   2. route-discovery missing → get_endpoints
- *   3. policy-check missing → check_policy
- *   4. auth-symbol-search missing → search_code
- *   5. cross-file-flow missing → trace_flow_cross_file
- *   6. config-inspection missing → read_config
- *   7. tests-found missing → find_tests
- *   8. otherwise → null (force-finish will handle it)
- */
-function selectDeterministicRecoveryAction(
-    state: InvestigationState,
-    target: AgentScanTarget,
-    ctx: ServerContext,
-): AgentScanAction | null {
-    // Priority 1: unread range on the target file
-    const nextRange = state.getNextUnreadRange(target.filePath);
-    if (nextRange) {
-        return {
-            type: 'read_file',
-            path: target.filePath,
-            startLine: nextRange.start,
-            endLine: nextRange.end,
-            rationale: 'Deterministic recovery: reading next unread range',
-        } as AgentScanAction;
-    }
-
-    // Priority 2-7: incomplete investigation steps
-    const incomplete = state.getIncompleteSteps();
-    for (const step of incomplete) {
-        switch (step) {
-            case 'route-discovery':
-                return { type: 'get_endpoints', rationale: 'Deterministic recovery: route discovery' } as AgentScanAction;
-            case 'policy-check':
-                return { type: 'check_policy', filePath: target.filePath, rationale: 'Deterministic recovery: policy check' } as AgentScanAction;
-            case 'auth-symbol-search':
-                return { type: 'search_code', pattern: 'auth|require|guard|permission|owner', rationale: 'Deterministic recovery: auth symbol search' } as AgentScanAction;
-            case 'cross-file-flow':
-                return { type: 'trace_flow_cross_file', filePath: target.filePath, rationale: 'Deterministic recovery: cross-file flow' } as AgentScanAction;
-            case 'config-inspection':
-                return { type: 'read_config', configKind: 'all', rationale: 'Deterministic recovery: config inspection' } as AgentScanAction;
-            case 'tests-found':
-                return { type: 'find_tests', filePath: target.filePath, rationale: 'Deterministic recovery: find tests' } as AgentScanAction;
-        }
-    }
-
-    return null;
-}

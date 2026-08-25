@@ -195,7 +195,7 @@ export function buildRecoveryConstraint(
     state: ScanRunState,
     investigation: InvestigationState,
 ): AgentActionConstraint | undefined {
-    const blocked = state.recovery.consecutiveBlockedActions;
+    const blocked = state.recovery.consecutiveModelBlockedActions;
     if (blocked < 2) return undefined;
 
     const recoveryAction = investigation.getRecommendedRecoveryAction();
@@ -203,8 +203,43 @@ export function buildRecoveryConstraint(
         mode: 'recovery',
         forbiddenActions: blocked >= 2 ? ['read_file'] : undefined,
         requiredAction: recoveryAction as any || undefined,
-        reason: `Recovery mode: ${blocked} consecutive blocked actions`,
+        reason: `Recovery mode: ${blocked} consecutive blocked model actions`,
     };
+}
+
+/**
+ * Compute a deterministic fingerprint for an action, used to detect
+ * repeated recovery attempts on the same action.
+ */
+export function actionFingerprint(action: AgentScanAction): string {
+    const a = action as any;
+    switch (a.type) {
+        case 'read_file':
+            return `read_file:${a.path || ''}:${a.startLine || 0}:${a.endLine || 0}`;
+        case 'search_code':
+            return `search_code:${a.pattern || ''}:${a.glob || ''}`;
+        case 'trace_flow':
+        case 'trace_flow_cross_file':
+            return `${a.type}:${a.filePath || ''}`;
+        case 'check_guard':
+            return `check_guard:${a.guardName || ''}:${a.attackType || ''}:${a.filePath || ''}`;
+        case 'check_policy':
+            return `check_policy:${a.filePath || ''}`;
+        case 'read_config':
+            return `read_config:${a.configKind || 'all'}`;
+        case 'get_endpoints':
+            return `get_endpoints:${a.glob || ''}`;
+        case 'find_tests':
+            return `find_tests:${a.filePath || ''}:${a.symbol || ''}`;
+        case 'find_definition':
+            return `find_definition:${a.filePath || ''}:${a.symbol || ''}`;
+        case 'find_references':
+            return `find_references:${a.filePath || ''}:${a.symbol || ''}`;
+        case 'call_graph':
+            return `call_graph:${a.filePath || ''}:${a.functionName || ''}`;
+        default:
+            return `${a.type || 'unknown'}:${JSON.stringify(a).slice(0, 100)}`;
+    }
 }
 
 function canExecute(input: SchedulerInput): boolean {

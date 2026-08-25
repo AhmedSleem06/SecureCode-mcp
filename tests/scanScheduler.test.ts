@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { schedule, type SchedulerInput } from '../src/attack/scanScheduler';
+import { schedule, actionFingerprint, type SchedulerInput } from '../src/attack/scanScheduler';
 import { createScanRunState, type ScanRunState } from '../src/attack/scanState';
 import { EvidenceLedger } from '../src/attack/evidenceLedger';
 import { WorkItemQueue, createProfileWorkItem, createImplementationReviewWorkItem } from '../src/attack/workItem';
@@ -149,5 +149,37 @@ describe('Scan Scheduler', () => {
         const decision = schedule(input);
         // No requirements → can't derive an action → falls through to model or finish
         expect(['model', 'finish-ready']).toContain(decision.kind);
+    });
+});
+
+describe('actionFingerprint', () => {
+    it('produces stable fingerprints for read_file', () => {
+        const a = { type: 'read_file', path: 'src/a.ts', startLine: 1, endLine: 50, rationale: 'r' } as any;
+        const b = { type: 'read_file', path: 'src/a.ts', startLine: 1, endLine: 50, rationale: 'different' } as any;
+        expect(actionFingerprint(a)).toBe(actionFingerprint(b));
+    });
+
+    it('produces different fingerprints for different ranges', () => {
+        const a = { type: 'read_file', path: 'src/a.ts', startLine: 1, endLine: 50, rationale: 'r' } as any;
+        const b = { type: 'read_file', path: 'src/a.ts', startLine: 51, endLine: 100, rationale: 'r' } as any;
+        expect(actionFingerprint(a)).not.toBe(actionFingerprint(b));
+    });
+
+    it('produces stable fingerprints for search_code', () => {
+        const a = { type: 'search_code', pattern: 'auth', glob: '*.ts', rationale: 'r' } as any;
+        const b = { type: 'search_code', pattern: 'auth', glob: '*.ts', rationale: 'x' } as any;
+        expect(actionFingerprint(a)).toBe(actionFingerprint(b));
+    });
+
+    it('produces stable fingerprints for trace_flow_cross_file', () => {
+        const a = { type: 'trace_flow_cross_file', filePath: 'src/a.ts', rationale: 'r' } as any;
+        const b = { type: 'trace_flow_cross_file', filePath: 'src/a.ts', rationale: 'x' } as any;
+        expect(actionFingerprint(a)).toBe(actionFingerprint(b));
+    });
+
+    it('produces different fingerprints for different files', () => {
+        const a = { type: 'trace_flow_cross_file', filePath: 'src/a.ts', rationale: 'r' } as any;
+        const b = { type: 'trace_flow_cross_file', filePath: 'src/b.ts', rationale: 'r' } as any;
+        expect(actionFingerprint(a)).not.toBe(actionFingerprint(b));
     });
 });

@@ -341,7 +341,7 @@ describe('runAgentScan — adaptive budget fields', () => {
 describe('runAgentScan — blocked-read recovery', () => {
     beforeEach(() => vi.clearAllMocks());
 
-    it('sends actionConstraint with forbiddenActions after 2 blocked reads', async () => {
+    it('sends actionConstraint with recovery mode after 2 blocked reads', async () => {
         const mockFn = mockPostJson([
             { runId: 'run-1', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 1.20, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
             // Step 1: first read succeeds (consecutiveBlockedReads stays 0)
@@ -369,7 +369,6 @@ describe('runAgentScan — blocked-read recovery', () => {
         const step4Req = step4Call[1];
         expect(step4Req.actionConstraint).toBeDefined();
         expect(step4Req.actionConstraint.mode).toBe('recovery');
-        expect(step4Req.actionConstraint.forbiddenActions).toContain('read_file');
     });
 
     it('triggers deterministic recovery on the third blocked read', async () => {
