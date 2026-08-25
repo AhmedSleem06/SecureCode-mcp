@@ -39,6 +39,11 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
         requiresApproval: false,
         approvalNote: 'Agent scan investigation is read-only. Fix generation within agent-scan requires its own approval prompt.',
     },
+    'securecode.agent-scan-batch': {
+        name: 'securecode.agent-scan-batch',
+        category: 'read-only',
+        requiresApproval: false,
+    },
     'securecode.record-false-positive': {
         name: 'securecode.record-false-positive',
         category: 'read-only',

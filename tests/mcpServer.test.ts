@@ -221,6 +221,7 @@ describe('SecureCode MCP — protocol conformance', () => {
             'securecode.scan-batch',
             'securecode.scan-secrets',
             'securecode.agent-scan',
+            'securecode.agent-scan-batch',
             'securecode.run-tests',
             'securecode.record-false-positive',
             'securecode.get-agent-memory',
@@ -231,7 +232,7 @@ describe('SecureCode MCP — protocol conformance', () => {
             'securecode.clear-finding-reviews',
         ]));
         expect(names).not.toContain('securecode.attack');
-        expect(names.length).toBe(15);
+        expect(names.length).toBe(16);
     });
 
     it('every tool carries a valid JSON Schema', async () => {

@@ -14,6 +14,7 @@ describe('Tool Policy', () => {
         expect(TOOL_POLICIES['securecode.scan'].requiresApproval).toBe(false);
         expect(TOOL_POLICIES['securecode.map'].requiresApproval).toBe(false);
         expect(TOOL_POLICIES['securecode.agent-scan'].requiresApproval).toBe(false);
+        expect(TOOL_POLICIES['securecode.agent-scan-batch'].requiresApproval).toBe(false);
     });
 
     it('paid-generation tools require approval', () => {

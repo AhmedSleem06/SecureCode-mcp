@@ -409,6 +409,42 @@ const ALL_TOOLS: ToolDef[] = [
             required: ['mode'],
         },
     },
+    {
+        name: 'securecode.agent-scan-batch',
+        description:
+            'Maps the project and scans the selected top files sequentially. Do not call securecode.agent-scan separately in parallel for the same batch. Stops after the first incomplete or failed file and reports remaining files as not-started. Uses architecture scout to identify the most security-relevant files, then runs agent-scan on each one in order. Each scan costs 5 scan credits. The architecture scout costs 5/10/20 credits (quick/standard/deep).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                topN: {
+                    type: 'number',
+                    description: 'Number of files to scan (default 3, clamped to 1..20).',
+                },
+                architectureDepth: {
+                    type: 'string',
+                    enum: ['quick', 'standard', 'deep'],
+                    description: 'Architecture scout depth (default "standard"). quick=5 credits, standard=10, deep=20.',
+                },
+                fileSelection: {
+                    type: 'string',
+                    enum: ['recommendedScanOrder', 'importantFiles'],
+                    description: 'Which file list to prefer for selection (default "recommendedScanOrder").',
+                },
+                noCache: {
+                    type: 'boolean',
+                    description: 'Skip the scan cache for all files in the batch.',
+                },
+                stopOnIncomplete: {
+                    type: 'boolean',
+                    description: 'Stop after the first incomplete scan (default true).',
+                },
+                stopOnFailure: {
+                    type: 'boolean',
+                    description: 'Stop after the first failed scan (default true).',
+                },
+            },
+        },
+    },
 ];
 
 export const TOOLS: ToolDef[] = ATTACK_ENABLED
