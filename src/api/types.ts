@@ -125,6 +125,32 @@ export interface ApiError {
     message: string;
     remaining?: number;
     scanType?: string;
+    creditType?: 'scan' | 'attacker';
+    requested?: number;
+    balance?: number;
+    required?: number;
+    available?: number;
+    shortfall?: number;
+    retryable?: boolean;
+}
+
+export interface CreditBalanceResponse {
+    scanCredits: number;
+    attackerCredits: number;
+    scanCreditsExpiringSoon?: number;
+    reservedScanCredits?: number;
+    availableScanCredits?: number;
+}
+
+export interface ApiErrorDetails {
+    creditType?: 'scan' | 'attacker';
+    requested?: number;
+    balance?: number;
+    required?: number;
+    available?: number;
+    shortfall?: number;
+    stage?: string;
+    retryable?: boolean;
 }
 
 export interface EndpointContext {
