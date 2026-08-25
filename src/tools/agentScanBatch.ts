@@ -20,6 +20,7 @@ import { toolAgentScan } from './agentScan';
 import { ApiClient } from '../api/client';
 import { selectAgentScanBatchFiles } from '../attack/agentScanBatchSelection';
 import { calculateBatchCredits, type CreditPlan } from '../attack/agentScanCreditPlan';
+import { globalScanCoordinator } from '../attack/agentScanCoordinator';
 import { AGENT_SCAN_DEFAULTS } from '../attack/agentScanProtocol';
 import { scoutDefaultsForDepth } from '../attack/architectureScoutProtocol';
 import {
@@ -55,6 +56,19 @@ interface AgentScanToolResult {
 }
 
 export async function toolAgentScanBatch(
+    ctx: ServerContext,
+    args: AgentScanBatchArgs & Record<string, any>,
+): Promise<AgentScanBatchResult> {
+    return globalScanCoordinator.runExclusive(
+        ctx.workspaceRoot,
+        () => toolAgentScanBatchInner(ctx, args),
+        {
+            signal: args._signal as AbortSignal | undefined,
+        },
+    );
+}
+
+async function toolAgentScanBatchInner(
     ctx: ServerContext,
     args: AgentScanBatchArgs & Record<string, any>,
 ): Promise<AgentScanBatchResult> {
@@ -182,6 +196,7 @@ export async function toolAgentScanBatch(
             const scanResult = await toolAgentScan(ctx, {
                 filePath: file.filePath,
                 _skipFix: true,
+                _skipCoordinator: true,
                 _noCache: noCache,
                 _signal: signal,
                 _progress: progress ? (p: number, t: number, m: string) => {

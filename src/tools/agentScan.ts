@@ -36,6 +36,7 @@ import {
     formatArchitectureRiskTasksForTarget,
 } from '../project-map/architectureContext';
 import { runAgentScan } from '../attack/agentScanLoop';
+import { globalScanCoordinator } from '../attack/agentScanCoordinator';
 import { runVerifyLoop } from '../attack/verifyLoop';
 import { runFixVerifyLoop } from '../attack/fixVerifyLoop';
 import { VerifyBudgetTracker, defaultVerifyBudget, defaultFixVerifyBudget, type VerifyBudget, type AgentScanScope, type FixVerificationStatus } from '../attack/agentScanProtocol';
@@ -182,6 +183,17 @@ function shouldQueueForHumanReview(finding: ProvenFinding): boolean {
 }
 
 export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unknown> {
+    if (args._skipCoordinator) {
+        return toolAgentScanInner(ctx, args);
+    }
+    return globalScanCoordinator.runExclusive(
+        ctx.workspaceRoot,
+        () => toolAgentScanInner(ctx, args),
+        { signal: args._signal as AbortSignal | undefined },
+    );
+}
+
+async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknown> {
     const progress = args._progress as ((progress: number, total: number, message: string) => void) | undefined;
     const skipFix = !!args._skipFix;
 
