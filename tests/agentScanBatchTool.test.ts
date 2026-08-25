@@ -12,10 +12,17 @@ vi.mock('../src/attack/agentScanBatchSelection', () => ({
     selectAgentScanBatchFiles: vi.fn(),
 }));
 
+vi.mock('../src/api/client', () => ({
+    ApiClient: vi.fn().mockImplementation(() => ({
+        getJson: vi.fn().mockResolvedValue({ scanCredits: 1000, attackerCredits: 100 }),
+    })),
+}));
+
 import { toolAgentScanBatch } from '../src/tools/agentScanBatch';
 import { toolMap } from '../src/tools/map';
 import { toolAgentScan } from '../src/tools/agentScan';
 import { selectAgentScanBatchFiles } from '../src/attack/agentScanBatchSelection';
+import { ApiClient } from '../src/api/client';
 import type { ArchitectureContext } from '../src/project-map/architectureContext';
 
 const ctx = { workspaceRoot: '/tmp/test', apiUrl: 'http://localhost:3000', apiToken: 'test' };
@@ -258,5 +265,25 @@ describe('toolAgentScanBatch — sequential orchestration', () => {
         expect(result.totals.completed).toBe(2);
         expect(result.totals.incomplete).toBe(1);
         expect(result.totals.notStarted).toBe(0);
+    });
+
+    it('returns preflight-failed on insufficient credits', async () => {
+        vi.mocked(ApiClient).mockImplementation((() => ({
+            getJson: vi.fn().mockResolvedValue({ scanCredits: 5, attackerCredits: 0 }),
+        })) as any);
+        mockArchResult(makeArch());
+        mockSelection(['src/a.ts', 'src/b.ts', 'src/c.ts']);
+        (toolAgentScan as any).mockResolvedValue(mockScanResult('completed'));
+
+        const result = await toolAgentScanBatch(ctx, { topN: 3 });
+
+        expect(result.status).toBe('preflight-failed');
+        expect(result.stopReason).toBe('insufficient-credits');
+        expect(result.totals.notStarted).toBe(3);
+        expect((toolAgentScan as any).mock.calls).toHaveLength(0);
+
+        vi.mocked(ApiClient).mockImplementation((() => ({
+            getJson: vi.fn().mockResolvedValue({ scanCredits: 1000, attackerCredits: 100 }),
+        })) as any);
     });
 });

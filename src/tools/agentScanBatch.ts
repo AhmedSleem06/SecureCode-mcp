@@ -17,7 +17,11 @@
 import type { ServerContext } from '../mcp/types';
 import { toolMap } from './map';
 import { toolAgentScan } from './agentScan';
+import { ApiClient } from '../api/client';
 import { selectAgentScanBatchFiles } from '../attack/agentScanBatchSelection';
+import { calculateBatchCredits, type CreditPlan } from '../attack/agentScanCreditPlan';
+import { AGENT_SCAN_DEFAULTS } from '../attack/agentScanProtocol';
+import { scoutDefaultsForDepth } from '../attack/architectureScoutProtocol';
 import {
     classifyAgentScanResult,
     buildBatchFileResult,
@@ -28,6 +32,7 @@ import {
     type AgentScanBatchFileResult,
     type AgentScanBatchStopReason,
 } from '../attack/agentScanBatchProtocol';
+import type { CreditBalanceResponse } from '../api/types';
 import type { ArchitectureContext } from '../project-map/architectureContext';
 
 interface ArchitectureToolResult {
@@ -65,6 +70,7 @@ export async function toolAgentScanBatch(
     if (progress) progress(0, 3, 'Mapping project + running architecture scout...');
 
     let architecture: ArchitectureContext | null = null;
+    let archCached = false;
 
     try {
         const archResult = await toolMap(ctx, {
@@ -78,6 +84,7 @@ export async function toolAgentScanBatch(
         }) as ArchitectureToolResult;
 
         architecture = archResult.architecture ?? null;
+        archCached = archResult.cached === true;
 
         if (!architecture) {
             return aggregateBatchResult(
@@ -116,7 +123,34 @@ export async function toolAgentScanBatch(
 
     const selectedFiles = selection.selected.map(f => f.filePath);
 
-    if (progress) progress(2, 3, `Preflight check for ${selectedFiles.length} file(s)...`);
+    if (progress) progress(2, 3, `Preflight credit check for ${selectedFiles.length} file(s)...`);
+
+    const creditPlan = calculateBatchCredits({
+        depth: architectureDepth,
+        architectureCacheHit: archCached,
+        uncachedFileCount: selection.selected.length,
+        cachedFileCount: 0,
+    });
+
+    try {
+        const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
+        const balance = await client.getJson<CreditBalanceResponse>('/credits/balance', signal);
+
+        if (balance.scanCredits < creditPlan.total) {
+            if (progress) progress(3, 3, `Insufficient credits: have ${balance.scanCredits}, need ${creditPlan.total}.`);
+            return aggregateBatchResult(
+                'insufficient-credits' as AgentScanBatchStopReason,
+                topN, selectedFiles,
+                selection.selected.map((f, i) =>
+                    buildNotStartedFileResult(f.filePath, f.rank, f.role, f.importance),
+                ),
+            );
+        }
+    } catch (err: any) {
+        if (signal?.aborted) {
+            return aggregateBatchResult('cancelled', topN, [], []);
+        }
+    }
 
     const fileResults: AgentScanBatchFileResult[] = [];
     let stopReason: AgentScanBatchStopReason = 'completed';
