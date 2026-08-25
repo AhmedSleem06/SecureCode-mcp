@@ -412,7 +412,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.agent-scan-batch',
         description:
-            'Maps the project and scans the selected top files sequentially. Do not call securecode.agent-scan separately in parallel for the same batch. Stops after the first incomplete or failed file and reports remaining files as not-started. Uses architecture scout to identify the most security-relevant files, then runs agent-scan on each one in order. Each scan costs 5 scan credits. The architecture scout costs 5/10/20 credits (quick/standard/deep).',
+            'Maps the project and scans the selected top files sequentially. Do not call securecode.agent-scan separately in parallel for the same batch. Stops after the first incomplete or failed file and reports remaining files as not-started. Uses architecture scout to identify the most security-relevant files, then runs agent-scan on each one in order. Performs a credit preflight check before starting: if insufficient credits for the full batch (architecture + scans + verification), returns preflight-failed without starting any paid operation. Each scan costs 5 scan credits. The architecture scout costs 5/10/20 credits (quick/standard/deep). Result categories: completed (clean finish), incomplete (cut short with coverage gaps), failed (operational error), not-started (selected but never attempted), preflight-failed (insufficient credits).',
         inputSchema: {
             type: 'object',
             properties: {

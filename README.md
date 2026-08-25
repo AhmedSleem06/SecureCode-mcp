@@ -100,7 +100,7 @@ Or if installed globally:
 claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/your/project
 ```
 
-## Tools (16)
+## Tools (17)
 
 ### Scanning
 
@@ -108,6 +108,7 @@ claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/y
 |------|-------------|----------|
 | `securecode.scan` | Scan code for vulnerabilities (AI pipeline) | No |
 | `securecode.agent-scan` | Agent-mode deep scan with 20+ tools, structured proof, and sandbox verification | No |
+| `securecode.agent-scan-batch` | Sequential batch scan: map + architecture scout + scan top N files one at a time | No |
 | `securecode.scan-batch` | Scan multiple files in one call | No |
 | `securecode.scan-secrets` | Scan for hardcoded secrets and PII (local, no AI) | No |
 | `securecode.scan-dependencies` | Scan lockfiles for known vulnerabilities (OSV/NVD) | No |
