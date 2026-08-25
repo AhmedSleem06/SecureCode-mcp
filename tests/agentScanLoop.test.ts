@@ -8,7 +8,7 @@
 //   - Loop terminates on abort signal
 //   - Transcript accumulates action+observation pairs
 //   - Cost tracking accumulates from step responses
-//   - spawn_failed on API error
+//   - spawn_failed on API error (now 'failed')
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -81,7 +81,7 @@ describe('runAgentScan — termination', () => {
         expect(result.summary).toBe('Found issue');
     });
 
-    it('terminates on null next with capped status', async () => {
+    it('terminates on null next with incomplete status (costCapped)', async () => {
         mockPostJson([
             { runId: 'run-1', budget: { stepsRemaining: 20, costSpentUsd: 0, costCapUsd: 0.40 }, scanCredits: 95, refundId: 'r1' },
             { next: null, costUsd: 0, tokens: 0, degraded: false, costCapped: true, stepsRemaining: 19 },
@@ -89,7 +89,7 @@ describe('runAgentScan — termination', () => {
 
         const result = await runAgentScan(ctx, target, {});
 
-        expect(result.status).toBe('capped');
+        expect(result.status).toBe('incomplete');
         expect(result.findings).toHaveLength(0);
         expect(result.stepsUsed).toBe(0);
     });
@@ -106,7 +106,7 @@ describe('runAgentScan — termination', () => {
         expect(result.findings).toHaveLength(0);
     });
 
-    it('terminates on null next with degraded status', async () => {
+    it('terminates on null next with incomplete status (degraded)', async () => {
         mockPostJson([
             { runId: 'run-1', budget: { stepsRemaining: 20, costSpentUsd: 0, costCapUsd: 0.40 }, scanCredits: 95, refundId: 'r1' },
             { next: null, costUsd: 0, tokens: 0, degraded: true, costCapped: false, stepsRemaining: 19 },
@@ -114,7 +114,7 @@ describe('runAgentScan — termination', () => {
 
         const result = await runAgentScan(ctx, target, {});
 
-        expect(result.status).toBe('degraded');
+        expect(result.status).toBe('incomplete');
     });
 
     it('terminates on abort signal', async () => {
@@ -130,14 +130,30 @@ describe('runAgentScan — termination', () => {
         expect(result.status).toBe('cancelled');
     });
 
-    it('returns spawn_failed on API error', async () => {
+    it('returns failed on API error', async () => {
         const mockFn = vi.fn().mockRejectedValue(new Error('Connection refused'));
         (ApiClient as any).mockImplementation(() => ({ postJson: mockFn }));
 
         const result = await runAgentScan(ctx, target, {});
 
-        expect(result.status).toBe('spawn_failed');
+        expect(result.status).toBe('failed');
         expect(result.error).toContain('Connection refused');
+    });
+
+    it('returns failed with api_restart on AGENT_RUN_NOT_FOUND mid-scan', async () => {
+        const apiErr: any = new Error('Invalid or expired agent run');
+        apiErr.apiCode = 'AGENT_RUN_NOT_FOUND';
+
+        const postJson = vi.fn()
+            .mockResolvedValueOnce({ runId: 'run-1', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 1.20, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' })
+            .mockRejectedValueOnce(apiErr);
+        (ApiClient as any).mockImplementation(() => ({ postJson }));
+
+        const result = await runAgentScan(ctx, target, {});
+
+        expect(result.status).toBe('failed');
+        expect(result.terminationReason).toBe('api_restart');
+        expect(result.error).toContain('restarted');
     });
 
     it('accumulates cost from step responses', async () => {
@@ -230,7 +246,7 @@ describe('runAgentScan — termination', () => {
 
         const result = await runAgentScan(ctx, target, {});
 
-        expect(['completed', 'capped']).toContain(result.status);
+        expect(['completed', 'incomplete']).toContain(result.status);
         // The transcript contains the critique system_event
         expect(result.transcript.some(t => t.action.type === 'system_event' && (t.action as any).eventType === 'critique')).toBe(true);
     });
@@ -295,7 +311,7 @@ describe('runAgentScan — adaptive budget fields', () => {
         });
 
         // The loop will hit wall clock or step budget since only start response is mocked
-        expect(['capped', 'completed', 'degraded', 'spawn_failed', 'cancelled', 'blocked_recovery']).toContain(result.status);
+        expect(['incomplete', 'completed', 'failed', 'cancelled']).toContain(result.status);
     });
 
     it('handles budgetExtension in step response', async () => {
@@ -382,7 +398,7 @@ describe('runAgentScan — blocked-read recovery', () => {
 
         const result = await runAgentScan(ctx, target, {});
 
-        expect(['completed', 'blocked_read_recovery']).toContain(result.status);
+        expect(['completed', 'incomplete']).toContain(result.status);
         // The transcript should contain a deterministic recovery step
         const recoveryStep = result.transcript.find(t => t.observation?.includes('[DETERMINISTIC RECOVERY]'));
         expect(recoveryStep).toBeDefined();
@@ -427,7 +443,7 @@ describe('runAgentScan — blocked-read recovery', () => {
         // Eventually the budget runs out or we run out of mock responses.
         // The important thing is that the loop doesn't hang and eventually
         // terminates (either via budget, blocked_read_recovery, or api_error).
-        expect(['completed', 'capped', 'spawn_failed', 'blocked_read_recovery']).toContain(result.status);
+        expect(['completed', 'incomplete', 'failed']).toContain(result.status);
     });
 });
 

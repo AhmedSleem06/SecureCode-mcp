@@ -98,7 +98,7 @@ export async function runAgentScan(
         const startValidation = validateStartResponse(startRespRaw);
         if (!startValidation.ok) {
             return {
-                status: 'spawn_failed',
+                status: 'failed',
                 findings: [],
                 transcript: [],
                 stepsUsed: 0,
@@ -297,7 +297,7 @@ export async function runAgentScan(
             if (Date.now() - startTime > wallClockMs) {
                 terminateScan(scanState, 'wall_clock', `Wall clock limit (${wallClockMs}ms) exceeded.`);
                 return {
-                    status: 'capped',
+                    status: 'incomplete',
                     findings: [],
                     transcript,
                     stepsUsed: stepsTaken,
@@ -413,7 +413,7 @@ export async function runAgentScan(
                     });
                     if (consecutiveErrors >= 3 || budget.stepsRemaining <= 0) {
                         return {
-                            status: 'capped',
+                            status: 'incomplete',
                             findings: [],
                             transcript,
                             stepsUsed: stepsTaken,
@@ -438,14 +438,14 @@ export async function runAgentScan(
                 if (apiCode === 'AGENT_RUN_NOT_FOUND' || /AGENT_RUN_NOT_FOUND|Invalid or expired agent run/i.test(errMsg)) {
                     console.warn(`[Agent Scan Loop] Agent run expired (API server restarted?). Stopping scan.`);
                     return {
-                        status: 'spawn_failed',
+                        status: 'failed',
                         findings: [],
                         transcript,
                         stepsUsed: stepsTaken,
                         stepsGranted,
                         extensionsGranted,
                         costSpentUsd,
-                        terminationReason: 'api_error',
+                        terminationReason: 'api_restart',
                         error: 'API server restarted mid-scan — the run was lost. Please retry the scan.',
                         investigationNotes: [],
                         coverageGaps: [],
@@ -498,7 +498,7 @@ export async function runAgentScan(
 
                 if (consecutiveErrors >= 3 || budget.stepsRemaining <= 0) {
                     return {
-                        status: 'capped',
+                        status: 'incomplete',
                         findings: [],
                         transcript,
                         stepsUsed: stepsTaken,
@@ -569,8 +569,8 @@ export async function runAgentScan(
             // Null next = done (cost capped or steps exhausted)
             if (!stepResp.next) {
                 const status: AgentScanRunStatus = stepResp.costCapped
-                    ? 'capped'
-                    : (stepResp.degraded ? 'degraded' : 'completed');
+                    ? 'incomplete'
+                    : (stepResp.degraded ? 'incomplete' : 'completed');
                 trace.logRunCompleted(status);
                 return {
                     status,
@@ -1050,7 +1050,7 @@ export async function runAgentScan(
                     } else {
                         console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — no recovery available, force-finishing.`);
                         transcript.push({ action, observation });
-                        trace.logRunCompleted('completed');
+                        trace.logRunCompleted('incomplete');
                         const incompleteSteps = investigationState.getIncompleteSteps();
                         const autoGaps = incompleteSteps.map(step => ({
                             title: `Investigation step not completed: ${step}`,
@@ -1090,7 +1090,7 @@ export async function runAgentScan(
                         qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
                         qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
                         return {
-                            status: 'completed',
+                            status: 'incomplete',
                             findings: [],
                             transcript,
                             stepsUsed: stepsTaken,
@@ -1376,7 +1376,7 @@ export async function runAgentScan(
         }
     } catch (err: any) {
         return {
-            status: 'spawn_failed',
+            status: 'failed',
             findings: [],
             transcript: [],
             stepsUsed: stepsTaken,

@@ -347,6 +347,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 }
                 return {
                     status: cached.status,
+                    terminationReason: cached.terminationReason,
                     summary: cached.summary || 'Agent completed (cached).',
                     agentFindings: filteredFindings,
                     findings: [],
@@ -426,7 +427,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
         },
     });
 
-    if (agentResult.status === 'spawn_failed') {
+    if (agentResult.status === 'failed') {
         throw new Error(agentResult.error || 'Agent scan failed to start.');
     }
 
@@ -811,6 +812,7 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
                 investigationNotes: agentResult.investigationNotes,
                 coverageGaps: agentResult.coverageGaps,
                 status: agentResult.status,
+                terminationReason: agentResult.terminationReason,
                 summary: agentResult.summary,
                 stepsUsed: agentResult.stepsUsed,
                 stepsGranted: agentResult.stepsGranted,

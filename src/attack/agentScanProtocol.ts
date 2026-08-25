@@ -644,11 +644,9 @@ export interface AgentScanToolResponse {
 
 export type AgentScanRunStatus =
     | 'completed'
-    | 'capped'
-    | 'degraded'
-    | 'spawn_failed'
-    | 'cancelled'
-    | 'blocked_recovery';
+    | 'incomplete'
+    | 'failed'
+    | 'cancelled';
 
 export type TerminationReason =
     | 'agent_finish'
@@ -658,6 +656,7 @@ export type TerminationReason =
     | 'wall_clock'
     | 'blocked_read_recovery'
     | 'api_error'
+    | 'api_restart'
     | 'cancelled';
 
 // ── Result ───────────────────────────────────────────────────────────────────

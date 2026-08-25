@@ -107,4 +107,150 @@ describe('scanCache — memory coherence', () => {
     it('computeMemoryFingerprint returns empty string for no false positives', () => {
         expect(computeMemoryFingerprint([])).toBe('');
     });
+
+    it('persists terminationReason in the cache entry', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [],
+            status: 'completed',
+            terminationReason: 'agent_finish',
+            summary: 'ok',
+            stepsUsed: 3,
+            costSpentUsd: 0.01,
+        });
+
+        const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
+        expect(cached).not.toBeNull();
+        expect(cached!.terminationReason).toBe('agent_finish');
+    });
+
+    it('keeps completed status when terminationReason is agent_finish', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [],
+            status: 'completed',
+            terminationReason: 'agent_finish',
+            stepsUsed: 1, costSpentUsd: 0,
+        });
+
+        const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
+        expect(cached).not.toBeNull();
+        expect(cached!.status).toBe('completed');
+    });
+
+    it('downgrades legacy completed entries without terminationReason to incomplete', () => {
+        const code = 'const x = 1;';
+        // Simulate a legacy entry: write with completed status but no
+        // terminationReason, then read back and verify it's downgraded.
+        const dir = path.join(workspaceRoot, '.securecode');
+        const cacheFile = path.join(dir, 'scan-cache.json');
+        const fileHash = crypto.createHash('sha256').update(code).digest('hex').slice(0, 16);
+        const legacyEntry = {
+            fileHash,
+            version: AGENT_SCAN_CACHE_VERSION,
+            timestamp: Date.now(),
+            findings: [],
+            status: 'completed',
+            summary: 'old scan',
+            stepsUsed: 10,
+            costSpentUsd: 0.05,
+            filePath: 'src/foo.ts',
+            memoryHash: '',
+        };
+        const key = 'src/foo.ts:' + fileHash;
+        fs.writeFileSync(cacheFile, JSON.stringify({
+            version: AGENT_SCAN_CACHE_VERSION,
+            entries: { [key]: legacyEntry },
+        }, null, 2));
+
+        const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
+        expect(cached).not.toBeNull();
+        expect(cached!.status).toBe('incomplete');
+    });
+
+    it('downgrades completed entries with non-agent_finish terminationReason to incomplete', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [],
+            status: 'completed',
+            terminationReason: 'blocked_read_recovery',
+            stepsUsed: 1, costSpentUsd: 0,
+        });
+
+        const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
+        expect(cached).not.toBeNull();
+        expect(cached!.status).toBe('incomplete');
+    });
+
+    it('preserves incomplete status from cache', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [],
+            status: 'incomplete',
+            terminationReason: 'wall_clock',
+            stepsUsed: 1, costSpentUsd: 0,
+        });
+
+        const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
+        expect(cached).not.toBeNull();
+        expect(cached!.status).toBe('incomplete');
+        expect(cached!.terminationReason).toBe('wall_clock');
+    });
+
+    it('maps legacy capped status to incomplete', () => {
+        const code = 'const x = 1;';
+        const dir = path.join(workspaceRoot, '.securecode');
+        const cacheFile = path.join(dir, 'scan-cache.json');
+        const fileHash = crypto.createHash('sha256').update(code).digest('hex').slice(0, 16);
+        const key = 'src/foo.ts:' + fileHash;
+        fs.writeFileSync(cacheFile, JSON.stringify({
+            version: AGENT_SCAN_CACHE_VERSION,
+            entries: { [key]: {
+                fileHash, version: AGENT_SCAN_CACHE_VERSION, timestamp: Date.now(),
+                findings: [], status: 'capped', stepsUsed: 10, costSpentUsd: 0.05,
+                filePath: 'src/foo.ts',
+            }},
+        }, null, 2));
+
+        const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
+        expect(cached!.status).toBe('incomplete');
+    });
+
+    it('maps legacy spawn_failed status to failed', () => {
+        const code = 'const x = 1;';
+        const dir = path.join(workspaceRoot, '.securecode');
+        const cacheFile = path.join(dir, 'scan-cache.json');
+        const fileHash = crypto.createHash('sha256').update(code).digest('hex').slice(0, 16);
+        const key = 'src/foo.ts:' + fileHash;
+        fs.writeFileSync(cacheFile, JSON.stringify({
+            version: AGENT_SCAN_CACHE_VERSION,
+            entries: { [key]: {
+                fileHash, version: AGENT_SCAN_CACHE_VERSION, timestamp: Date.now(),
+                findings: [], status: 'spawn_failed', stepsUsed: 0, costSpentUsd: 0,
+                filePath: 'src/foo.ts',
+            }},
+        }, null, 2));
+
+        const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
+        expect(cached!.status).toBe('failed');
+    });
+
+    it('maps legacy blocked_recovery status to incomplete', () => {
+        const code = 'const x = 1;';
+        const dir = path.join(workspaceRoot, '.securecode');
+        const cacheFile = path.join(dir, 'scan-cache.json');
+        const fileHash = crypto.createHash('sha256').update(code).digest('hex').slice(0, 16);
+        const key = 'src/foo.ts:' + fileHash;
+        fs.writeFileSync(cacheFile, JSON.stringify({
+            version: AGENT_SCAN_CACHE_VERSION,
+            entries: { [key]: {
+                fileHash, version: AGENT_SCAN_CACHE_VERSION, timestamp: Date.now(),
+                findings: [], status: 'blocked_recovery', stepsUsed: 5, costSpentUsd: 0.03,
+                filePath: 'src/foo.ts',
+            }},
+        }, null, 2));
+
+        const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
+        expect(cached!.status).toBe('incomplete');
+    });
 });

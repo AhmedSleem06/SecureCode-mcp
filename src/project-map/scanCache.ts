@@ -49,8 +49,10 @@ export interface ScanCacheEntry {
     investigationNotes?: any[];
     /** Areas that were not sufficiently investigated. */
     coverageGaps?: any[];
-    /** Scan status (completed, capped, etc.). */
+    /** Scan status (completed, incomplete, failed, cancelled). */
     status: string;
+    /** Why the scan terminated (agent_finish, blocked_read_recovery, etc.). */
+    terminationReason?: string;
     /** Summary from the agent. */
     summary?: string;
     /** Steps used by the agent. */
@@ -126,6 +128,21 @@ export function getCachedScan(
     // TTL check — re-scan after CACHE_TTL_MS
     if (Date.now() - entry.timestamp > CACHE_TTL_MS) return null;
 
+    // Legacy cache safety: map old status values to the canonical contract.
+    // Old entries used 'capped', 'degraded', 'spawn_failed', 'blocked_recovery'
+    // which no longer exist. A 'completed' entry without terminationReason
+    // 'agent_finish' was actually an incomplete scan (blocked_read_recovery or
+    // capped under the old naming).
+    if (entry.status === 'capped' || entry.status === 'degraded' || entry.status === 'blocked_recovery') {
+        return { ...entry, status: 'incomplete' };
+    }
+    if (entry.status === 'spawn_failed') {
+        return { ...entry, status: 'failed' };
+    }
+    if (entry.status === 'completed' && entry.terminationReason !== 'agent_finish') {
+        return { ...entry, status: 'incomplete' };
+    }
+
     return entry;
 }
 
@@ -141,6 +158,7 @@ export function writeCachedScan(
         investigationNotes?: any[];
         coverageGaps?: any[];
         status: string;
+        terminationReason?: string;
         summary?: string;
         stepsUsed: number;
         stepsGranted?: number;
@@ -183,6 +201,7 @@ export function writeCachedScan(
         investigationNotes: result.investigationNotes,
         coverageGaps: result.coverageGaps,
         status: result.status,
+        terminationReason: result.terminationReason,
         summary: result.summary,
         stepsUsed: result.stepsUsed,
         stepsGranted: result.stepsGranted,

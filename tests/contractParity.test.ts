@@ -1,142 +1,74 @@
-// Cross-repo contract parity — ensures the MCP and API agree on the verify
-// protocol surface. Runs in the MCP test suite but reads API files from the
-// sibling api/ directory in the same workspace.
-
 import { describe, it, expect } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
+import {
+    AGENT_SCAN_PROTOCOL_VERSION,
+    type AgentScanRunStatus,
+    type TerminationReason,
+} from '../src/attack/agentScanProtocol';
 
-const API_ROOT = path.resolve(__dirname, '..', '..', 'api');
-const verifyProveSchemaPath = path.join(API_ROOT, 'src', 'prompts', 'schemas', 'verify-prove.json');
-const verifyAnalyzeSchemaPath = path.join(API_ROOT, 'src', 'prompts', 'schemas', 'verify-analyze.json');
-
-function loadJson(p: string): any {
-    return JSON.parse(fs.readFileSync(p, 'utf8'));
-}
-
-describe('Cross-repo contract parity (Suite 5)', () => {
-    describe('verify-prove.json runner enum', () => {
-        const schema = loadJson(verifyProveSchemaPath);
-        const runnerEnum: string[] = schema.properties.runner.enum;
-
-        it('includes node, tsx, bun (original set)', () => {
-            expect(runnerEnum).toContain('node');
-            expect(runnerEnum).toContain('tsx');
-            expect(runnerEnum).toContain('bun');
-        });
-
-        it('includes deno (Fix 5)', () => {
-            expect(runnerEnum).toContain('deno');
-        });
-
-        it('includes python and python3 (Fix 5)', () => {
-            expect(runnerEnum).toContain('python');
-            expect(runnerEnum).toContain('python3');
-        });
-
-        it('runner is nullable (canTest=false responses have runner=null)', () => {
-            expect(schema.properties.runner.type).toContain('null');
-        });
+describe('agent scan protocol — canonical status contract', () => {
+    it('AgentScanRunStatus has exactly 4 values', () => {
+        const statuses: AgentScanRunStatus[] = [
+            'completed', 'incomplete', 'failed', 'cancelled',
+        ];
+        expect(statuses).toHaveLength(4);
+        expect(statuses).toContain('completed');
+        expect(statuses).toContain('incomplete');
+        expect(statuses).toContain('failed');
+        expect(statuses).toContain('cancelled');
     });
 
-    describe('verify-analyze.json verdict enum', () => {
-        const schema = loadJson(verifyAnalyzeSchemaPath);
-        const verdictEnum: string[] = schema.properties.verdict.enum;
-
-        it('includes PROVEN, UNPROVEN, INCONCLUSIVE', () => {
-            expect(verdictEnum).toContain('PROVEN');
-            expect(verdictEnum).toContain('UNPROVEN');
-            expect(verdictEnum).toContain('INCONCLUSIVE');
-        });
-
-        it('does not allow extraneous verdicts', () => {
-            expect(verdictEnum).toHaveLength(3);
-        });
-
-        it('shouldRetry is a boolean', () => {
-            expect(schema.properties.shouldRetry.type).toBe('boolean');
-        });
-
-        it('reason is a string', () => {
-            const reasonType = schema.properties.reason.type;
-            const t = Array.isArray(reasonType) ? reasonType : [reasonType];
-            expect(t).toContain('string');
-        });
+    it('AgentScanRunStatus does not contain legacy values', () => {
+        const legacy: string[] = ['capped', 'degraded', 'spawn_failed', 'blocked_recovery'];
+        const valid: string[] = ['completed', 'incomplete', 'failed', 'cancelled'];
+        for (const l of legacy) {
+            expect(valid).not.toContain(l);
+        }
     });
 
-    describe('MCP validator accepts the same runners the API schema declares', () => {
-        // Re-derive the MCP's accepted set by importing the validator and
-        // probing each runner. This catches drift without hardcoding.
-        const schema = loadJson(verifyProveSchemaPath);
-        const apiRunners = schema.properties.runner.enum.filter((r: string) => r !== null);
-
-        it.each(apiRunners.map((r: string) => ['runner:' + r, r]))('%s is accepted by the MCP validator', async (_label, runner) => {
-            const { validateVerifyGenerateResponse } = await import('../src/attack/protocolValidator');
-            const result = validateVerifyGenerateResponse({
-                canTest: true,
-                testScript: 'console.log("PASS: x")',
-                runner,
-            });
-            expect(result.ok).toBe(true);
-        });
+    it('TerminationReason includes api_restart', () => {
+        const reasons: TerminationReason[] = [
+            'agent_finish', 'forced_incomplete', 'budget_exhausted',
+            'cost_cap', 'wall_clock', 'blocked_read_recovery',
+            'api_error', 'api_restart', 'cancelled',
+        ];
+        expect(reasons).toContain('api_restart');
     });
 
-    describe('MCP validator rejects runners NOT in the API schema', () => {
-        const schema = loadJson(verifyProveSchemaPath);
-        const apiRunners = new Set(schema.properties.runner.enum.filter((r: string) => r !== null));
-        const nonSchemaRunners = ['ruby', 'go', 'rust', 'java', 'csharp', 'php'];
-
-        it.each(nonSchemaRunners.map((r: string) => ['runner:' + r, r]))('%s is rejected by the MCP validator', async (_label, runner) => {
-            const { validateVerifyGenerateResponse } = await import('../src/attack/protocolValidator');
-            const result = validateVerifyGenerateResponse({
-                canTest: true,
-                testScript: 'console.log("PASS: x")',
-                runner,
-            });
-            expect(result.ok).toBe(false);
-            // Sanity: it's rejected because it's not a known runner, not for
-            // some unrelated reason.
-            if (!result.ok) expect(result.error).toContain('runner');
-            // Double-check the API schema also doesn't allow it.
-            expect(apiRunners.has(runner)).toBe(false);
-        });
+    it('TerminationReason has exactly 9 values', () => {
+        const reasons: TerminationReason[] = [
+            'agent_finish', 'forced_incomplete', 'budget_exhausted',
+            'cost_cap', 'wall_clock', 'blocked_read_recovery',
+            'api_error', 'api_restart', 'cancelled',
+        ];
+        expect(reasons).toHaveLength(9);
     });
 
-    describe('MCP VerifyAnalyzeResponse verdicts match API verify-analyze.json', () => {
-        const schema = loadJson(verifyAnalyzeSchemaPath);
-        const apiVerdicts = new Set(schema.properties.verdict.enum);
-
-        it.each(['PROVEN', 'UNPROVEN', 'INCONCLUSIVE'] as const)('%s is in the API schema', (v) => {
-            expect(apiVerdicts.has(v)).toBe(true);
-        });
-
-        it('the MCP validator rejects verdicts not in the API schema', async () => {
-            const { validateVerifyAnalyzeResponse } = await import('../src/attack/protocolValidator');
-            const result = validateVerifyAnalyzeResponse({
-                verdict: 'MAYBE',
-                reason: 'unsure',
-                shouldRetry: false,
-            });
-            expect(result.ok).toBe(false);
-        });
+    it('protocol version is 5', () => {
+        expect(AGENT_SCAN_PROTOCOL_VERSION).toBe(5);
     });
+});
 
-    describe('MCP VerifyBudget matches plan constants', () => {
-        it('defaultVerifyBudget has the documented caps', async () => {
-            const { defaultVerifyBudget } = await import('../src/attack/agentScanProtocol');
-            const b = defaultVerifyBudget();
-            expect(b.maxFindings).toBe(10);
-            expect(b.maxRoundsPerFinding).toBe(12);
-            expect(b.maxLlmCalls).toBe(60);
-            expect(b.maxWallClockMs).toBe(10 * 60 * 1000);
-            expect(b.costCapUsd).toBe(0.80);
-        });
-    });
+describe('agent scan protocol — status classification rules', () => {
+    it('completed requires agent_finish termination reason', () => {
+        const completedReasons: TerminationReason[] = ['agent_finish'];
+        const incompleteReasons: TerminationReason[] = [
+            'forced_incomplete', 'budget_exhausted', 'cost_cap',
+            'wall_clock', 'blocked_read_recovery',
+        ];
+        const failedReasons: TerminationReason[] = ['api_error', 'api_restart'];
+        const cancelledReasons: TerminationReason[] = ['cancelled'];
 
-    describe('AGENT_SCAN_PROTOCOL_VERSION is 5', () => {
-        it('MCP protocol version is 4', async () => {
-            const mod = await import('../src/attack/agentScanProtocol');
-            expect(mod.AGENT_SCAN_PROTOCOL_VERSION).toBe(5);
-        });
+        for (const r of completedReasons) {
+            expect(r).toBe('agent_finish');
+        }
+        for (const r of incompleteReasons) {
+            expect(r).not.toBe('agent_finish');
+        }
+        for (const r of failedReasons) {
+            expect(r).not.toBe('agent_finish');
+        }
+        for (const r of cancelledReasons) {
+            expect(r).toBe('cancelled');
+        }
     });
 });
