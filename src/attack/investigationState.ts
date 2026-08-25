@@ -186,9 +186,18 @@ export class InvestigationState {
         const overlapStart = Math.max(a.start, b.start);
         const overlapEnd = Math.min(a.end, b.end);
         const overlapLines = overlapEnd - overlapStart + 1;
-        const newLines = (b.end - b.start + 1) - overlapLines;
-        if (newLines <= 0) return 1.0;
         return overlapLines / (b.end - b.start + 1);
+    }
+
+    static coveredLinesInRange(coverage: LineRange[], range: LineRange): number {
+        let covered = 0;
+        for (const r of coverage) {
+            if (!this.rangesOverlap(r, range)) continue;
+            const overlapStart = Math.max(r.start, range.start);
+            const overlapEnd = Math.min(r.end, range.end);
+            covered += overlapEnd - overlapStart + 1;
+        }
+        return covered;
     }
 
     /**
@@ -258,7 +267,8 @@ export class InvestigationState {
         }
 
         const requestedLines = range.end - range.start + 1;
-        const overlapLines = Math.round(maxOverlap * requestedLines);
+        const mergedCoverage = coverage ? coverage.ranges : [];
+        const overlapLines = InvestigationState.coveredLinesInRange(mergedCoverage, range);
         const newLines = requestedLines - overlapLines;
 
         let classification: ReadValueClassification;
@@ -510,7 +520,7 @@ export class InvestigationState {
 
         if (gaps.length === 1) {
             const end = Math.min(gaps[0].start + chunk - 1, gaps[0].end);
-            return this.snapToFunctionBoundary(gaps[0].start, end, functionBoundaries);
+            return this.snapToFunctionBoundary(gaps[0].start, end, functionBoundaries, gaps[0].start, gaps[0].end);
         }
 
         const lines = fileContent.split('\n');
@@ -559,10 +569,10 @@ export class InvestigationState {
         }
 
         const end = Math.min(bestGap.start + chunk - 1, bestGap.end);
-        return this.snapToFunctionBoundary(bestGap.start, end, functionBoundaries);
+        return this.snapToFunctionBoundary(bestGap.start, end, functionBoundaries, bestGap.start, bestGap.end);
     }
 
-    private snapToFunctionBoundary(start: number, end: number, boundaries?: { name: string; startLine: number; endLine: number }[]): LineRange {
+    private snapToFunctionBoundary(start: number, end: number, boundaries?: { name: string; startLine: number; endLine: number }[], gapStart?: number, gapEnd?: number): LineRange {
         if (!boundaries || boundaries.length === 0) return { start, end };
         let snappedStart = start;
         let snappedEnd = end;
@@ -574,6 +584,8 @@ export class InvestigationState {
                 snappedStart = Math.max(fn.startLine, start - 20);
             }
         }
+        if (gapStart !== undefined) snappedStart = Math.max(snappedStart, gapStart);
+        if (gapEnd !== undefined) snappedEnd = Math.min(snappedEnd, gapEnd);
         return { start: snappedStart, end: snappedEnd };
     }
 

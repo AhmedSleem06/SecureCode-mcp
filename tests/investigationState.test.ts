@@ -764,4 +764,112 @@ describe('InvestigationState', () => {
             expect(result.nextUnreadRange).toBeNull();
         });
     });
+
+    describe('gap-safe unread range selection', () => {
+        it('returns null after full coverage with 1275-line regression sequence', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 200, 1275, false);
+            state.recordActualRead('src/http.ts', 200, 500, 1275, false);
+            state.recordActualRead('src/http.ts', 501, 800, 1275, false);
+            state.recordActualRead('src/http.ts', 801, 1100, 1275, false);
+            state.recordActualRead('src/http.ts', 1101, 1275, 1275, false);
+
+            const summary = state.getCoverageSummary('src/http.ts');
+            expect(summary.totalLines).toBe(1275);
+            expect(summary.coveredLines).toBe(1275);
+            expect(summary.coveragePercentage).toBe(100);
+            expect(summary.uncoveredRangeCount).toBe(0);
+
+            const gaps = state.getUncoveredRanges('src/http.ts');
+            expect(gaps).toEqual([]);
+
+            expect(state.getNextUnreadRange('src/http.ts')).toBeNull();
+
+            const result = state.classifyRead('src/http.ts', 268, 500, 1275);
+            expect(result.newLines).toBe(0);
+        });
+
+        it('selected range has zero overlap with merged coverage', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 200, 1000, false);
+            state.recordActualRead('src/http.ts', 400, 600, 1000, false);
+
+            const next = state.getNextUnreadRange('src/http.ts');
+            expect(next).not.toBeNull();
+
+            const coverage = state.getCoverage('src/http.ts')!;
+            for (const range of coverage.ranges) {
+                const overlap = Math.max(0, Math.min(next!.end, range.end) - Math.max(next!.start, range.start) + 1);
+                expect(overlap).toBe(0);
+            }
+        });
+
+        it('nextUnreadRange is monotonic — never returns an already-covered range', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 100, 500, false);
+            state.recordActualRead('src/http.ts', 200, 300, 500, false);
+
+            const ranges: Array<{ start: number; end: number }> = [];
+            let next = state.getNextUnreadRange('src/http.ts');
+            while (next) {
+                ranges.push(next);
+                state.recordActualRead('src/http.ts', next.start, next.end, 500, false);
+                next = state.getNextUnreadRange('src/http.ts');
+            }
+
+            for (const r of ranges) {
+                const afterRead = state.classifyRead('src/http.ts', r.start, r.end, 500);
+                expect(afterRead.classification).toBe('duplicate');
+            }
+        });
+
+        it('function-boundary snapping never expands beyond the gap', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 200, 1000, false);
+            state.recordActualRead('src/http.ts', 700, 1000, 1000, false);
+
+            const functionBoundaries = [
+                { name: 'fn1', startLine: 180, endLine: 250 },
+                { name: 'fn2', startLine: 600, endLine: 720 },
+            ];
+
+            const content = 'x\n'.repeat(1000);
+            const next = state.getPrioritizedUnreadRange('src/http.ts', content, undefined, undefined, functionBoundaries);
+            expect(next).not.toBeNull();
+
+            const gaps = state.getUncoveredRanges('src/http.ts');
+            const matchingGap = gaps.find(g => g.start <= next!.start && g.end >= next!.end);
+            expect(matchingGap).toBeDefined();
+            expect(next!.start).toBeGreaterThanOrEqual(matchingGap!.start);
+            expect(next!.end).toBeLessThanOrEqual(matchingGap!.end);
+        });
+
+        it('handles fragmented gaps correctly', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/http.ts', 1, 100, 1000, false);
+            state.recordActualRead('src/http.ts', 200, 300, 1000, false);
+            state.recordActualRead('src/http.ts', 500, 600, 1000, false);
+            state.recordActualRead('src/http.ts', 800, 1000, 1000, false);
+
+            const gaps = state.getUncoveredRanges('src/http.ts');
+            expect(gaps).toHaveLength(3);
+            expect(gaps[0]).toEqual({ start: 101, end: 199 });
+            expect(gaps[1]).toEqual({ start: 301, end: 499 });
+            expect(gaps[2]).toEqual({ start: 601, end: 799 });
+
+            const next = state.getNextUnreadRange('src/http.ts');
+            expect(next).toEqual({ start: 101, end: 199 });
+        });
+
+        it('coveredLinesInRange computes exact overlap', () => {
+            const coverage = [
+                { start: 1, end: 200 },
+                { start: 400, end: 600 },
+            ];
+            expect(InvestigationState.coveredLinesInRange(coverage, { start: 1, end: 100 })).toBe(100);
+            expect(InvestigationState.coveredLinesInRange(coverage, { start: 150, end: 250 })).toBe(51);
+            expect(InvestigationState.coveredLinesInRange(coverage, { start: 300, end: 350 })).toBe(0);
+            expect(InvestigationState.coveredLinesInRange(coverage, { start: 1, end: 600 })).toBe(401);
+        });
+    });
 });
