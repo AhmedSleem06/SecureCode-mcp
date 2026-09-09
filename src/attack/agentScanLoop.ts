@@ -55,6 +55,7 @@ import {
     type AgentScanAction,
     type AgentScanBudget,
     type AgentScanFinding,
+    type AgentScanFinishAction,
     type AgentScanResult,
     type AgentScanRunStatus,
     type AgentScanStartResponse,
@@ -291,6 +292,8 @@ export async function runAgentScan(
         let consecutiveBlockedReads = 0;
         let meaningfulProgressSinceRecovery = true;
         let aggressiveCompaction = false;
+        let lastFinishAction: AgentScanFinishAction | null = null;
+        let lastFinishRejectionReasons: string[] = [];
         const attemptedRecoveryFingerprints = new Set<string>();
         const RECOVERY_FAILURE_LIMIT = 3;
 
@@ -439,6 +442,33 @@ export async function runAgentScan(
                 // Detect API server restart — the run was lost. Don't waste
                 // 3 retry steps on a dead run; return immediately.
                 if (apiCode === 'AGENT_RUN_NOT_FOUND' || /AGENT_RUN_NOT_FOUND|Invalid or expired agent run/i.test(errMsg)) {
+                    if (lastFinishAction) {
+                        console.warn('[Agent Scan Loop] Agent run already terminated after a delivered finish — surfacing the finish findings.');
+                        const finish = lastFinishAction;
+                        const coverageGaps = [...(finish.coverageGaps ?? [])];
+                        if (lastFinishRejectionReasons.length > 0) {
+                            coverageGaps.push({
+                                title: 'Finish accepted by the server despite local gate concerns',
+                                detail: `Local finish gate still flagged: ${lastFinishRejectionReasons.join('; ')}`,
+                                requiredEvidence: [],
+                                suggestedNextAction: 'Re-run a scan to cover the flagged gaps.',
+                                priority: 'medium',
+                            });
+                        }
+                        return {
+                            status: 'completed',
+                            findings: sanitizeFindings(finish.findings),
+                            investigationNotes: finish.investigationNotes ?? [],
+                            coverageGaps,
+                            transcript,
+                            stepsUsed: stepsTaken,
+                            stepsGranted,
+                            extensionsGranted,
+                            costSpentUsd,
+                            terminationReason: 'agent_finish',
+                            summary: finish.summary,
+                        };
+                    }
                     console.warn(`[Agent Scan Loop] Agent run expired (API server restarted?). Stopping scan.`);
                     return {
                         status: 'failed',
@@ -610,6 +640,8 @@ export async function runAgentScan(
             if (action.type === 'finish') {
                 scanState.finishAttempts++;
                 qualityTracker.recordFinishAttempt();
+                lastFinishAction = action;
+                lastFinishRejectionReasons = [];
 
                 // Register candidates from findings — each finding becomes a
                 // tracked candidate. If the candidate is new (discovered), the
@@ -765,6 +797,7 @@ export async function runAgentScan(
                 // Finish rejected — continue investigation
                 trace.logToolBlocked('finish', `Finish rejected: ${gateResult.reasons.map(r => r.description).join('; ')}`);
                 qualityTracker.recordFinishRejection();
+                lastFinishRejectionReasons = gateResult.reasons.map(r => r.description);
 
                 // Add a system event so the model sees the rejection
                 const rejectionMessage = `FINISH REJECTED — your investigation is incomplete:\n${gateResult.reasons.map(r => `  - ${r.description}`).join('\n')}\n\nYou must complete the remaining investigation steps before calling finish.${gateResult.recoveryAction ? `\n\nYour next action MUST be: ${gateResult.recoveryAction.type}` : ''}`;
