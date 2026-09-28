@@ -279,6 +279,84 @@ export async function runAgentScan(
                 return 8;
             }
         }
+
+        // Feed an EXECUTED action into the control plane: credit matching
+        // work items and record ledger evidence so requirements actually
+        // advance. Used for both model actions and deterministic-recovery
+        // executions — before recovery was wired in, scheduler-proposed
+        // actions executed without recording evidence, so the scheduler
+        // (a pure function of unchanged state) re-proposed the identical
+        // action until the run died on duplicate-recovery rejections.
+        // The ledger's content fingerprint dedups identical model/recovery
+        // evidence, so no double-counting occurs; work-item evidence ids
+        // carry a `:recovery` marker for traceability.
+        function recordActionEvidence(executedAction: AgentScanAction, stepIndex: number, source: 'model' | 'recovery'): void {
+            const actionFile = String((executedAction as any).filePath || (executedAction as any).path || target.filePath);
+            const actionFileNorm = actionFile.replace(/\\/g, '/').toLowerCase();
+            const evidenceKindMap: Record<string, string> = {
+                read_file: 'source-range',
+                search_code: 'symbol-reference',
+                trace_flow: 'cross-file-flow',
+                trace_flow_cross_file: 'cross-file-flow',
+                check_guard: 'guard-result',
+                check_policy: 'policy-result',
+                get_endpoints: 'handler-inventory',
+                list_imports: 'symbol-reference',
+                find_definition: 'symbol-definition',
+                find_references: 'symbol-reference',
+                find_tests: 'test-location',
+                run_tests: 'test-result',
+                read_config: 'config-result',
+                call_graph: 'cross-file-flow',
+            };
+
+            if (workItemQueue.size() > 0) {
+                const evidenceKind = evidenceKindMap[executedAction.type] || 'source-range';
+                for (const item of workItemQueue.getExecutable()) {
+                    const matchesFile = item.targetFiles.length === 0 ||
+                        item.targetFiles.some(
+                            f => f.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
+                        );
+                    if (matchesFile) {
+                        const evidenceId = source === 'recovery'
+                            ? `${executedAction.type}:${actionFileNorm}:${stepIndex}:recovery`
+                            : `${executedAction.type}:${actionFileNorm}:${stepIndex}`;
+                        workItemQueue.addEvidence(item.id, evidenceId);
+                        for (const req of item.requirements) {
+                            if (!req.acceptedKinds.includes(evidenceKind as any)) continue;
+                            if (req.targetFiles && req.targetFiles.length > 0) {
+                                const reqMatches = req.targetFiles.some(
+                                    f => f.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
+                                );
+                                if (!reqMatches) continue;
+                            }
+                            if (req.requiredTools && req.requiredTools.length > 0) {
+                                if (!req.requiredTools.includes(executedAction.type as any)) continue;
+                            }
+                            workItemQueue.addEvidenceForRequirement(item.id, req.id, evidenceId);
+                        }
+                        if (workItemQueue.isFullyResolved(item.id)) {
+                            workItemQueue.resolve(item.id);
+                        }
+                    }
+                }
+            }
+
+            const kind = evidenceKindMap[executedAction.type];
+            if (kind) {
+                evidenceLedger.recordEvidence({
+                    kind: kind as any,
+                    tool: executedAction.type as any,
+                    filePath: actionFile,
+                    range: executedAction.type === 'read_file'
+                        ? { start: (executedAction as any).startLine || 1, end: (executedAction as any).endLine || 1 }
+                        : undefined,
+                    symbol: (executedAction as any).symbol || (executedAction as any).pattern || undefined,
+                    outcome: 'positive',
+                    transcriptStep: stepIndex,
+                });
+            }
+        }
         // Track non-read tool calls to prevent the agent from looping on the
         // same search_code/trace_flow call repeatedly. Keyed by (type + args).
         const toolCallCounts = new Map<string, number>();
@@ -336,12 +414,14 @@ export async function runAgentScan(
 
             // Build action constraint for blocked-read recovery.
             //   0-1 blocked reads: normal (no constraint)
-            //   2 blocked reads: recovery mode — if unread ranges exist,
-            //     require the next unread range; if no unread ranges remain,
-            //     forbid read_file entirely and require an analysis tool.
-            //   3+ blocked reads: MCP selects a deterministic recovery action via scheduler
+            //   2+ blocked reads: recovery mode — if the scheduler has a
+            //     deterministic action, require it; otherwise forbid
+            //     read_file entirely and require an analysis tool. The
+            //     constraint keeps being sent while blocked reads continue,
+            //     so the model always has guidance while the MCP's own
+            //     deterministic recovery (3+ blocked) executes.
             let actionConstraint: AgentActionConstraint | undefined;
-            if (consecutiveBlockedReads >= 2 && consecutiveBlockedReads < 3) {
+            if (consecutiveBlockedReads >= 2) {
                 const schedDecision = schedulerDecision({
                     state: scanState,
                     evidence: evidenceLedger,
@@ -869,6 +949,7 @@ export async function runAgentScan(
                     const abs = require('path').resolve(ctx.workspaceRoot, action.path);
                     const content = fs.readFileSync(abs, 'utf8');
                     totalLines = content.split('\n').length;
+                    investigationState.recordLineDensity(action.path, content);
                 } catch { /* best-effort */ }
 
                 const readValue = investigationState.classifyRead(
@@ -899,13 +980,27 @@ export async function runAgentScan(
                     investigationState.recordBlockedRead(action.path);
                     observation = `BLOCKED: Invalid range for "${action.path}" (startLine=${action.startLine}, endLine=${action.endLine}). The requested range is inverted or out of bounds. Use a valid line range.\n\n${checklist}`;
                     wasBlocked = true;
+                } else if (readValue.classification === 'function-map') {
+                    qualityTracker.recordRead('function-map', false);
+                    investigationState.recordBlockedRead(action.path);
+                    const nextHint = readValue.nextUnreadRange
+                        ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
+                        : '';
+                    observation = `BLOCKED: The function map for "${action.path}" is already in the transcript above — it delivers no source coverage. Use read_file with explicit startLine/endLine to read the actual code.${nextHint}\n\n${checklist}`;
+                    wasBlocked = true;
                 } else {
                     qualityTracker.recordRead(readValue.classification, false);
                     const readResult = await executeReadFileAction(action, ctx);
                     observation = readResult.observation;
                     qualityTracker.recordRead(readValue.classification, readResult.truncated);
 
-                    if (readResult.totalLines > 0 && !readResult.truncated) {
+                    // Record coverage for the DELIVERED range only. A ranged
+                    // read on a dense file can be cut at the observation
+                    // cap — the executor reports the last line actually
+                    // delivered, and recording only that range leaves the
+                    // cut-off tail re-readable instead of silently marking
+                    // it covered.
+                    if (readResult.totalLines > 0 && readResult.actualStart > 0 && readResult.actualEnd >= readResult.actualStart) {
                         investigationState.recordActualRead(
                             action.path,
                             readResult.actualStart,
@@ -922,7 +1017,11 @@ export async function runAgentScan(
                         if (count >= fileMax) {
                             observation += `\n\nNOTE: You have read "${action.path}" ${count + 1} times. Consider using search_code, trace_flow, check_guard, or check_policy to analyze the code you've read. If you have enough evidence, call finish to report your findings.\n\n${checklist}`;
                         }
-                    } else if (readResult.truncated) {
+                    } else if (readResult.totalLines > 0 && readResult.truncated) {
+                        // Function-map read (large file, no range): no
+                        // content lines delivered. recordActualRead registers
+                        // the fnmap key so an immediate identical repeat is
+                        // blocked with a ranged-read hint.
                         investigationState.recordActualRead(
                             action.path,
                             readResult.actualStart,
@@ -1189,98 +1288,21 @@ export async function runAgentScan(
                 }
             }
 
-            // Link evidence to work items: when the agent runs an action on
-            // a file that matches a work item's target files, add evidence
-            // and resolve the work item if it has enough evidence.
-            if (!wasBlocked && workItemQueue.size() > 0) {
-                const actionFile = (action as any).filePath || (action as any).path || target.filePath;
-                const actionFileNorm = String(actionFile).replace(/\\/g, '/').toLowerCase();
-                const evidenceKindMap: Record<string, string> = {
-                    read_file: 'source-range',
-                    search_code: 'symbol-reference',
-                    trace_flow: 'cross-file-flow',
-                    trace_flow_cross_file: 'cross-file-flow',
-                    check_guard: 'guard-result',
-                    check_policy: 'policy-result',
-                    get_endpoints: 'handler-inventory',
-                    list_imports: 'symbol-reference',
-                    find_definition: 'symbol-definition',
-                    find_references: 'symbol-reference',
-                    find_tests: 'test-location',
-                    run_tests: 'test-result',
-                    read_config: 'config-result',
-                    call_graph: 'cross-file-flow',
-                };
-                const evidenceKind = evidenceKindMap[action.type] || 'source-range';
-                for (const item of workItemQueue.getExecutable()) {
-                    const matchesFile = item.targetFiles.length === 0 ||
-                        item.targetFiles.some(
-                            f => f.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
-                        );
-                    if (matchesFile) {
-                        const evidenceId = `${action.type}:${actionFileNorm}:${stepsTaken}`;
-                        workItemQueue.addEvidence(item.id, evidenceId);
-                        for (const req of item.requirements) {
-                            if (!req.acceptedKinds.includes(evidenceKind as any)) continue;
-                            if (req.targetFiles && req.targetFiles.length > 0) {
-                                const reqMatches = req.targetFiles.some(
-                                    f => f.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
-                                );
-                                if (!reqMatches) continue;
-                            }
-                            if (req.requiredTools && req.requiredTools.length > 0) {
-                                if (!req.requiredTools.includes(action.type as any)) continue;
-                            }
-                            workItemQueue.addEvidenceForRequirement(item.id, req.id, evidenceId);
-                        }
-                        if (workItemQueue.isFullyResolved(item.id)) {
-                            workItemQueue.resolve(item.id);
-                        }
-                    }
-                }
+            // Link evidence to work items and the evidence ledger: when the
+            // agent runs an action on a file that matches a work item's
+            // target files, add evidence and resolve the work item if it has
+            // enough evidence. The ledger record populates requirements so
+            // the scheduler can suggest actions for unsatisfied requirements
+            // and the finish gate can verify all evidence requirements are
+            // met. Deterministic-recovery executions go through the same
+            // path (see recordActionEvidence).
+            if (!wasBlocked) {
+                recordActionEvidence(action, stepsTaken, 'model');
             }
 
             // Re-sync candidates-verified after evidence linking
             if (candidateStore.allReadyForJuror()) {
                 investigationState.markCandidatesVerified();
-            }
-
-            // Evidence ledger: record evidence for each action type. This
-            // populates the evidence ledger so the scheduler can suggest
-            // actions for unsatisfied requirements and the finish gate can
-            // verify all evidence requirements are met.
-            if (!wasBlocked) {
-                const actionFile = String((action as any).filePath || (action as any).path || target.filePath);
-                const evidenceKindMap: Record<string, string> = {
-                    read_file: 'source-range',
-                    search_code: 'symbol-reference',
-                    trace_flow: 'cross-file-flow',
-                    trace_flow_cross_file: 'cross-file-flow',
-                    check_guard: 'guard-result',
-                    check_policy: 'policy-result',
-                    get_endpoints: 'handler-inventory',
-                    list_imports: 'symbol-reference',
-                    find_definition: 'symbol-definition',
-                    find_references: 'symbol-reference',
-                    find_tests: 'test-location',
-                    run_tests: 'test-result',
-                    read_config: 'config-result',
-                    call_graph: 'cross-file-flow',
-                };
-                const kind = evidenceKindMap[action.type];
-                if (kind) {
-                    evidenceLedger.recordEvidence({
-                        kind: kind as any,
-                        tool: action.type as any,
-                        filePath: actionFile,
-                        range: action.type === 'read_file'
-                            ? { start: (action as any).startLine || 1, end: (action as any).endLine || 1 }
-                            : undefined,
-                        symbol: (action as any).symbol || (action as any).pattern || undefined,
-                        outcome: wasBlocked ? 'blocked' : 'positive',
-                        transcriptStep: stepsTaken,
-                    });
-                }
             }
 
             // Flow verification: classify trace_flow/trace_flow_cross_file
@@ -1457,7 +1479,13 @@ export async function runAgentScan(
                         if (recoveryAction.type === 'read_file') {
                             const readResult = await executeReadFileAction(recoveryAction, ctx);
                             recoveryObservation = readResult.observation;
-                            if (readResult.totalLines > 0 && !readResult.truncated) {
+                            if (readResult.totalLines > 0) {
+                                // Record the DELIVERED range only — a ranged
+                                // recovery read on a dense file can be cut
+                                // at the observation cap; recording only the
+                                // delivered lines keeps the cut-off tail
+                                // re-readable. Function-map results (0/0)
+                                // register the fnmap key without coverage.
                                 investigationState.recordActualRead(
                                     (recoveryAction as any).path,
                                     readResult.actualStart,
@@ -1465,13 +1493,23 @@ export async function runAgentScan(
                                     readResult.totalLines,
                                     readResult.truncated,
                                 );
-                                recoveryMadeProgress = true;
+                                if (readResult.actualStart > 0 && readResult.actualEnd >= readResult.actualStart) {
+                                    recoveryMadeProgress = true;
+                                }
                             }
                         } else {
                             recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
                             recoveryMadeProgress = true;
                         }
                         qualityTracker.recordToolUse(recoveryAction.type); investigationState.recordToolUse(recoveryAction.type);
+
+                        // Feed the same evidence/work-item recording as
+                        // model actions so scheduler requirements actually
+                        // advance — otherwise the scheduler (a pure function
+                        // of unchanged state) re-proposes the identical
+                        // action and its already-burned fingerprint gets
+                        // rejected as a duplicate.
+                        recordActionEvidence(recoveryAction, stepsTaken, 'recovery');
 
                         if (recoveryMadeProgress) {
                             scanState.recovery.successfulRecoveryAttempts++;

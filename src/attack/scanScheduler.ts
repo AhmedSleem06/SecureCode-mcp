@@ -61,7 +61,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
     const activeCandidates = candidates.getActive();
     for (const candidate of activeCandidates) {
         if (candidate.severity === 'critical' || candidate.severity === 'high') {
-            const action = actionForCandidateEvidence(candidate, target);
+            const action = actionForCandidateEvidence(candidate, target, investigation);
             if (action) {
                 return {
                     kind: 'deterministic-action',
@@ -80,7 +80,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
     const topWorkItem = workItems.highestPriority();
     if (topWorkItem && (topWorkItem.priority === 'critical' || topWorkItem.priority === 'high')) {
         if (topWorkItem.status === 'pending' || topWorkItem.status === 'active') {
-            const action = actionForWorkItem(topWorkItem, target, workItems);
+            const action = actionForWorkItem(topWorkItem, target, workItems, investigation);
             if (action) {
                 return {
                     kind: 'deterministic-action',
@@ -158,7 +158,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
     // 6-8. Missing evidence from unsatisfied requirements
     const unsatisfied = evidence.getUnsatisfiedRequirements();
     if (unsatisfied.length > 0) {
-        const action = actionForRequirement(unsatisfied[0], target);
+        const action = actionForRequirement(unsatisfied[0], target, undefined, investigation);
         if (action) {
             return {
                 kind: 'deterministic-action',
@@ -171,7 +171,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
     // 9. Lower-priority pending work items
     const pending = workItems.getPending();
     if (pending.length > 0) {
-        const action = actionForWorkItem(pending[0], target, workItems);
+        const action = actionForWorkItem(pending[0], target, workItems, investigation);
         if (action) {
             return {
                 kind: 'deterministic-action',
@@ -210,27 +210,35 @@ export function buildRecoveryConstraint(
 /**
  * Compute a deterministic fingerprint for an action, used to detect
  * repeated recovery attempts on the same action.
+ *
+ * Requirement-derived scheduler actions carry a `requirementId` scope so
+ * two DIFFERENT requirements that map to the same tool call (e.g. several
+ * read_config requirements all producing `read_config:all`) don't collide
+ * on one burned fingerprint — the second requirement's recovery would
+ * otherwise be rejected as a duplicate of the first. read_file fingerprints
+ * stay range-based: ranged reads are already distinct per range.
  */
 export function actionFingerprint(action: AgentScanAction): string {
     const a = action as any;
+    const reqScope = a.requirementId ? `@${a.requirementId}` : '';
     switch (a.type) {
         case 'read_file':
             return `read_file:${a.path || ''}:${a.startLine || 0}:${a.endLine || 0}`;
         case 'search_code':
-            return `search_code:${a.pattern || ''}:${a.glob || ''}`;
+            return `search_code:${a.pattern || ''}:${a.glob || ''}${reqScope}`;
         case 'trace_flow':
         case 'trace_flow_cross_file':
-            return `${a.type}:${a.filePath || ''}`;
+            return `${a.type}:${a.filePath || ''}${reqScope}`;
         case 'check_guard':
-            return `check_guard:${a.guardName || ''}:${a.attackType || ''}:${a.filePath || ''}`;
+            return `check_guard:${a.guardName || ''}:${a.attackType || ''}:${a.filePath || ''}${reqScope}`;
         case 'check_policy':
-            return `check_policy:${a.filePath || ''}`;
+            return `check_policy:${a.filePath || ''}${reqScope}`;
         case 'read_config':
-            return `read_config:${a.configKind || 'all'}`;
+            return `read_config:${a.configKind || 'all'}${reqScope}`;
         case 'get_endpoints':
-            return `get_endpoints:${a.glob || ''}`;
+            return `get_endpoints:${a.glob || ''}${reqScope}`;
         case 'find_tests':
-            return `find_tests:${a.filePath || ''}:${a.symbol || ''}`;
+            return `find_tests:${a.filePath || ''}:${a.symbol || ''}${reqScope}`;
         case 'find_definition':
             return `find_definition:${a.filePath || ''}:${a.symbol || ''}`;
         case 'find_references':
@@ -247,10 +255,10 @@ function canExecute(input: SchedulerInput): boolean {
            input.state.budget.costSpentUsd < input.state.budget.costCapUsd;
 }
 
-function actionForCandidateEvidence(candidate: any, target: AgentScanTarget): AgentScanAction | null {
+function actionForCandidateEvidence(candidate: any, target: AgentScanTarget, investigation?: InvestigationState): AgentScanAction | null {
     if (candidate.requiredEvidence && candidate.requiredEvidence.length > 0) {
         const req = candidate.requiredEvidence[0];
-        return actionForRequirement(req, target);
+        return actionForRequirement(req, target, undefined, investigation);
     }
     // Default: trace flow to gather more evidence
     return {
@@ -260,7 +268,7 @@ function actionForCandidateEvidence(candidate: any, target: AgentScanTarget): Ag
     } as AgentScanAction;
 }
 
-function actionForWorkItem(item: WorkItem, target: AgentScanTarget, queue?: WorkItemQueue): AgentScanAction | null {
+function actionForWorkItem(item: WorkItem, target: AgentScanTarget, queue?: WorkItemQueue, investigation?: InvestigationState): AgentScanAction | null {
     if (item.kind === 'implementation-review') {
         const symbol = item.title.replace('Resolve implementation for: ', '');
         return {
@@ -274,65 +282,83 @@ function actionForWorkItem(item: WorkItem, target: AgentScanTarget, queue?: Work
     if (unsatisfied.length === 0) return null;
     const req = unsatisfied[0];
     const targetFile = req.targetFiles?.[0] || item.targetFiles[0] || target.filePath;
-    return actionForRequirement(req, target, targetFile);
+    return actionForRequirement(req, target, targetFile, investigation);
 }
 
-function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget, explicitTargetFile?: string): AgentScanAction | null {
+function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget, explicitTargetFile?: string, investigation?: InvestigationState): AgentScanAction | null {
     const tool = req.requiredTools?.[0];
     if (!tool) return null;
     const targetFile = explicitTargetFile || req.targetFiles?.[0] || target.filePath;
+    // Stamp the requirement id so actionFingerprint scopes requirement-derived
+    // actions per-requirement — see actionFingerprint for why.
+    const stamp = (action: AgentScanAction): AgentScanAction =>
+        Object.assign({}, action, { requirementId: req.id });
 
     switch (tool) {
-        case 'read_file':
-            return {
+        case 'read_file': {
+            // Ranged read: a rangeless read on a large file returns a
+            // function map (no content, no progress), so derive the next
+            // unread range from tracked coverage when one exists.
+            const nextRange = investigation?.getNextUnreadRange(targetFile) ?? null;
+            if (nextRange) {
+                return stamp({
+                    type: 'read_file',
+                    path: targetFile,
+                    startLine: nextRange.start,
+                    endLine: nextRange.end,
+                    rationale: req.description,
+                } as AgentScanAction);
+            }
+            return stamp({
                 type: 'read_file',
                 path: targetFile,
                 rationale: req.description,
-            } as AgentScanAction;
+            } as AgentScanAction);
+        }
         case 'search_code':
-            return {
+            return stamp({
                 type: 'search_code',
                 pattern: 'auth|require|guard|permission|owner',
                 rationale: req.description,
-            } as AgentScanAction;
+            } as AgentScanAction);
         case 'check_policy':
-            return {
+            return stamp({
                 type: 'check_policy',
                 filePath: targetFile,
                 rationale: req.description,
-            } as AgentScanAction;
+            } as AgentScanAction);
         case 'check_guard':
-            return {
+            return stamp({
                 type: 'check_guard',
                 filePath: targetFile,
                 guardName: 'auth',
                 attackType: 'broken_access_control',
                 rationale: req.description,
-            } as AgentScanAction;
+            } as AgentScanAction);
         case 'get_endpoints':
-            return {
+            return stamp({
                 type: 'get_endpoints',
                 rationale: req.description,
-            } as AgentScanAction;
+            } as AgentScanAction);
         case 'trace_flow':
         case 'trace_flow_cross_file':
-            return {
+            return stamp({
                 type: 'trace_flow_cross_file',
                 filePath: targetFile,
                 rationale: req.description,
-            } as AgentScanAction;
+            } as AgentScanAction);
         case 'read_config':
-            return {
+            return stamp({
                 type: 'read_config',
                 configKind: 'all',
                 rationale: req.description,
-            } as AgentScanAction;
+            } as AgentScanAction);
         case 'find_tests':
-            return {
+            return stamp({
                 type: 'find_tests',
                 filePath: targetFile,
                 rationale: req.description,
-            } as AgentScanAction;
+            } as AgentScanAction);
         case 'find_definition':
             return null;
         case 'find_references':

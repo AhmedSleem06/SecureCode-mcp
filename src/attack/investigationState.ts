@@ -16,6 +16,8 @@
  *    the missing steps visible to the agent AND to the controller.
  */
 
+import { MAX_OBSERVATION_CHARS } from './observationLimits';
+
 export interface LineRange {
     start: number;
     end: number;
@@ -132,6 +134,8 @@ export class InvestigationState {
     private symbolsSearched = new Set<string>();
     private rootCauses = new Map<string, string>();
     private duplicateReadKeys = new Set<string>();
+    private functionMapReads = new Set<string>();
+    private lineDensities = new Map<string, number>();
     private tasks = new Map<string, InvestigationTask>();
     private flowVerifications: FlowVerification[] = [];
 
@@ -248,6 +252,23 @@ export class InvestigationState {
             };
         }
 
+        // Whole-file no-range reads on large files return a function map,
+        // not content. The first delivery records a fnmap key; an identical
+        // repeat is classified here so the loop blocks it with a hint to
+        // read ranged sections instead of re-fetching the same map — which
+        // would make zero progress since fnmap reads record no coverage.
+        const isWholeFileRead = (startLine === undefined || startLine === null) &&
+            (endLine === undefined || endLine === null);
+        if (isWholeFileRead && this.functionMapReads.has(normalized)) {
+            return {
+                classification: 'function-map',
+                overlapFraction: 0,
+                newLines: 0,
+                coverageAfter: coverage ? [...coverage.ranges] : [],
+                nextUnreadRange: this.getNextUnreadRange(filePath),
+            };
+        }
+
         if (this.duplicateReadKeys.has(rangeKey)) {
             return {
                 classification: 'duplicate',
@@ -360,10 +381,16 @@ export class InvestigationState {
      * Record a read using the ACTUAL delivered range (not the requested range).
      *
      * Use this when the executor returns structured metadata telling you
-     * exactly which lines were delivered. A large-file read that returns a
-     * function map (truncated=true, actualStart=0, actualEnd=0) does NOT
-     * record any content coverage — the agent must still read specific
-     * line ranges.
+     * exactly which lines were delivered:
+     *
+     * - A large-file read that returns a function map (truncated=true,
+     *   actualStart=0, actualEnd=0) records NO content coverage — it only
+     *   registers the fnmap key so an immediate identical repeat is blocked
+     *   with a hint to use ranged reads. The agent must still read specific
+     *   line ranges.
+     * - A truncated RANGED read (content cut at the observation cap) DOES
+     *   deliver real lines — the delivered range is recorded so the cut-off
+     *   tail stays re-readable as new coverage.
      */
     recordActualRead(
         filePath: string,
@@ -393,10 +420,21 @@ export class InvestigationState {
         coverage.readCount++;
         if (totalLines) coverage.totalLines = totalLines;
 
-        // Truncated reads (function map) deliver no content lines — don't
-        // record any range coverage and don't complete initial-read. The
-        // agent must still read specific sections with actual content.
-        if (truncated || actualStart === 0 || actualEnd === 0) {
+        // No content lines delivered. Function-map results also register
+        // the fnmap key so classifyRead can block an identical whole-file
+        // repeat with a ranged-read hint. Neither records range coverage
+        // or completes initial-read.
+        if (actualStart === 0 && actualEnd === 0) {
+            if (truncated) this.functionMapReads.add(normalized);
+            this.filesRead.add(normalized);
+            return {
+                overlapping: false,
+                overlapFraction: 0,
+                coverageAfter: [...coverage.ranges],
+            };
+        }
+
+        if (actualStart === 0 || actualEnd === 0) {
             this.filesRead.add(normalized);
             return {
                 overlapping: false,
@@ -495,13 +533,16 @@ export class InvestigationState {
      *   1,000-5,000       300-line chunks
      *   > 5,000 lines     400-line chunks
      *
+     * The chunk is shrunk by the file's average chars/line (when known) so
+     * the expected observation fits under the executor's char cap.
+     *
      * Returns null if the file is fully covered or not tracked.
      */
     getNextUnreadRange(filePath: string, chunkSize?: number): LineRange | null {
         const coverage = this.getCoverage(filePath);
         if (!coverage || !coverage.totalLines) return null;
 
-        const chunk = chunkSize ?? InvestigationState.chunkSizeForLines(coverage.totalLines);
+        const chunk = chunkSize ?? this.effectiveChunkSize(filePath, coverage.totalLines);
         const gaps = this.getUncoveredRanges(filePath);
         if (gaps.length === 0) return null;
 
@@ -514,7 +555,7 @@ export class InvestigationState {
         const coverage = this.getCoverage(filePath);
         if (!coverage || !coverage.totalLines) return null;
 
-        const chunk = chunkSize ?? InvestigationState.chunkSizeForLines(coverage.totalLines);
+        const chunk = chunkSize ?? this.effectiveChunkSize(filePath, coverage.totalLines, fileContent);
         const gaps = this.getUncoveredRanges(filePath);
         if (gaps.length === 0) return null;
 
@@ -607,6 +648,55 @@ export class InvestigationState {
         if (totalLines < 1000) return 250;
         if (totalLines < 5000) return 300;
         return 400;
+    }
+
+    /**
+     * Record a file's average chars-per-line (sampled from up to 200
+     * lines) so chunk sizing can shrink read ranges on dense files whose
+     * observations would otherwise be cut at the executor's char cap.
+     */
+    recordLineDensity(filePath: string, content: string): void {
+        const lines = content.split('\n');
+        const sampleCount = Math.min(lines.length, 200);
+        if (sampleCount === 0) return;
+        let chars = 0;
+        for (let i = 0; i < sampleCount; i++) chars += lines[i].length;
+        const avg = chars / sampleCount;
+        if (avg > 0) this.lineDensities.set(InvestigationState.normalizePath(filePath), avg);
+    }
+
+    /**
+     * Char-aware chunk sizing: shrink the line chunk so the expected
+     * observation (line content + line-number prefixes) fits under the
+     * executor's observation cap. Dense files (long average lines) get
+     * smaller chunks so a ranged read is never silently truncated.
+     * Clamped to a 60-line minimum so progress still happens on
+     * extremely dense files. Falls back to the line-count-only policy
+     * when no density information is available.
+     */
+    static chunkSizeForContent(totalLines: number, content?: string, avgCharsPerLine?: number): number {
+        const base = InvestigationState.chunkSizeForLines(totalLines);
+        let avg = avgCharsPerLine;
+        if (avg === undefined && content) {
+            const lines = content.split('\n');
+            const sampleCount = Math.min(lines.length, 200);
+            if (sampleCount > 0) {
+                let chars = 0;
+                for (let i = 0; i < sampleCount; i++) chars += lines[i].length;
+                avg = chars / sampleCount;
+            }
+        }
+        if (avg === undefined || avg <= 0) return base;
+        const LINE_NUMBER_OVERHEAD = 8;
+        const maxLines = Math.floor((MAX_OBSERVATION_CHARS * 0.9) / (avg + LINE_NUMBER_OVERHEAD));
+        return Math.max(60, Math.min(base, maxLines));
+    }
+
+    private effectiveChunkSize(filePath: string, totalLines: number, content?: string): number {
+        const normalized = InvestigationState.normalizePath(filePath);
+        return InvestigationState.chunkSizeForContent(
+            totalLines, content, this.lineDensities.get(normalized),
+        );
     }
 
     recordToolUse(toolType: string): void {

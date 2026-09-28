@@ -184,6 +184,7 @@ export class QualityMetricsTracker {
             case 'duplicate': this.metrics.reads.duplicate++; this.metrics.reads.blocked++; break;
             case 'high-overlap': this.metrics.reads.highOverlap++; this.metrics.reads.blocked++; break;
             case 'invalid': this.metrics.reads.invalid++; this.metrics.reads.blocked++; break;
+            case 'function-map': this.metrics.reads.blocked++; break;
             default: break;
         }
         if (truncated) this.metrics.reads.truncated++;

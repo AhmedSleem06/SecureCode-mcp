@@ -30,8 +30,13 @@ const CACHE_FILE = 'scan-cache.json';
  * v24 → v25: Precision evidence model — investigationNotes, coverageGaps,
  * evidenceChain, rootCause, verificationLevel on findings. Cached results
  * from v24 lack these fields and must be re-scanned.
+ * v31 → v32: Truncation-aware read coverage (delivered-range recording +
+ * re-read notes), function-map repeat blocking, per-requirement recovery
+ * fingerprints, and recovery evidence recording — scans now progress past
+ * blocked-read recovery loops that previously terminated incomplete, so
+ * cached v31 results must be re-scanned.
  */
-export const AGENT_SCAN_CACHE_VERSION = 31;
+export const AGENT_SCAN_CACHE_VERSION = 32;
 
 /** Cache TTL: 7 days. Findings older than this are re-scanned. */
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;

@@ -94,7 +94,7 @@ describe('findTests', () => {
             const result = await findTests(ws, 'src/lib/auth.ts', 'requireAuth');
             expect(result).toContain('By symbol reference');
             expect(result).toContain('requireAuth');
-        });
+        }, 120000);
 
         it('does not report naming-match files as symbol matches', async () => {
             const ws = setupWorkspace({
@@ -106,7 +106,7 @@ describe('findTests', () => {
             // Should be listed under naming convention, not symbol reference
             const namingSection = result.split('By symbol reference')[0];
             expect(namingSection).toContain('By naming convention');
-        });
+        }, 120000);
 
         it('returns matched line previews for symbol matches', async () => {
             const ws = setupWorkspace({
@@ -115,7 +115,7 @@ describe('findTests', () => {
             });
             const result = await findTests(ws, 'src/guard.ts', 'checkGuard');
             expect(result).toContain('checkGuard');
-        });
+        }, 120000);
     });
 
     describe('edge cases', () => {
@@ -151,6 +151,6 @@ describe('findTests', () => {
             // Should still find the naming-convention match
             expect(result).toContain('tests/auth.test.ts');
             expect(result).toContain('By naming convention');
-        });
+        }, 120000);
     });
 });

@@ -90,9 +90,18 @@ export interface AgentScanReadFileAction {
  * Structured metadata returned by the executor for a read_file action.
  *
  * The loop records coverage using `actualStart..actualEnd` (the range the
- * executor actually delivered), never the requested range. A large-file read
- * that returns a function map instead of raw content has `truncated === true`
- * and `actualStart/actualEnd` set to 0 (no content lines were delivered).
+ * executor actually delivered), never the requested range. Three cases:
+ *
+ * 1. Full delivery — actualStart..actualEnd cover the requested range
+ *    (clamped to file bounds), truncated=false.
+ * 2. Large file (> LARGE_FILE_THRESHOLD) with no startLine/endLine → the
+ *    executor returns a function map, not raw content. `truncated === true`
+ *    and actualStart/actualEnd are 0 (no content lines delivered).
+ * 3. Content cut at the observation char cap → `truncated === true` and
+ *    actualEnd is the last line actually delivered (not the requested
+ *    end); the observation ends with a re-read note naming the undelivered
+ *    remainder, which stays re-readable because coverage is recorded for
+ *    delivered lines only.
  */
 export interface ReadFileObservation {
     /** Redacted, truncated observation string for the LLM transcript. */
@@ -103,7 +112,7 @@ export interface ReadFileObservation {
     actualEnd: number;
     /** Total line count of the file on disk. */
     totalLines: number;
-    /** True if the executor returned a function map or otherwise did not deliver raw content. */
+    /** True if content was cut: function map, or ranged content trimmed at the observation cap. */
     truncated: boolean;
 }
 

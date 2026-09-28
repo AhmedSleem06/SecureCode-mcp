@@ -150,6 +150,55 @@ describe('Scan Scheduler', () => {
         // No requirements → can't derive an action → falls through to model or finish
         expect(['model', 'finish-ready']).toContain(decision.kind);
     });
+
+    it('derives a RANGED read_file for an unsatisfied read requirement on a tracked file', () => {
+        const requirement = {
+            id: 'req-read',
+            description: 'Read the target file source',
+            acceptedKinds: ['source-range'],
+            requiredTools: ['read_file'],
+            minimumCount: 1,
+        };
+        const workItems = new WorkItemQueue();
+        workItems.add(createProfileWorkItem(requirement, ['other.ts']));
+        const investigation = new InvestigationState();
+        investigation.recordActualRead('other.ts', 1, 100, 500, false);
+        const input = makeInput({ workItems, investigation });
+        const decision = schedule(input);
+        expect(decision.kind).toBe('deterministic-action');
+        expect(decision.action?.type).toBe('read_file');
+        expect((decision.action as any).startLine).toBe(101);
+        expect((decision.action as any).endLine).toBe(350);
+        expect((decision.action as any).requirementId).toBe('req-read');
+    });
+});
+
+describe('actionFingerprint — requirement scoping', () => {
+    it('scopes read_config fingerprints per requirement', () => {
+        const a = { type: 'read_config', configKind: 'all', requirementId: 'req-a', rationale: 'r' } as any;
+        const b = { type: 'read_config', configKind: 'all', requirementId: 'req-b', rationale: 'r' } as any;
+        expect(actionFingerprint(a)).not.toBe(actionFingerprint(b));
+        const a2 = { type: 'read_config', configKind: 'all', requirementId: 'req-a', rationale: 'other' } as any;
+        expect(actionFingerprint(a)).toBe(actionFingerprint(a2));
+    });
+
+    it('scopes get_endpoints fingerprints per requirement', () => {
+        const a = { type: 'get_endpoints', requirementId: 'req-a', rationale: 'r' } as any;
+        const b = { type: 'get_endpoints', requirementId: 'req-b', rationale: 'r' } as any;
+        expect(actionFingerprint(a)).not.toBe(actionFingerprint(b));
+    });
+
+    it('scopes trace_flow_cross_file fingerprints per requirement', () => {
+        const a = { type: 'trace_flow_cross_file', filePath: 'src/a.ts', requirementId: 'req-a', rationale: 'r' } as any;
+        const b = { type: 'trace_flow_cross_file', filePath: 'src/a.ts', requirementId: 'req-b', rationale: 'r' } as any;
+        expect(actionFingerprint(a)).not.toBe(actionFingerprint(b));
+    });
+
+    it('keeps read_file fingerprints range-based (no requirement scope)', () => {
+        const a = { type: 'read_file', path: 'src/a.ts', startLine: 1, endLine: 50, requirementId: 'req-a', rationale: 'r' } as any;
+        const b = { type: 'read_file', path: 'src/a.ts', startLine: 1, endLine: 50, requirementId: 'req-b', rationale: 'r' } as any;
+        expect(actionFingerprint(a)).toBe(actionFingerprint(b));
+    });
 });
 
 describe('actionFingerprint', () => {

@@ -41,12 +41,57 @@ import type {
     FlowHop,
 } from './agentScanProtocol';
 
-export const MAX_OBSERVATION_CHARS = 16000;
-export const LARGE_FILE_THRESHOLD = 300;
+export { MAX_OBSERVATION_CHARS, LARGE_FILE_THRESHOLD } from './observationLimits';
+import { MAX_OBSERVATION_CHARS, LARGE_FILE_THRESHOLD } from './observationLimits';
 
 export function truncate(text: string): string {
     if (text.length <= MAX_OBSERVATION_CHARS) return text;
     return text.slice(0, MAX_OBSERVATION_CHARS) + '\n… [truncated]';
+}
+
+/**
+ * Render a numbered read observation that fits under MAX_OBSERVATION_CHARS,
+ * returning the last line actually delivered.
+ *
+ * When the requested range exceeds the char cap, the observation is cut at
+ * the last complete line that fits and ends with an explicit re-read note
+ * naming the undelivered remainder. The loop records coverage for the
+ * delivered range only (actualStart..deliveredEnd), so the cut-off tail
+ * stays re-readable instead of being silently marked as covered.
+ */
+function renderNumberedRead(
+    header: string,
+    allLines: string[],
+    start: number,
+    end: number,
+): { observation: string; deliveredEnd: number; truncated: boolean } {
+    // Reserve room for the re-read note appended when the range is cut.
+    const budget = MAX_OBSERVATION_CHARS - 120;
+    const parts: string[] = [];
+    let used = header.length + 2;
+    let deliveredEnd = start - 1;
+    let truncated = false;
+    for (let line = start; line <= end; line++) {
+        const rendered = `${line}: ${redactText(allLines[line - 1])}`;
+        const cost = rendered.length + (parts.length > 0 ? 1 : 0);
+        if (parts.length > 0 && used + cost > budget) {
+            truncated = true;
+            break;
+        }
+        parts.push(rendered);
+        used += cost;
+        deliveredEnd = line;
+    }
+    let observation = `${header}\n\n${parts.join('\n')}`;
+    if (truncated && deliveredEnd < end) {
+        observation += `\n\n[truncated at line ${deliveredEnd} — re-read lines ${deliveredEnd + 1}..${end} for the rest]`;
+    }
+    // Safety net for pathological single lines longer than the whole cap.
+    if (observation.length > MAX_OBSERVATION_CHARS) {
+        observation = truncate(observation);
+        truncated = true;
+    }
+    return { observation, deliveredEnd, truncated };
 }
 
 export function redact(text: string): string {
@@ -186,6 +231,11 @@ export async function extractFunctionBoundaries(content: string, relPath: string
  *    and actualStart/actualEnd are 0 (no content lines delivered).
  * 3. Small file with no startLine/endLine → full content returned,
  *    actualStart=1, actualEnd=totalLines, truncated=false.
+ * 4. Range (or small file) whose rendered content exceeds MAX_OBSERVATION_CHARS
+ *    → the observation is cut at the last complete line that fits.
+ *    `truncated === true` and actualEnd is the last DELIVERED line, not the
+ *    requested end; the observation ends with a re-read note naming the
+ *    undelivered remainder.
  */
 export async function executeReadFileAction(
     action: AgentScanAction,
@@ -204,16 +254,16 @@ export async function executeReadFileAction(
         if (startLine || endLine) {
             const start = Math.max(1, startLine || 1);
             const end = Math.min(totalLines, endLine || totalLines);
-            const section = allLines.slice(start - 1, end)
-                .map((line, i) => `${start + i}: ${line}`)
-                .join('\n');
-            const observation = redact(`File: ${rel} (lines ${start}-${end} of ${totalLines})\n\n${section}`);
+            const rendered = renderNumberedRead(
+                `File: ${rel} (lines ${start}-${end} of ${totalLines})`,
+                allLines, start, end,
+            );
             return {
-                observation,
+                observation: rendered.observation,
                 actualStart: start,
-                actualEnd: end,
+                actualEnd: rendered.deliveredEnd,
                 totalLines,
-                truncated: false,
+                truncated: rendered.truncated,
             };
         }
 
@@ -232,17 +282,18 @@ export async function executeReadFileAction(
             }
         }
 
-        // Case 3: small file, no range → full content
-        const numbered = allLines
-            .map((line, i) => `${i + 1}: ${line}`)
-            .join('\n');
-        const observation = redact(`File: ${rel} (${totalLines} lines)\n\n${numbered}`);
+        // Case 3: small file, no range → full content (may still be cut at
+        // the char cap on dense files — same delivered-range reporting)
+        const rendered = renderNumberedRead(
+            `File: ${rel} (${totalLines} lines)`,
+            allLines, 1, totalLines,
+        );
         return {
-            observation,
+            observation: rendered.observation,
             actualStart: 1,
-            actualEnd: totalLines,
+            actualEnd: rendered.deliveredEnd,
             totalLines,
-            truncated: false,
+            truncated: rendered.truncated,
         };
     } catch (e: any) {
         return {

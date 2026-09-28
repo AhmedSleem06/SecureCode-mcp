@@ -359,6 +359,32 @@ describe('InvestigationState', () => {
             expect(coverage!.ranges).toEqual([]);
             expect(coverage!.readCount).toBe(1);
         });
+
+        it('records delivered coverage for a truncated ranged read and keeps the tail re-readable', () => {
+            const state = new InvestigationState();
+            // Requested 1..400, cut at the observation cap — only 1..180 delivered.
+            state.recordActualRead('src/dense.ts', 1, 180, 1100, true);
+            const coverage = state.getCoverage('src/dense.ts');
+            expect(coverage!.ranges).toEqual([{ start: 1, end: 180 }]);
+            expect(state.getCompletedSteps()).toContain('initial-read');
+            // The undelivered tail is new coverage, not high-overlap.
+            const tail = state.classifyRead('src/dense.ts', 181, 400, 1100);
+            expect(tail.classification).toBe('new-coverage');
+        });
+
+        it('registers the fnmap key on a function-map read and blocks an identical whole-file repeat', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/large.ts', 0, 0, 2000, true);
+            const repeat = state.classifyRead('src/large.ts', undefined, undefined, 2000);
+            expect(repeat.classification).toBe('function-map');
+            expect(repeat.nextUnreadRange).toEqual({ start: 1, end: 300 });
+            // Ranged reads are still allowed after a function-map read.
+            const ranged = state.classifyRead('src/large.ts', 1, 100, 2000);
+            expect(ranged.classification).toBe('new-coverage');
+            // A null range (as the API sends it) is treated the same as absent.
+            const nullRepeat = state.classifyRead('src/large.ts', null as any, null as any, 2000);
+            expect(nullRepeat.classification).toBe('function-map');
+        });
     });
 
     describe('getRecommendedRecoveryAction', () => {
@@ -544,6 +570,34 @@ describe('InvestigationState', () => {
         it('returns 400 for files over 5000 lines', () => {
             expect(InvestigationState.chunkSizeForLines(5000)).toBe(400);
             expect(InvestigationState.chunkSizeForLines(10000)).toBe(400);
+        });
+    });
+
+    describe('chunkSizeForContent — char-aware sizing', () => {
+        it('falls back to the line-count policy without density information', () => {
+            expect(InvestigationState.chunkSizeForContent(500)).toBe(250);
+        });
+
+        it('keeps the base chunk for sparse files', () => {
+            const sparse = Array.from({ length: 500 }, () => 'a').join('\n');
+            expect(InvestigationState.chunkSizeForContent(500, sparse)).toBe(250);
+        });
+
+        it('shrinks the chunk for dense files and clamps to a 60-line minimum', () => {
+            const dense = Array.from({ length: 500 }, () => 'z'.repeat(300)).join('\n');
+            expect(InvestigationState.chunkSizeForContent(500, dense)).toBe(60);
+        });
+
+        it('accepts an explicit density override', () => {
+            // floor(16000*0.9 / (200+8)) = 69 lines
+            expect(InvestigationState.chunkSizeForContent(1000, undefined, 200)).toBe(69);
+        });
+
+        it('uses recorded line density for getNextUnreadRange chunks', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/dense.ts', 1, 50, 1000, false);
+            state.recordLineDensity('src/dense.ts', Array.from({ length: 1000 }, () => 'q'.repeat(200)).join('\n'));
+            expect(state.getNextUnreadRange('src/dense.ts')).toEqual({ start: 51, end: 119 });
         });
     });
 

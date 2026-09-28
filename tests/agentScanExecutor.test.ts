@@ -344,4 +344,48 @@ describe('executeReadFileAction — structured metadata', () => {
         expect(result.actualEnd).toBe(0);
         expect(result.observation).toContain('Error reading file');
     });
+
+    it('reports the delivered range and a re-read note when a ranged read exceeds the char cap', async () => {
+        const content = Array.from({ length: 600 }, (_, i) => `${'x'.repeat(140)} // line ${i + 1}`).join('\n');
+        const tmpFile = path.join(os.tmpdir(), 'test-truncated-range.ts');
+        fs.writeFileSync(tmpFile, content);
+
+        const result = await executeReadFileAction(
+            { type: 'read_file', path: 'test-truncated-range.ts', startLine: 1, endLine: 400, rationale: 'read' },
+            ctx,
+        );
+
+        expect(result.totalLines).toBe(600);
+        expect(result.truncated).toBe(true);
+        expect(result.actualStart).toBe(1);
+        expect(result.actualEnd).toBeGreaterThan(0);
+        expect(result.actualEnd).toBeLessThan(400);
+        // The observation ends with an explicit re-read note for the lost remainder.
+        expect(result.observation).toContain(`[truncated at line ${result.actualEnd} — re-read lines ${result.actualEnd + 1}..400 for the rest]`);
+        // The last delivered line is in the observation; the first lost line is not.
+        expect(result.observation).toContain(`${result.actualEnd}: `);
+        expect(result.observation).not.toContain(`${result.actualEnd + 1}: `);
+        expect(result.observation.length).toBeLessThanOrEqual(16000);
+
+        fs.unlinkSync(tmpFile);
+    });
+
+    it('reports the delivered range when a dense small-file full read exceeds the char cap', async () => {
+        const content = Array.from({ length: 250 }, (_, i) => `${'y'.repeat(90)} ${i + 1}`).join('\n');
+        const tmpFile = path.join(os.tmpdir(), 'test-dense-small.ts');
+        fs.writeFileSync(tmpFile, content);
+
+        const result = await executeReadFileAction(
+            { type: 'read_file', path: 'test-dense-small.ts', rationale: 'read' },
+            ctx,
+        );
+
+        expect(result.truncated).toBe(true);
+        expect(result.actualStart).toBe(1);
+        expect(result.actualEnd).toBeGreaterThan(0);
+        expect(result.actualEnd).toBeLessThan(250);
+        expect(result.observation).toContain(`[truncated at line ${result.actualEnd} — re-read lines ${result.actualEnd + 1}..250 for the rest]`);
+
+        fs.unlinkSync(tmpFile);
+    });
 });
