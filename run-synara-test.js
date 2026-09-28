@@ -21,7 +21,7 @@ async function main() {
     console.log("");
 
     const result = await toolAgentScanBatch(ctx, {
-        topN: 1,
+        topN: 3,
         architectureDepth: "standard",
         noCache: true,
         _progress: logProgress,
