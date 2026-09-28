@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { Keychain } from './keychain';
 
-const CRED_DIR = path.join(os.homedir(), '.securecode');
+const CRED_DIR = process.env.SECURECODE_CRED_DIR || path.join(os.homedir(), '.securecode');
 const CRED_FILE = path.join(CRED_DIR, 'credentials.json');
 
 export interface StoredCredentials {

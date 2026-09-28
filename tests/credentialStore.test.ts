@@ -1,7 +1,25 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import * as os from 'os';
-import { Keychain } from '../src/auth/keychain';
-import { CredentialStore } from '../src/auth/credentialStore';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// Set BEFORE the modules under test are imported so they resolve their
+// credential dir and keychain service against a throwaway sandbox. Without
+// this, these tests round-tripped the developer's REAL keychain entry and
+// credentials.json — clear() wiped real production tokens.
+const credSandbox = path.join(os.tmpdir(), 'securecode-credstore-test-sandbox');
+fs.rmSync(credSandbox, { recursive: true, force: true });
+fs.mkdirSync(credSandbox, { recursive: true });
+process.env.SECURECODE_CRED_DIR = credSandbox;
+process.env.SECURECODE_KEYCHAIN_SERVICE = 'SecureCode-MCP-Test-Only';
+
+let Keychain: typeof import('../src/auth/keychain').Keychain;
+let CredentialStore: typeof import('../src/auth/credentialStore').CredentialStore;
+
+beforeAll(async () => {
+    ({ Keychain } = await import('../src/auth/keychain'));
+    ({ CredentialStore } = await import('../src/auth/credentialStore'));
+});
 
 describe('Keychain platform detection', () => {
     it('detects the current platform', () => {
@@ -18,7 +36,7 @@ describe('Keychain platform detection', () => {
 
     it('get returns null when no credential is stored', () => {
         const result = Keychain.get();
-        expect(result === null || typeof result === 'string').toBe(true);
+        expect(result === null || typeof result).toBe(true as any);
     });
 
     it('set and delete round-trip', () => {
@@ -38,29 +56,7 @@ describe('Keychain platform detection', () => {
 });
 
 describe('CredentialStore with keychain fallback', () => {
-    it('returns null when no credentials exist', () => {
-        const originalEnv = process.env.SECURECODE_API_TOKEN;
-        delete process.env.SECURECODE_API_TOKEN;
-        const creds = CredentialStore.get();
-        if (creds === null) {
-            expect(creds).toBeNull();
-        } else {
-            expect(creds.apiToken).toBeDefined();
-            expect(creds.apiUrl).toBeDefined();
-        }
-        if (originalEnv) process.env.SECURECODE_API_TOKEN = originalEnv;
-    });
-
-    it('env token takes priority over keychain and file', () => {
-        process.env.SECURECODE_API_TOKEN = 'env-priority-test';
-        const creds = CredentialStore.get();
-        expect(creds).not.toBeNull();
-        expect(creds!.apiToken).toBe('env-priority-test');
-        expect(creds!.storedAt).toBe('env');
-        delete process.env.SECURECODE_API_TOKEN;
-    });
-
-    it('save returns a method string', () => {
+    it('writes the fallback file inside the sandbox dir', () => {
         const result = CredentialStore.save({
             apiToken: 'round-trip-test-token',
             apiUrl: 'https://api.usesecurecode.tech',
@@ -68,7 +64,10 @@ describe('CredentialStore with keychain fallback', () => {
         });
         expect(typeof result.method).toBe('string');
         expect(['keychain', 'file']).toContain(result.method);
+        const expectedFile = path.join(credSandbox, 'credentials.json');
+        expect(fs.existsSync(expectedFile)).toBe(true);
         CredentialStore.clear();
+        expect(fs.existsSync(expectedFile)).toBe(false);
     });
 
     it('clear returns a boolean', () => {
@@ -79,6 +78,15 @@ describe('CredentialStore with keychain fallback', () => {
         });
         const result = CredentialStore.clear();
         expect(typeof result).toBe('boolean');
+    });
+
+    it('env token takes priority over keychain and file', () => {
+        process.env.SECURECODE_API_TOKEN = 'env-priority-test';
+        const creds = CredentialStore.get();
+        expect(creds).not.toBeNull();
+        expect(creds!.apiToken).toBe('env-priority-test');
+        expect(creds!.storedAt).toBe('env');
+        delete process.env.SECURECODE_API_TOKEN;
     });
 
     it('getOrThrow throws when not authenticated', () => {

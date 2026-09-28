@@ -1,7 +1,7 @@
 import { execSync, execFileSync } from 'child_process';
 import * as os from 'os';
 
-const SERVICE_NAME = 'SecureCode-MCP';
+const SERVICE_NAME = process.env.SECURECODE_KEYCHAIN_SERVICE || 'SecureCode-MCP';
 const ACCOUNT_NAME = 'api-token';
 
 export type Platform = 'darwin' | 'win32' | 'linux';
