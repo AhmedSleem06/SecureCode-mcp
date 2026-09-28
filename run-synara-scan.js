@@ -32,7 +32,7 @@ if (!fs.existsSync(TARGET_PATH)) {
 
 const ctx = {
     workspaceRoot: SYNARA_ROOT,
-    apiUrl: 'https://api.usesecurecode.tech',
+    apiUrl: process.env.SECURECODE_API_URL || 'https://api.usesecurecode.tech',
     apiToken: API_TOKEN,
 };
 

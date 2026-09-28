@@ -6,7 +6,7 @@ const API_TOKEN = process.env.SECURECODE_API_TOKEN;
 if (!API_TOKEN) { console.error("SECURECODE_API_TOKEN not set"); process.exit(1); }
 
 const ctx = {
-    apiUrl: "https://api.usesecurecode.tech",
+    apiUrl: process.env.SECURECODE_API_URL || "https://api.usesecurecode.tech",
     apiToken: API_TOKEN,
     workspaceRoot: WORKSPACE,
 };
@@ -21,8 +21,9 @@ async function main() {
     console.log("");
 
     const result = await toolAgentScanBatch(ctx, {
-        topN: 3,
+        topN: 1,
         architectureDepth: "standard",
+        noCache: true,
         _progress: logProgress,
     });
 
