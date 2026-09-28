@@ -107,19 +107,21 @@ export async function runAttack(
 
         const transcript: AgentTranscriptStep[] = [];
 
+        let costSpentUsd = 0;
+
         while (true) {
             const budgetCheck = checkBudget(budget, state);
             if (budgetCheck.exhausted) {
                 return {
                     status: 'capped',
-                    report: buildReport('capped', [], transcript, stepsTaken, 0, budgetCheck.reason),
+                    report: buildReport('capped', [], transcript, stepsTaken, costSpentUsd, budgetCheck.reason),
                 };
             }
 
             if (options.signal?.aborted) {
                 return {
                     status: 'cancelled',
-                    report: buildReport('cancelled', [], transcript, stepsTaken, 0, 'Cancelled by user'),
+                    report: buildReport('cancelled', [], transcript, stepsTaken, costSpentUsd, 'Cancelled by user'),
                 };
             }
 
@@ -131,10 +133,11 @@ export async function runAttack(
                 transcript,
                 budget: {
                     stepsRemaining: budget.maxSteps - stepsTaken,
-                    costSpentUsd: 0,
-                    costCapUsd: 0,
+                    costSpentUsd,
+                    costCapUsd: budget.costCapUsd,
                 },
             });
+            costSpentUsd += stepResp.costUsd || 0;
 
             if (!stepResp.next) {
                 return {
@@ -144,7 +147,7 @@ export async function runAttack(
                         [],
                         transcript,
                         stepsTaken,
-                        stepResp.costUsd || 0,
+                        costSpentUsd,
                     ),
                 };
             }

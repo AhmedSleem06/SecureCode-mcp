@@ -6,6 +6,7 @@ export interface AttackBudget {
     wallClockMs: number;
     maxResponseBytes: number;
     requestTimeoutMs: number;
+    costCapUsd: number;
 }
 
 export const DEFAULT_BUDGET: AttackBudget = {
@@ -14,6 +15,7 @@ export const DEFAULT_BUDGET: AttackBudget = {
     wallClockMs: 90_000,
     maxResponseBytes: 1_000_000,
     requestTimeoutMs: 10_000,
+    costCapUsd: 1.00,
 };
 
 const ALLOWED_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '0:0:0:0:0:0:0:1']);
