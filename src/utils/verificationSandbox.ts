@@ -134,12 +134,42 @@ export function pickImageForCommand(executable: string): { image: string | null;
 
 const probeCache = new Map<string, boolean>();
 
+/**
+ * On Windows, `deno`/`docker` are often `.cmd` shims (npm installs) that
+ * `spawn(bin, { shell: false })` cannot execute (ENOENT). Resolve the real
+ * path via `where.exe`: `.exe` files spawn directly; `.cmd`/`.bat` shims are
+ * invoked as `cmd.exe /c <resolved>` — argv-quoted, never a shell string.
+ * Returns null on non-Windows or when the binary cannot be resolved.
+ */
+function resolveWindowsBin(bin: string): { cmd: string; preArgs: string[] } | null {
+    if (process.platform !== 'win32') return null;
+    try {
+        const r = spawnSync('where.exe', [bin], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000 });
+        if (r.status !== 0 || !r.stdout) return null;
+        const lines = r.stdout.toString('utf8').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        const exe = lines.find(l => /\.exe$/i.test(l));
+        if (exe) return { cmd: exe, preArgs: [] };
+        const shim = lines.find(l => /\.(cmd|bat)$/i.test(l));
+        if (shim) return { cmd: 'cmd.exe', preArgs: ['/c', shim] };
+        return null;
+    } catch {
+        return null;
+    }
+}
+
 function probe(bin: string, args: string[] = ['--version']): boolean {
     const key = `${bin} ${args.join(' ')}`;
     if (probeCache.has(key)) return probeCache.get(key)!;
     let ok = false;
     try {
-        const r = spawnSync(bin, args, {
+        let cmd = bin;
+        let cmdArgs = args;
+        const resolved = resolveWindowsBin(bin);
+        if (resolved) {
+            cmd = resolved.cmd;
+            cmdArgs = [...resolved.preArgs, ...args];
+        }
+        const r = spawnSync(cmd, cmdArgs, {
             stdio: 'ignore',
             shell: false,
             timeout: 4000,
@@ -521,7 +551,15 @@ function runSandboxedProcess(
         let cancelled = false;
         let settled = false;
 
-        const proc = spawn(bin, args, {
+        let spawnBin = bin;
+        let spawnArgs = args;
+        const resolved = resolveWindowsBin(bin);
+        if (resolved) {
+            spawnBin = resolved.cmd;
+            spawnArgs = [...resolved.preArgs, ...args];
+        }
+
+        const proc = spawn(spawnBin, spawnArgs, {
             cwd: opts.workspaceRoot,
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: false,
