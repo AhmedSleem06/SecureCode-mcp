@@ -31,21 +31,20 @@ const ALL_TOOLS: ToolDef[] = [
         },
     },
     {
-        name: 'securecode.map',
+        name: 'securecode.architecture',
         description:
-            'Get or build the Project Map for the workspace — extracted endpoints, middleware, auth scheme, and ORM. Read-only: no approval needed. Actions: "endpoints" (default, returns the endpoint list), "status" (map metadata), "build" (rebuild the map from source), "architecture" (run the architecture-scout subagent to survey the project and extract important files, trust boundaries, security controls, and a recommended scan order — uses AI credits).',
+            'Run the architecture-scout subagent: an AI security architect surveys the codebase, reads key files, and returns an ArchitectureContext — project type/frameworks, ranked important files, trust boundaries (entry points + input types), security controls with coverage notes, and a recommended scan order. Uses AI credits. Cached per depth until the project map changes; pass refresh:true to force a fresh survey.',
         inputSchema: {
             type: 'object',
             properties: {
-                action: {
-                    type: 'string',
-                    enum: ['status', 'endpoints', 'build', 'architecture'],
-                    description: 'What to do: "status" for map metadata, "endpoints" for the endpoint list (default), "build" to rebuild the map from source, "architecture" to run the architecture-scout subagent (surveys the project, extracts important files, uses AI credits).',
-                },
                 depth: {
                     type: 'string',
                     enum: ['quick', 'standard', 'deep'],
-                    description: 'Architecture scout depth: "quick" (12 steps, ~5 credits, 20 important files), "standard" (25 steps, ~10 credits, 50 important files, default), "deep" (50 steps, ~20 credits, 100 important files). Only applies when action is "architecture".',
+                    description: 'Scout depth: "quick" (12 steps, ~5 credits, 20 important files), "standard" (25 steps, ~10 credits, 50 important files, default), "deep" (50 steps, ~20 credits, 100 important files).',
+                },
+                refresh: {
+                    type: 'boolean',
+                    description: 'Bypass the architecture cache and force a fresh survey. Default: false.',
                 },
             },
         },
@@ -96,7 +95,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.attack',
         description:
-            'Request an endpoint red-team attack against a localhost dev server. REQUIRES human approval. The target must be a mapped endpoint from the Project Map and the dev server must already be running on localhost. Beta: localhost targets only.',
+            'Request an endpoint red-team attack against a localhost dev server. REQUIRES human approval. The target must be a real endpoint from the user\'s codebase (read the routes/source to find it) and the dev server must already be running on localhost. Beta: localhost targets only.',
         inputSchema: {
             type: 'object',
             properties: {

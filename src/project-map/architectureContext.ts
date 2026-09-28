@@ -2,7 +2,7 @@
  * Architecture context — the structured output of the architecture scout
  * subagent and the cached input to later agent-scan runs.
  *
- * The architecture scout is triggered by `securecode.map action:architecture`.
+ * The architecture scout is triggered by `securecode.architecture`.
  * It consumes the deterministic project map (endpoints, imports, call graph,
  * config, deps) plus a bounded set of file reads, and produces this context:
  *   - project type / frameworks / runtimes / package manager

@@ -13,8 +13,8 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
         category: 'read-only',
         requiresApproval: false,
     },
-    'securecode.map': {
-        name: 'securecode.map',
+    'securecode.architecture': {
+        name: 'securecode.architecture',
         category: 'read-only',
         requiresApproval: false,
     },

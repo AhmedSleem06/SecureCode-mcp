@@ -50,7 +50,12 @@ function sendProgress(progressToken: string | number | undefined, progress: numb
 
 const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<unknown>> = {
     'securecode.scan': toolScan,
-    'securecode.map': toolMap,
+    'securecode.architecture': (ctx, args) =>
+        toolMap(ctx, {
+            action: 'architecture',
+            depth: args?.depth,
+            _noCache: args?.refresh === true,
+        }),
     'securecode.fix': toolFix,
     ...(ATTACK_ENABLED ? { 'securecode.attack': toolAttack } : {}),
     'securecode.scan-dependencies': toolScanDependencies,

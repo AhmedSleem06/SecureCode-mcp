@@ -34,7 +34,7 @@ export async function toolAttack(ctx: ServerContext, args: any): Promise<unknown
     if (!map || !map.endpoints || map.endpoints.length === 0) {
         return {
             applied: false,
-            note: 'No Project Map found or no endpoints mapped. Run securecode.map with action "build" first.',
+            note: 'No mapped endpoints found for this workspace. The attack tool needs a deterministically-detected endpoint (Express/Fastify style routes). If the project uses another framework, attack targets are not supported yet.',
         };
     }
 

@@ -117,7 +117,7 @@ claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/y
 
 | Tool | Description | Approval |
 |------|-------------|----------|
-| `securecode.map` | Build project map: endpoints, middleware, auth, architecture context | No |
+| `securecode.architecture` | Run the AI architecture scout: ranked important files, trust boundaries, security controls, recommended scan order (uses AI credits, cached per depth) | No |
 
 ### Fixes & Testing
 

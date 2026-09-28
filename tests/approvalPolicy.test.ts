@@ -12,7 +12,7 @@ describe('Tool Policy', () => {
 
     it('read-only tools do not require approval', () => {
         expect(TOOL_POLICIES['securecode.scan'].requiresApproval).toBe(false);
-        expect(TOOL_POLICIES['securecode.map'].requiresApproval).toBe(false);
+        expect(TOOL_POLICIES['securecode.architecture'].requiresApproval).toBe(false);
         expect(TOOL_POLICIES['securecode.agent-scan'].requiresApproval).toBe(false);
         expect(TOOL_POLICIES['securecode.agent-scan-batch'].requiresApproval).toBe(false);
     });

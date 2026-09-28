@@ -195,7 +195,7 @@ export async function toolMap(ctx: ServerContext, args: any): Promise<unknown> {
 }
 
 /**
- * `securecode.map action:architecture` — runs the architecture scout
+ * `securecode.architecture` — runs the architecture scout
  * subagent to survey the project and produce an ArchitectureContext.
  *
  * Flow:

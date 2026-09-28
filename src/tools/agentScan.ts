@@ -392,7 +392,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     // so the vulnerability investigator starts with project-wide context
     // instead of having to discover "where is auth?", "what's the data
     // layer?" from scratch. The architecture context is produced by
-    // `securecode.map action:architecture` and cached in
+    // `securecode.architecture` and cached in
     // .securecode/architecture-context.json. If it's stale or absent, the
     // agent proceeds without it (no extra cost).
     let architectureContextStr: string | undefined;

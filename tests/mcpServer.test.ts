@@ -215,7 +215,7 @@ describe('SecureCode MCP — protocol conformance', () => {
         const names = res.tools.map((t: any) => t.name);
         expect(names).toEqual(expect.arrayContaining([
             'securecode.scan',
-            'securecode.map',
+            'securecode.architecture',
             'securecode.fix',
             'securecode.scan-dependencies',
             'securecode.scan-batch',
@@ -232,6 +232,7 @@ describe('SecureCode MCP — protocol conformance', () => {
             'securecode.clear-finding-reviews',
         ]));
         expect(names).not.toContain('securecode.attack');
+        expect(names).not.toContain('securecode.map');
         expect(names.length).toBe(16);
     });
 
@@ -283,10 +284,12 @@ describe('SecureCode MCP — protocol conformance', () => {
         }
     });
 
-    it('securecode.map returns empty endpoints when no cache exists', async () => {
-        const res = await client.callTool('securecode.map', {});
-        const payload = JSON.parse(res.content[0].text);
-        expect(payload.endpoints).toEqual([]);
+    it('securecode.architecture exposes depth and refresh in its schema', async () => {
+        const res = await client.request('tools/list');
+        const arch = res.tools.find((t: any) => t.name === 'securecode.architecture');
+        expect(arch).toBeDefined();
+        expect(arch.inputSchema.properties.depth.enum).toEqual(['quick', 'standard', 'deep']);
+        expect(arch.inputSchema.properties.refresh.type).toBe('boolean');
     });
 
     it('securecode.scan-dependencies returns valid structure for empty lockfile', async () => {
