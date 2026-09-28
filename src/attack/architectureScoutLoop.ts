@@ -157,7 +157,7 @@ export async function runArchitectureScout(
     options: ArchitectureScoutOptions = {},
 ): Promise<ArchitectureScoutResult> {
     const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
-    const depth = options.depth ?? 'standard';
+    const depth = options.depth ?? target.depth ?? 'standard';
     const defaults = scoutDefaultsForDepth(depth);
     const budget: ArchitectureScoutBudget = {
         stepsRemaining: defaults.maxSteps,
