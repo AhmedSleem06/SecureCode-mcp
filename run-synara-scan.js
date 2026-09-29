@@ -48,6 +48,7 @@ console.log('');
         const result = await toolAgentScan(ctx, {
             filePath: TARGET_FILE,
             language: 'typescript',
+            _noCache: true,
             _progress: (progress, total, message) => {
                 console.log(`  [${progress}/${total}] ${message}`);
             },
@@ -57,6 +58,7 @@ console.log('');
         console.log('');
         console.log(`=== Scan completed in ${elapsed}s ===`);
         console.log('Status:', result.status || 'completed');
+        console.log('Termination:', result.terminationReason || '(none)');
         console.log('Steps:', result.stepsUsed || 0);
         console.log('Cost: $' + (result.costSpentUsd || 0).toFixed(4));
         console.log('');
