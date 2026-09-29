@@ -22,7 +22,7 @@ if (!API_TOKEN || API_TOKEN.length < 10) {
 }
 
 const SYNARA_ROOT = path.resolve(__dirname, '..', 'test_lab', 'synara');
-const TARGET_FILE = 'apps/server/src/agentGateway/httpRoute.ts';
+const TARGET_FILE = process.argv[2] || 'apps/server/src/agentGateway/httpRoute.ts';
 const TARGET_PATH = path.join(SYNARA_ROOT, TARGET_FILE);
 
 if (!fs.existsSync(TARGET_PATH)) {
