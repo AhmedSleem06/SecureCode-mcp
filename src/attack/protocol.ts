@@ -1,5 +1,18 @@
 export type AgentHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
 
+/** Optional success signature the runtime probe rules can corroborate. */
+export interface AgentHttpExpect {
+    successStatus?: number[];
+    successBodyPattern?: string;
+    successHeaders?: Record<string, string>;
+    successLatencyMs?: { gte?: number; lte?: number };
+    successConfirmedBy?: 'signature' | 'latency' | 'multi-request';
+    successEvidenceNeeded?: string;
+    expectedStatus?: number[];
+    authRequired?: boolean;
+    authEnvVars?: string[];
+}
+
 export interface AgentHttpRequestAction {
     type: 'http_request';
     method: AgentHttpMethod;
@@ -7,6 +20,7 @@ export interface AgentHttpRequestAction {
     headers?: Record<string, string>;
     body?: unknown;
     rationale: string;
+    expect?: AgentHttpExpect;
 }
 
 export interface AgentFinding {

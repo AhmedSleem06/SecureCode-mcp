@@ -6,6 +6,10 @@ export interface ReportedAgentFinding extends AgentFinding {
     reason?: string;
 }
 
+export type ReportableAgentFinding = AgentFinding & Partial<Pick<ReportedAgentFinding, 'confirmation' | 'rule' | 'reason'>>;
+
+export const SUSPECTED_FINDING_REASON = 'Agent-reported finding (deterministic verification not yet implemented)';
+
 export interface AttackReport {
     status: AgentRunStatus;
     findings: ReportedAgentFinding[];
@@ -30,7 +34,7 @@ export function redactText(text: string): string {
 
 export function buildReport(
     status: AgentRunStatus,
-    findings: AgentFinding[],
+    findings: ReportableAgentFinding[],
     transcript: AgentTranscriptStep[],
     stepsUsed: number,
     costSpentUsd: number,
@@ -40,8 +44,8 @@ export function buildReport(
         status,
         findings: findings.map((f) => ({
             ...f,
-            confirmation: 'suspected' as const,
-            reason: 'Agent-reported finding (deterministic verification not yet implemented)',
+            confirmation: f.confirmation ?? ('suspected' as const),
+            reason: f.reason ?? SUSPECTED_FINDING_REASON,
         })),
         transcript: transcript.map((step) => ({
             action: {

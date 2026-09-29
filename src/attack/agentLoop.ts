@@ -2,6 +2,7 @@ import { ApiClient } from '../api/client';
 import type { ScanResponse, FixResponse, EndpointContext, ProjectMap } from '../api/types';
 import type { ServerContext } from '../mcp/types';
 import { readFileFromWorkspace } from '../utils/files';
+import { assembleAgentFindings } from './agentCorroboration';
 import { executeHttpRequest } from './executor';
 import { DEFAULT_BUDGET, validateTarget, checkBudget, type AttackBudget } from './policy';
 import { redactText, buildReport, type AttackReport } from './report';
@@ -159,7 +160,7 @@ export async function runAttack(
             if (action.type === 'finish') {
                 return {
                     status: 'completed',
-                    report: buildReport('completed', action.findings || [], transcript, stepsTaken, stepResp.costUsd || 0, action.summary),
+                    report: buildReport('completed', assembleAgentFindings(action.findings || [], transcript), transcript, stepsTaken, stepResp.costUsd || 0, action.summary),
                 };
             }
 

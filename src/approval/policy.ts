@@ -97,6 +97,11 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
         requiresApproval: true,
         approvalNote: 'Attack sends HTTP probes to a localhost server. Approval required. Currently disabled via SECURECODE_ATTACK_ENABLED.',
     },
+    'securecode.runtime-probe': {
+        name: 'securecode.runtime-probe',
+        category: 'paid-generation',
+        requiresApproval: true,
+    },
 };
 
 export function getToolPolicy(toolName: string): ToolPolicy | undefined {

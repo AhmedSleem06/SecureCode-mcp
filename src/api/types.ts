@@ -219,3 +219,32 @@ export interface VerifyAnalyzeResponse {
     /** Dollar cost the API charged for this analyze call (credits → USD). */
     costUsd?: number;
 }
+
+export interface VerifyProbePlanRequest {
+    finding: {
+        type: string;
+        line: number;
+        lineEnd?: number;
+        evidence: string;
+        why: string;
+        severity: string;
+    };
+    endpoint: {
+        method: string;
+        path: string;
+        mountedPath?: string;
+        params?: unknown[];
+        authScheme?: string;
+        middleware?: unknown[];
+    };
+    framework?: string;
+    devServerPort?: number;
+}
+
+export interface VerifyProbePlanResponse {
+    canProbe: boolean;
+    skipReason?: string;
+    plan: import('../attack/runtimeProbe').ProbePlan | null;
+    costUsd: number;
+    scanCredits: number;
+}

@@ -43,6 +43,7 @@ export type ReviewReason =
     | 'verification-budget-exhausted'
     | 'runtime-blocked'
     | 'test-generation-failed'
+    | 'runtime-probe-pending'
     | 'manual-request';
 
 export interface FindingReviewItem {
