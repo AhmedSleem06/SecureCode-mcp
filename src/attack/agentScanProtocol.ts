@@ -664,6 +664,7 @@ export type TerminationReason =
     | 'cost_cap'
     | 'wall_clock'
     | 'blocked_read_recovery'
+    | 'llm_degraded'
     | 'api_error'
     | 'api_restart'
     | 'cancelled';

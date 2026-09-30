@@ -40,6 +40,7 @@ import { WorkItemQueue, createArchitectureRiskWorkItem, createHandlerReviewWorkI
 import { HandlerInventory } from '../project-map/handlerInventory';
 import { CandidateStore } from './candidateStore';
 import { schedule as schedulerDecision, actionFingerprint } from './scanScheduler';
+import { createLlmHealthMonitor } from './llmHealth';
 import { evaluateFinishGate } from './finishGate';
 import { QualityMetricsTracker } from './qualityMetrics';
 import { extractFunctionBoundaries } from './agentScanExecutor';
@@ -93,6 +94,28 @@ export async function runAgentScan(
         let stepsGranted = budget.stepsGranted;
         let extensionsGranted = budget.extensionsGranted;
         let meaningfulProgressSinceLastExtension = false;
+    let activeRunId: string | null = null;
+
+    // Best-effort run close: on any exit that is not a delivered
+    // agent_finish, tell the API to mark the run terminal immediately
+    // instead of waiting up to 30 minutes for the janitor. The janitor
+    // remains the fallback (refund happens there, not here).
+    const closeRun = async (result: AgentScanResult): Promise<AgentScanResult> => {
+        if (activeRunId && result.terminationReason !== 'agent_finish') {
+            try {
+                await client.postJson(
+                    '/agent/scan/close',
+                    {
+                        runId: activeRunId,
+                        status: result.status,
+                        terminationReason: result.terminationReason,
+                    },
+                    options.signal,
+                );
+            } catch { /* best-effort — janitor will expire the run */ }
+        }
+        return result;
+    };
 
     try {
         const startRespRaw = await client.postJson<AgentScanStartResponse>('/agent/scan/start', {}, options.signal);
@@ -113,9 +136,15 @@ export async function runAgentScan(
             };
         }
         const startResp = startValidation.value;
+        activeRunId = startResp.runId;
 
         const trace = new AgentTraceLogger(ctx.workspaceRoot, startResp.runId);
         trace.logRunStarted();
+
+        // LLM health monitor — trips on degraded-model pathologies
+        // (repeat bursts, A/B alternation, provider degraded streaks) that
+        // the consecutive-blocked counters miss.
+        const llmHealth = createLlmHealthMonitor();
 
         // Authoritative scan state — the single source of truth for phase,
         // budget, recovery, and lifecycle. Local counters below are kept in
@@ -375,11 +404,50 @@ export async function runAgentScan(
         const attemptedRecoveryFingerprints = new Set<string>();
         const RECOVERY_FAILURE_LIMIT = 3;
 
+        // Coverage-gap snapshot for abnormal terminations — documents what
+        // the investigation did NOT get to, so "no findings" is never read
+        // as "clean" after a cut-short run.
+        const buildCoverageGaps = () => {
+            const incompleteSteps = investigationState.getIncompleteSteps();
+            const autoGaps = incompleteSteps.map(step => ({
+                title: `Investigation step not completed: ${step}`,
+                detail: `The agent was terminated after repeated blocked reads without completing this required investigation step: ${step}. The investigation was incomplete and vulnerabilities may have been missed.`,
+                file: target.filePath,
+                requiredEvidence: [`Complete the ${step} step before concluding no vulnerabilities exist`],
+                suggestedNextAction: step === 'config-inspection' ? 'read_config'
+                    : step === 'policy-check' ? 'check_policy'
+                    : step === 'cross-file-flow' ? 'trace_flow_cross_file'
+                    : step === 'route-discovery' ? 'get_endpoints'
+                    : step === 'auth-symbol-search' ? 'search_code'
+                    : 'continue investigation',
+                priority: 'high' as const,
+            }));
+            const unresolvedTasks = investigationState.getUnresolvedTasks();
+            const taskGaps = unresolvedTasks.map(task => ({
+                title: `Architecture risk unresolved: ${task.claim}`,
+                detail: `This architecture-risk investigation task was not resolved: ${task.claim}. Required evidence: ${task.requiredEvidence.join('; ')}.`,
+                file: task.targetFiles[0] || target.filePath,
+                requiredEvidence: task.requiredEvidence,
+                suggestedNextAction: task.requiredTools[0] || 'continue investigation',
+                priority: 'high' as const,
+            }));
+            const uncoveredRanges = investigationState.getUncoveredRanges(target.filePath);
+            const rangeGaps = uncoveredRanges.map(r => ({
+                title: `Unread range: lines ${r.start}-${r.end} of ${target.filePath}`,
+                detail: `This range was never read during the investigation. Vulnerabilities in this range were not checked.`,
+                file: target.filePath,
+                requiredEvidence: [`Read lines ${r.start}-${r.end} and analyze for vulnerabilities`],
+                suggestedNextAction: 'read_file',
+                priority: 'high' as const,
+            }));
+            return [...autoGaps, ...taskGaps, ...rangeGaps];
+        };
+
         while (true) {
             // Wall clock check
             if (Date.now() - startTime > wallClockMs) {
                 terminateScan(scanState, 'wall_clock', `Wall clock limit (${wallClockMs}ms) exceeded.`);
-                return {
+                return closeRun({
                     status: 'incomplete',
                     findings: [],
                     transcript,
@@ -391,13 +459,13 @@ export async function runAgentScan(
                     summary: `Wall clock limit (${wallClockMs}ms) exceeded.`,
                     investigationNotes: [],
                     coverageGaps: [],
-                };
+                });
             }
 
             // Abort check
             if (options.signal?.aborted) {
                 terminateScan(scanState, 'cancelled', 'Cancelled by user.');
-                return {
+                return closeRun({
                     status: 'cancelled',
                     findings: [],
                     transcript,
@@ -409,7 +477,7 @@ export async function runAgentScan(
                     summary: 'Cancelled by user.',
                     investigationNotes: [],
                     coverageGaps: [],
-                };
+                });
             }
 
             // Build action constraint for blocked-read recovery.
@@ -498,7 +566,7 @@ export async function runAgentScan(
                         observation: errMsg,
                     });
                     if (consecutiveErrors >= 3 || budget.stepsRemaining <= 0) {
-                        return {
+                        return closeRun({
                             status: 'incomplete',
                             findings: [],
                             transcript,
@@ -510,7 +578,7 @@ export async function runAgentScan(
                             summary: `Step budget exhausted after ${consecutiveErrors} consecutive malformed API responses. Last error: ${vErr}`,
                             investigationNotes: [],
                             coverageGaps: [],
-                        };
+                        });
                     }
                     continue;
                 }
@@ -535,7 +603,7 @@ export async function runAgentScan(
                                 priority: 'medium',
                             });
                         }
-                        return {
+                        return closeRun({
                             status: 'completed',
                             findings: sanitizeFindings(finish.findings),
                             investigationNotes: finish.investigationNotes ?? [],
@@ -547,10 +615,10 @@ export async function runAgentScan(
                             costSpentUsd,
                             terminationReason: 'agent_finish',
                             summary: finish.summary,
-                        };
+                        });
                     }
                     console.warn(`[Agent Scan Loop] Agent run expired (API server restarted?). Stopping scan.`);
-                    return {
+                    return closeRun({
                         status: 'failed',
                         findings: [],
                         transcript,
@@ -562,12 +630,12 @@ export async function runAgentScan(
                         error: 'API server restarted mid-scan — the run was lost. Please retry the scan.',
                         investigationNotes: [],
                         coverageGaps: [],
-                    };
+                    });
                 }
 
                 // Detect abort — the user cancelled. Don't treat as error.
                 if (options.signal?.aborted || /aborted/i.test(errMsg)) {
-                    return {
+                    return closeRun({
                         status: 'cancelled',
                         findings: [],
                         transcript,
@@ -579,7 +647,7 @@ export async function runAgentScan(
                         summary: 'Cancelled by user.',
                         investigationNotes: [],
                         coverageGaps: [],
-                    };
+                    });
                 }
 
                 // Detect timeout / network errors — retry once with aggressive compaction
@@ -610,7 +678,7 @@ export async function runAgentScan(
                 });
 
                 if (consecutiveErrors >= 3 || budget.stepsRemaining <= 0) {
-                    return {
+                    return closeRun({
                         status: 'incomplete',
                         findings: [],
                         transcript,
@@ -622,13 +690,14 @@ export async function runAgentScan(
                         summary: `Step budget exhausted after ${consecutiveErrors} consecutive API errors. Last error: ${errMsg}`,
                         investigationNotes: [],
                         coverageGaps: [],
-                    };
+                    });
                 }
                 continue;
             }
             costSpentUsd += stepResp.costUsd || 0;
             scanState.budget.costSpentUsd = costSpentUsd;
             consecutiveErrors = 0;
+            llmHealth.recordStepTelemetry(!!stepResp.degraded || !!stepResp.fallbackFired);
             trace.logStepRequested(stepResp.model, stepResp.tokens, stepResp.costUsd, stepResp.latencyMs);
 
             // Transition from planning to surveying on first successful step
@@ -685,7 +754,7 @@ export async function runAgentScan(
                     ? 'incomplete'
                     : (stepResp.degraded ? 'incomplete' : 'completed');
                 trace.logRunCompleted(status);
-                return {
+                return closeRun({
                     status,
                     findings: [],
                     transcript,
@@ -699,10 +768,47 @@ export async function runAgentScan(
                         : 'Agent completed without explicit finish.',
                     investigationNotes: [],
                     coverageGaps: [],
-                };
+                });
             }
 
             const action: AgentScanAction = stepResp.next;
+            llmHealth.recordModelAction(actionFingerprint(action));
+            const healthTrip = llmHealth.evaluate();
+            if (healthTrip.tripped) {
+                // Degraded-model circuit breaker — the model is looping
+                // (repeat bursts / alternation) or the provider reports a
+                // sustained degraded streak. Continuing burns budget without
+                // producing evidence; terminate with documented gaps instead.
+                console.warn(`[Agent Scan Loop] LLM health trip (${healthTrip.signal}) at step ${stepsTaken + 1}: ${healthTrip.detail}`);
+                terminateScan(scanState, 'llm_degraded', healthTrip.detail);
+                qualityTracker.recordForcedTermination('llm_degraded');
+                transcript.push({
+                    action: {
+                        type: 'system_event',
+                        eventType: 'error',
+                        message: `Scan terminated: the model server appears degraded (${healthTrip.detail})`,
+                    } as any,
+                    observation: healthTrip.detail,
+                });
+                trace.logRunCompleted('incomplete');
+                const allGaps = buildCoverageGaps();
+                const covSummary = investigationState.getCoverageSummary(target.filePath);
+                qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
+                qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
+                return closeRun({
+                    status: 'incomplete',
+                    findings: [],
+                    transcript,
+                    stepsUsed: stepsTaken,
+                    stepsGranted,
+                    extensionsGranted,
+                    costSpentUsd,
+                    terminationReason: 'llm_degraded',
+                    summary: `Model server degraded — ${healthTrip.detail} ${allGaps.length} coverage gaps identified. Retry the scan later; no credits are lost (the run is auto-refunded).`,
+                    investigationNotes: [],
+                    coverageGaps: allGaps,
+                });
+            }
             stepsTaken++;
             budget.stepsRemaining = stepResp.stepsRemaining;
             scanState.budget.stepsUsed = stepsTaken;
@@ -858,7 +964,7 @@ export async function runAgentScan(
                         }
                     }
 
-                    return {
+                    return closeRun({
                         status: 'completed',
                         findings: sanitizeFindings(action.findings),
                         investigationNotes,
@@ -871,7 +977,7 @@ export async function runAgentScan(
                         terminationReason: gateResult.mode === 'forced-incomplete' ? 'forced_incomplete' : 'agent_finish',
                         summary: action.summary,
                         qualityMetrics: qualityTracker.getMetrics(),
-                    };
+                    });
                 }
 
                 // Finish rejected — continue investigation
@@ -1175,45 +1281,13 @@ export async function runAgentScan(
                         console.warn(`[Agent Scan Loop] ${consecutiveBlockedReads} consecutive blocked reads — no recovery available, terminating as incomplete.`);
                         transcript.push({ action, observation });
                         trace.logRunCompleted('incomplete');
-                        const incompleteSteps = investigationState.getIncompleteSteps();
-                        const autoGaps = incompleteSteps.map(step => ({
-                            title: `Investigation step not completed: ${step}`,
-                            detail: `The agent was terminated after repeated blocked reads without completing this required investigation step: ${step}. The investigation was incomplete and vulnerabilities may have been missed.`,
-                            file: target.filePath,
-                            requiredEvidence: [`Complete the ${step} step before concluding no vulnerabilities exist`],
-                            suggestedNextAction: step === 'config-inspection' ? 'read_config'
-                                : step === 'policy-check' ? 'check_policy'
-                                : step === 'cross-file-flow' ? 'trace_flow_cross_file'
-                                : step === 'route-discovery' ? 'get_endpoints'
-                                : step === 'auth-symbol-search' ? 'search_code'
-                                : 'continue investigation',
-                            priority: 'high' as const,
-                        }));
-                        const unresolvedTasks = investigationState.getUnresolvedTasks();
-                        const taskGaps = unresolvedTasks.map(task => ({
-                            title: `Architecture risk unresolved: ${task.claim}`,
-                            detail: `This architecture-risk investigation task was not resolved: ${task.claim}. Required evidence: ${task.requiredEvidence.join('; ')}.`,
-                            file: task.targetFiles[0] || target.filePath,
-                            requiredEvidence: task.requiredEvidence,
-                            suggestedNextAction: task.requiredTools[0] || 'continue investigation',
-                            priority: 'high' as const,
-                        }));
-                        const uncoveredRanges = investigationState.getUncoveredRanges(target.filePath);
-                        const rangeGaps = uncoveredRanges.map(r => ({
-                            title: `Unread range: lines ${r.start}-${r.end} of ${target.filePath}`,
-                            detail: `This range was never read during the investigation. Vulnerabilities in this range were not checked.`,
-                            file: target.filePath,
-                            requiredEvidence: [`Read lines ${r.start}-${r.end} and analyze for vulnerabilities`],
-                            suggestedNextAction: 'read_file',
-                            priority: 'high' as const,
-                        }));
-                        const allGaps = [...autoGaps, ...taskGaps, ...rangeGaps];
+                        const allGaps = buildCoverageGaps();
                         terminateScan(scanState, 'blocked_read_recovery', `Agent stuck re-reading files. ${allGaps.length} coverage gaps.`);
                         qualityTracker.recordForcedTermination('blocked_read_recovery');
                         const covSummary = investigationState.getCoverageSummary(target.filePath);
                         qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
                         qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
-                        return {
+                        return closeRun({
                             status: 'incomplete',
                             findings: [],
                             transcript,
@@ -1225,7 +1299,7 @@ export async function runAgentScan(
                             summary: `Investigation cut short — agent was stuck re-reading files. ${allGaps.length} coverage gaps identified.`,
                             investigationNotes: [],
                             coverageGaps: allGaps,
-                        };
+                        });
                     }
                 }
             } else {
@@ -1448,7 +1522,7 @@ export async function runAgentScan(
                                 suggestedNextAction: 'read_file',
                                 priority: 'high' as const,
                             }));
-                            return {
+                            return closeRun({
                                 status: 'incomplete',
                                 findings: [],
                                 transcript,
@@ -1460,7 +1534,7 @@ export async function runAgentScan(
                                 summary: `Investigation incomplete — ${RECOVERY_FAILURE_LIMIT} recovery failures without progress. Model blocked ${scanState.recovery.totalModelBlockedActions} time(s), recovery attempted ${scanState.recovery.totalRecoveryAttempts} time(s).`,
                                 investigationNotes: [],
                                 coverageGaps: [...autoGaps, ...taskGaps, ...rangeGaps],
-                            };
+                            });
                         }
                     } else {
                         attemptedRecoveryFingerprints.add(fp);
@@ -1530,29 +1604,42 @@ export async function runAgentScan(
                     if (schedDecision.kind === 'finish-ready') {
                         console.warn(`[Agent Scan Loop] Scheduler says finish-ready during recovery — terminating as incomplete.`);
                         transcript.push({ action, observation });
-                        trace.logRunCompleted('incomplete');
-                        terminateScan(scanState, 'blocked_read_recovery', 'Scheduler has no executable work during recovery.');
-                        const covSummary = investigationState.getCoverageSummary(target.filePath);
-                        qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
-                        qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
-                        return {
-                            status: 'incomplete',
-                            findings: [],
-                            transcript,
-                            stepsUsed: stepsTaken,
-                            stepsGranted,
-                            extensionsGranted,
-                            costSpentUsd,
-                            terminationReason: 'blocked_read_recovery',
-                            summary: 'Investigation incomplete — scheduler determined no executable work remains during recovery.',
-                            investigationNotes: [],
-                            coverageGaps: [],
-                        };
+                         trace.logRunCompleted('incomplete');
+                         terminateScan(scanState, 'blocked_read_recovery', 'Scheduler has no executable work during recovery.');
+                         const covSummary = investigationState.getCoverageSummary(target.filePath);
+                         qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
+                         qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
+                         return closeRun({
+                             status: 'incomplete',
+                             findings: [],
+                             transcript,
+                             stepsUsed: stepsTaken,
+                             stepsGranted,
+                             extensionsGranted,
+                             costSpentUsd,
+                             terminationReason: 'blocked_read_recovery',
+                             summary: 'Investigation incomplete — scheduler determined no executable work remains during recovery.',
+                             investigationNotes: [],
+                             coverageGaps: [],
+                         });
                     }
                 }
             }
         }
     } catch (err: any) {
+        if (activeRunId) {
+            try {
+                await client.postJson(
+                    '/agent/scan/close',
+                    {
+                        runId: activeRunId,
+                        status: 'failed',
+                        terminationReason: 'api_error',
+                    },
+                    options.signal,
+                );
+            } catch { /* best-effort — janitor will expire the run */ }
+        }
         return {
             status: 'failed',
             findings: [],

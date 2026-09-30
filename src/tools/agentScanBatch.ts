@@ -225,7 +225,12 @@ async function toolAgentScanBatchInner(
 
             fileResults.push(batchFile);
 
-            if (batchFile.status === 'incomplete' && stopOnIncomplete) {
+            // Degraded-model window: stop the whole batch — retrying
+            // against a bad model just burns credits.
+            if (scanResult.terminationReason === 'llm_degraded') {
+                stopReason = 'llm-degraded';
+                shouldStop = true;
+            } else if (batchFile.status === 'incomplete' && stopOnIncomplete) {
                 stopReason = 'scan-incomplete';
                 shouldStop = true;
             } else if (batchFile.status === 'failed' && stopOnFailure) {

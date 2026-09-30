@@ -71,6 +71,7 @@ export type AgentScanBatchStopReason =
     | 'insufficient-credits'
     | 'scan-incomplete'
     | 'scan-failed'
+    | 'llm-degraded'
     | 'cancelled';
 
 export interface AgentScanBatchResult {

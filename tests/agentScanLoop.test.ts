@@ -156,6 +156,62 @@ describe('runAgentScan — termination', () => {
         expect(result.error).toContain('restarted');
     });
 
+    it('terminates with llm_degraded on the read_config <-> read_file alternation pathology', async () => {
+        const step = (next: any, remaining: number) => ({
+            next, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: remaining,
+        });
+        const readA = { type: 'read_file', path: 'test.ts', startLine: 1, endLine: 50, rationale: 'r' };
+        const readB = { type: 'read_config', configKind: 'all', rationale: 'r' };
+        const mockFn = mockPostJson([
+            { runId: 'run-deg', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 1.20, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
+            step(readA, 39),
+            step(readB, 38),
+            step(readA, 37),
+            step(readB, 36),
+            step(readA, 35),
+            step(readB, 34),
+            step({ type: 'search_code', pattern: 'never-reached', rationale: 'r' }, 33),
+        ]);
+        (executeReadFileAction as any).mockResolvedValue({
+            observation: 'file content here', actualStart: 1, actualEnd: 100, totalLines: 100, truncated: false,
+        });
+        (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
+
+        const result = await runAgentScan(ctx, target, {});
+
+        expect(result.status).toBe('incomplete');
+        expect(result.terminationReason).toBe('llm_degraded');
+        expect(result.summary).toContain('degraded');
+        // The circuit breaker fired before the run burned the full budget
+        expect(result.stepsUsed).toBeLessThan(40);
+        // Best-effort close fired with the degraded reason
+        const closeCall = (mockFn.mock.calls as any[]).find(c => c[0] === '/agent/scan/close');
+        expect(closeCall).toBeTruthy();
+        expect(closeCall[1].terminationReason).toBe('llm_degraded');
+        // Abnormal termination documents what was NOT covered
+        expect(result.coverageGaps.length).toBeGreaterThan(0);
+    });
+
+    it('does not close the run after a delivered agent_finish', async () => {
+        const mockFn = mockPostJson([
+            { runId: 'run-ok', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 0.40, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
+            ...completeChecklistSteps([], 'clean'),
+        ]);
+        (executeReadFileAction as any).mockResolvedValue({
+            observation: 'file content here', actualStart: 1, actualEnd: 100, totalLines: 100, truncated: false,
+        });
+        (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
+
+        const result = await runAgentScan(ctx, target, {});
+
+        expect(result.status).toBe('completed');
+        expect(result.terminationReason).toBe('agent_finish');
+        const closeCall = (mockFn.mock.calls as any[]).find(c => c[0] === '/agent/scan/close');
+        expect(closeCall).toBeFalsy();
+    });
+
     it('accumulates cost from step responses', async () => {
         mockPostJson([
             { runId: 'run-1', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 0.40, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },

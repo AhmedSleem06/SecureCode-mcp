@@ -982,8 +982,10 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     }
     } // end else (skipFix)
 
-    // 5. Write to cache before returning
-    if (useCache) {
+    // 5. Write to cache before returning — but never cache llm_degraded
+    // runs: they reflect a bad model-server window, not the file's true
+    // state, and must not be served for 7 days.
+    if (useCache && agentResult.terminationReason !== 'llm_degraded') {
         try {
             writeCachedScan(ctx.workspaceRoot, filePath!, code, {
                 findings: provenFindings,

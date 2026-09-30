@@ -31,7 +31,8 @@ export type ScanTerminationReason =
     | 'wall_clock'
     | 'cancelled'
     | 'api_error'
-    | 'blocked_read_recovery';
+    | 'blocked_read_recovery'
+    | 'llm_degraded';
 
 export interface ScanTermination {
     reason: ScanTerminationReason;

@@ -29,18 +29,18 @@ describe('agent scan protocol — canonical status contract', () => {
         const reasons: TerminationReason[] = [
             'agent_finish', 'forced_incomplete', 'budget_exhausted',
             'cost_cap', 'wall_clock', 'blocked_read_recovery',
-            'api_error', 'api_restart', 'cancelled',
+            'llm_degraded', 'api_error', 'api_restart', 'cancelled',
         ];
         expect(reasons).toContain('api_restart');
     });
 
-    it('TerminationReason has exactly 9 values', () => {
+    it('TerminationReason has exactly 10 values', () => {
         const reasons: TerminationReason[] = [
             'agent_finish', 'forced_incomplete', 'budget_exhausted',
             'cost_cap', 'wall_clock', 'blocked_read_recovery',
-            'api_error', 'api_restart', 'cancelled',
+            'llm_degraded', 'api_error', 'api_restart', 'cancelled',
         ];
-        expect(reasons).toHaveLength(9);
+        expect(reasons).toHaveLength(10);
     });
 
     it('protocol version is 5', () => {
@@ -53,7 +53,7 @@ describe('agent scan protocol — status classification rules', () => {
         const completedReasons: TerminationReason[] = ['agent_finish'];
         const incompleteReasons: TerminationReason[] = [
             'forced_incomplete', 'budget_exhausted', 'cost_cap',
-            'wall_clock', 'blocked_read_recovery',
+            'wall_clock', 'blocked_read_recovery', 'llm_degraded',
         ];
         const failedReasons: TerminationReason[] = ['api_error', 'api_restart'];
         const cancelledReasons: TerminationReason[] = ['cancelled'];
