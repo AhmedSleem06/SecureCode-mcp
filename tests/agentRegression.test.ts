@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { checkRegression, formatRegressionResult, type AgentEvalReport } from '../src/tooling/agentRegression';
+import { AGENT_SCAN_CACHE_VERSION } from '../src/project-map/scanCache';
 import type { AgentEvalMetrics } from '../src/tooling/agentEvalScoring';
 
 function makeMetrics(overrides: Partial<AgentEvalMetrics> = {}): AgentEvalMetrics {
@@ -24,7 +25,7 @@ function makeReport(metrics: AgentEvalMetrics, overrides: Partial<AgentEvalRepor
         results: [],
         targets: { recall_min: 0.70, precision_min: 0.70, fpr_max: 0.30, completion_rate_min: 0.90 },
         pass: true,
-        cacheVersion: 32,
+        cacheVersion: AGENT_SCAN_CACHE_VERSION,
         commitSha: 'abc12345def67890',
         ...overrides,
     };
