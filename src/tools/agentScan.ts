@@ -39,6 +39,8 @@ import { runAgentScan } from '../attack/agentScanLoop';
 import { globalScanCoordinator } from '../attack/agentScanCoordinator';
 import { runVerifyLoop } from '../attack/verifyLoop';
 import { runFixVerifyLoop } from '../attack/fixVerifyLoop';
+import { mergeFixedCode } from '../attack/fixCodeMerge';
+import { testFix } from '../project-map/fixTester';
 import {
     detectDevServer,
     executeProbePlan,
@@ -76,6 +78,10 @@ interface ProvenFinding extends AgentScanFinding {
         | 'fix-verification-inconclusive' | 'fix-syntax-invalid';
     fixDeniedReason?: string;
     fixApprovalId?: string;
+    /** How many fix-generation attempts ran (1 = single, 2 = one regeneration after a failed verification). */
+    fixAttempts?: number;
+    /** Cheap local differential check on the merged fix (tree-sitter based). */
+    fixQuality?: { passes: boolean; newVulnerabilities: string[]; regressions: string[] };
     /** Sub-verdict from the verify loop — used to map to a review reason. */
     verifySubVerdict?: string;
     /** Human review queue status for INCONCLUSIVE findings. */
@@ -874,7 +880,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                 progress(fixIdx, fixableFindings.length, `Fixing ${finding.type} at line ${finding.line}...`);
             }
 
-            const fixSummary = `Generate fix for ${finding.type} at line ${finding.line}${finding.lineEnd ? `-${finding.lineEnd}` : ''}\nSeverity: ${finding.severity} | Confidence: ${finding.confidence}%\nEvidence: ${finding.evidence?.substring(0, 200) || '(none)'}`;
+            const fixSummary = `Generate fix for ${finding.type} at line ${finding.line}${finding.lineEnd ? `-${finding.lineEnd}` : ''}\nSeverity: ${finding.severity} | Confidence: ${finding.confidence}%\nEvidence: ${finding.evidence?.substring(0, 200) || '(none)'}\n\nIf verification fails, the fixer re-runs ONCE with the failure feedback (a second fix credit applies only if the first attempt fails).`;
 
             try {
                 const approval = await fixBroker!.requestApproval(
@@ -892,18 +898,49 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                     continue;
                 }
 
-                const fixResp = await client.postJson<FixResponse>('/fix', {
-                    code,
-                    language,
-                    vulnerability: {
-                        type: finding.type,
-                        line_start: finding.line,
-                        line_end: finding.lineEnd || finding.line,
-                        evidence_snippet: finding.evidence,
-                    },
-                });
+                // Ground the fixer in everything the scanner proved.
+                const verificationEvidenceParts: string[] = [];
+                if (finding.provenReason) verificationEvidenceParts.push(`Original verification: ${finding.provenReason}`);
+                if (finding.probeEvidence) verificationEvidenceParts.push(`Runtime probe (${finding.probeRule}): ${String(finding.probeEvidence).slice(0, 1200)}`);
+                if (finding.proofEvidence) verificationEvidenceParts.push(`Proof evidence: ${JSON.stringify(finding.proofEvidence).slice(0, 1200)}`);
+                const verificationEvidence = verificationEvidenceParts.join('\n\n');
 
-                if (fixResp.fixed_code) {
+                // Generate → apply-check → differential gate → sandbox verify.
+                // A failed verification triggers ONE regeneration with the
+                // failure feedback appended, under the same approval.
+                const MAX_FIX_ATTEMPTS = 2;
+                const replaceRange = { start_line: finding.line, end_line: finding.lineEnd || finding.line };
+                const sinkLanguage = (['javascript', 'typescript', 'tsx', 'python'] as const).includes(language as any)
+                    ? (language as 'javascript' | 'typescript' | 'tsx' | 'python')
+                    : null;
+                let attempt = 0;
+                let lastFeedback = '';
+
+                while (true) {
+                    attempt++;
+                    const attemptEvidence = attempt > 1 && lastFeedback
+                        ? `${verificationEvidence ? verificationEvidence + '\n\n' : ''}PREVIOUS FIX ATTEMPT FAILED: ${lastFeedback}\nProduce a DIFFERENT fix that addresses this exact failure.`
+                        : verificationEvidence;
+
+                    const fixResp = await client.postJson<FixResponse>('/fix', {
+                        code,
+                        language,
+                        vulnerability: {
+                            type: finding.type,
+                            line_start: finding.line,
+                            line_end: finding.lineEnd || finding.line,
+                            evidence_snippet: finding.evidence,
+                            ...(finding.why ? { why: String(finding.why).slice(0, 2000) } : {}),
+                            ...(finding.severity ? { severity: String(finding.severity).slice(0, 50) } : {}),
+                            ...(attemptEvidence ? { verification_evidence: attemptEvidence.slice(0, 4000) } : {}),
+                        },
+                        ...(relatedFiles.length > 0
+                            ? { relatedFiles: relatedFiles.slice(0, 5).map(rf => ({ filePath: rf.filePath, content: rf.content, relationship: rf.relationship })) }
+                            : {}),
+                    });
+
+                    if (!fixResp.fixed_code) break;
+
                     finding.fix = {
                         fixedCode: fixResp.fixed_code,
                         replaceRange: { start_line: finding.line, end_line: finding.lineEnd || finding.line },
@@ -913,6 +950,31 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                     };
                     finding.fixStatus = 'fix-generated';
                     finding.fixApprovalId = approval.requestId;
+                    finding.fixAttempts = attempt;
+
+                    // Cheap local differential gate before the expensive
+                    // sandbox verify: syntax + sink diff + regressions, all
+                    // tree-sitter (no LLM). A hard failure regenerates
+                    // immediately instead of burning sandbox rounds.
+                    const merge = mergeFixedCode(code, fixResp.fixed_code, replaceRange);
+                    if (merge.ok && sinkLanguage) {
+                        try {
+                            const quality = await testFix(code, merge.mergedCode, sinkLanguage);
+                            finding.fixQuality = {
+                                passes: quality.passes,
+                                newVulnerabilities: quality.newVulnerabilities,
+                                regressions: quality.regressions,
+                            };
+                            if (!quality.syntaxValid || quality.regressions.length > 0) {
+                                lastFeedback = !quality.syntaxValid
+                                    ? 'the merged code has syntax errors'
+                                    : `behavioral regressions detected: ${quality.regressions.join('; ')}`;
+                                if (attempt < MAX_FIX_ATTEMPTS) continue;
+                                finding.fixStatus = 'fix-syntax-invalid';
+                                break;
+                            }
+                        } catch { /* differential gate is best-effort */ }
+                    }
 
                     // 4c. Re-verify the fix — re-run the exploit against the
                     // merged fixed code to prove the fix actually closed the
@@ -924,7 +986,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                     // any workspace files.
                     try {
                         if (progress) {
-                            progress(fixIdx, fixableFindings.length, `Verifying fix for ${finding.type} at line ${finding.line}...`);
+                            progress(fixIdx, fixableFindings.length, `Verifying fix for ${finding.type} at line ${finding.line} (attempt ${attempt})...`);
                         }
                         const fixVerifyBudget = defaultFixVerifyBudget();
                         const fixVerifyTracker = new VerifyBudgetTracker(fixVerifyBudget);
@@ -939,7 +1001,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                             },
                             originalCode: code,
                             fixedCode: fixResp.fixed_code,
-                            replaceRange: { start_line: finding.line, end_line: finding.lineEnd || finding.line },
+                            replaceRange,
                             filePath: filePath || '',
                             relatedFiles: relatedFiles.map(rf => ({
                                 filePath: rf.filePath,
@@ -964,13 +1026,20 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                                 finding.fixStatus = 'fix-verified-closed';
                                 break;
                             case 'still-vulnerable':
-                                finding.fixStatus = 'fix-still-vulnerable';
+                            case 'syntax-invalid': {
+                                if (attempt < MAX_FIX_ATTEMPTS) {
+                                    lastFeedback = fixVerifyResult.status === 'still-vulnerable'
+                                        ? `the exploit still reproduces against the fixed code: ${fixVerifyResult.reason.slice(0, 600)}`
+                                        : `the fixed code failed to merge or parse: ${fixVerifyResult.reason.slice(0, 600)}`;
+                                    continue;
+                                }
+                                finding.fixStatus = fixVerifyResult.status === 'still-vulnerable'
+                                    ? 'fix-still-vulnerable'
+                                    : 'fix-syntax-invalid';
                                 break;
+                            }
                             case 'inconclusive':
                                 finding.fixStatus = 'fix-verification-inconclusive';
-                                break;
-                            case 'syntax-invalid':
-                                finding.fixStatus = 'fix-syntax-invalid';
                                 break;
                             // sandbox-unavailable and cancelled leave fixStatus as 'fix-generated'
                         }
@@ -979,6 +1048,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                         // fix is still generated, just not re-verified.
                         console.warn(`[Agent Scan] Fix verification failed for ${finding.type} at L${finding.line}: ${fixVerifyErr?.message || fixVerifyErr}`);
                     }
+                    break;
                 }
             } catch (err: any) {
                 finding.fixStatus = 'fix-error';

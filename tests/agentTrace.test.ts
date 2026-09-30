@@ -88,6 +88,13 @@ describe('listRecentRuns', () => {
         const logger2 = new AgentTraceLogger(WORKSPACE, 'list-run-2');
         logger2.logRunStarted();
 
+        // Pin the creation order explicitly: under parallel load, two writes
+        // inside the same mtime tick produce identical ISO timestamps and the
+        // mtime sort becomes unstable (recurring Windows flake).
+        const older = new Date(Date.now() - 60_000);
+        const olderFile = path.join(WORKSPACE, '.securecode', 'agent-runs', 'list-run-1', 'events.jsonl');
+        fs.utimesSync(olderFile, older, older);
+
         const runs = listRecentRuns(WORKSPACE);
         expect(runs.length).toBeGreaterThanOrEqual(2);
         expect(runs[0].runId).toBe('list-run-2');

@@ -105,8 +105,12 @@ export interface FixRequest {
         line_start: number;
         line_end: number;
         evidence_snippet: string;
+        why?: string;
+        severity?: string;
+        verification_evidence?: string;
     };
     framework?: string;
+    relatedFiles?: { filePath: string; content: string; relationship: string }[];
 }
 
 export interface FixResponse {
@@ -117,6 +121,12 @@ export interface FixResponse {
     why_secure?: string;
     imports_needed?: string[];
     confidence?: number;
+    replace_range?: { start_line: number; end_line: number };
+    syntax_valid?: boolean;
+    syntax_error?: string;
+    syntax_retried?: boolean;
+    syntax_checked?: boolean;
+    syntax_unavailable_reason?: string;
 }
 
 export interface ApiError {

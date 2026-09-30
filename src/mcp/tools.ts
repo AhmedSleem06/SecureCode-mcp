@@ -84,6 +84,30 @@ const ALL_TOOLS: ToolDef[] = [
                     type: 'string',
                     description: 'The vulnerable code snippet.',
                 },
+                why: {
+                    type: 'string',
+                    description: 'Why this is vulnerable — the finding\'s explanation. Pass it from the scan result: it makes fixes materially better.',
+                },
+                severity: {
+                    type: 'string',
+                    description: 'Finding severity (critical, high, medium, low).',
+                },
+                verificationEvidence: {
+                    type: 'string',
+                    description: 'Verification/probe evidence for the finding (e.g. proofEvidence or probeEvidence from agent-scan). Helps the fixer target the exact failure mode.',
+                },
+                relatedFiles: {
+                    type: 'array',
+                    description: 'Optional related files for cross-file context: [{ filePath, content, relationship }]. Max 5.',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            filePath: { type: 'string' },
+                            content: { type: 'string' },
+                            relationship: { type: 'string' },
+                        },
+                    },
+                },
                 framework: {
                     type: 'string',
                     description: 'Optional framework hint (e.g. express, nextjs, fastapi).',
