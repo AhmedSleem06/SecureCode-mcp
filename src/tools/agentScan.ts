@@ -43,7 +43,10 @@ import {
     detectDevServer,
     executeProbePlan,
     isProbeEligible,
+    isProbeEligibleType,
+    hasProbeEligibleReason,
     matchEndpointForFinding,
+    deriveEndpointFallback,
     type DevServerTarget,
     type ProbeEndpointCandidate,
 } from '../attack/runtimeProbe';
@@ -274,7 +277,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                 ? filePath
                 : path.join(ctx.workspaceRoot, filePath);
             const [eps, rels] = await Promise.all([
-                getEndpointContextForFile(filePath, ctx.workspaceRoot),
+                getEndpointContextForFile(absPath, ctx.workspaceRoot),
                 getRelatedFilesForFile(absPath, ctx.workspaceRoot),
             ]);
             endpointContext = eps;
@@ -604,14 +607,20 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
             // Runtime-probe candidate: an INCONCLUSIVE verify whose shape
             // (HTTP-routable vuln type + timeout/full-runtime reason) means
             // the live dev server could exercise what the sandbox could not.
+            // Endpoint candidates come from the project map first, then the
+            // framework fallback (derived from route registrations in the
+            // scanned code / finding evidence) for files the map doesn't
+            // extract — Effect-TS, NestJS, Hono, Koa.
             // Collected here, resolved after the loop so the whole scan gets
             // one approval and one severity-ordered probe budget.
             if (
                 !runtimeProbeDisabled &&
                 result.verdict === 'INCONCLUSIVE' &&
-                isProbeEligible(finding, result.reason ?? '', endpointContext)
+                isProbeEligibleType(finding.type) &&
+                hasProbeEligibleReason(result.reason ?? '')
             ) {
-                const probeEndpoint = matchEndpointForFinding(finding, endpointContext);
+                const probeEndpoint = matchEndpointForFinding(finding, endpointContext)
+                    ?? deriveEndpointFallback(finding, code);
                 if (probeEndpoint) {
                     const probeFinding: ProvenFinding = {
                         ...finding,

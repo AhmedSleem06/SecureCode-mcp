@@ -57,6 +57,42 @@ describe('selectInvestigationProfile', () => {
         expect(profile.name).toBe('http-route');
     });
 
+    it('selects HTTP Route profile when endpoint context is an ARRAY (the real wire shape)', () => {
+        // Regression: agentScanLoop passes target.endpointContext as
+        // EndpointContext[]; the old string-only handling silently
+        // discarded it and never matched the file.
+        const profile = selectInvestigationProfile({
+            filePath: 'src/handler.ts',
+            endpointContext: [
+                {
+                    method: 'GET',
+                    path: '/api/users',
+                    handlerName: 'getUsers',
+                    sourceFile: 'src/handler.ts',
+                    line: 42,
+                },
+                {
+                    method: 'POST',
+                    path: '/api/orders',
+                    handlerName: 'createOrder',
+                    sourceFile: 'src/orders.ts',
+                    line: 10,
+                },
+            ] as any,
+        });
+        expect(profile.name).toBe('http-route');
+    });
+
+    it('does not select HTTP Route profile when the array does not reference the file', () => {
+        const profile = selectInvestigationProfile({
+            filePath: 'src/lib/formatDate.ts',
+            endpointContext: [
+                { method: 'GET', path: '/api/users', handlerName: 'getUsers', sourceFile: 'src/handler.ts', line: 42 },
+            ] as any,
+        });
+        expect(profile.name).toBe('generic-utility');
+    });
+
     it('selects Generic Utility profile for unrelated file', () => {
         const profile = selectInvestigationProfile({ filePath: 'src/utils/formatDate.ts' });
         expect(profile.name).toBe('generic-utility');

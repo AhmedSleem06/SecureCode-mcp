@@ -136,8 +136,23 @@ export function selectInvestigationProfile(input: ProfileSelectionInput): Invest
     const filePathLower = (input.filePath || '').toLowerCase();
     const archContextRaw = input.architectureContext;
     const archContext = (typeof archContextRaw === 'string' ? archContextRaw : '').toLowerCase();
+    // The endpoint context arrives as an EndpointContext[] (target.endpointContext)
+    // or, in tests/legacy callers, as a pre-rendered string. Serialize the array
+    // into a searchable string so route-file detection actually sees it.
     const endpointContextRaw = input.endpointContext;
-    const endpointContext = (typeof endpointContextRaw === 'string' ? endpointContextRaw : '').toLowerCase();
+    let endpointContext: string;
+    if (typeof endpointContextRaw === 'string') {
+        endpointContext = endpointContextRaw.toLowerCase();
+    } else if (Array.isArray(endpointContextRaw)) {
+        endpointContext = (endpointContextRaw as any[])
+            .map(e => [e?.sourceFile, e?.path, e?.handlerName, e?.mountedPath]
+                .filter(v => typeof v === 'string' && v.length > 0)
+                .join(' '))
+            .join(' ')
+            .toLowerCase();
+    } else {
+        endpointContext = '';
+    }
 
     // WebSocket RPC detection
     if (/(ws|websocket|rpc|socket|wss)/i.test(filePathLower) ||

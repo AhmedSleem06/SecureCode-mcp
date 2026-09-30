@@ -10,6 +10,9 @@
  *                          @router.get/post/...("/path")
  *   - Flask:               @app.route("/path")  @app.get/post/...("/path")
  *   - Django:              path('url', views.handler)  re_path(...)
+ *   - Effect-TS:           HttpApiEndpoint.get('path', ...) / HttpRouter.post('/path', ...)
+ *   - NestJS:               @Get('path') @Post('path') ...
+ *   - Hono / Koa:           app.get('/path', ...) / router.get('/path', ...)
  *
  * Returns a compact list of { method, path, file, line, framework } entries.
  */
@@ -21,7 +24,7 @@ export interface DiscoveredEndpoint {
     path: string;         // route path if extractable, else ''
     file: string;         // workspace-relative
     line: number;         // 1-indexed
-    framework: string;    // 'nextjs', 'express', 'fastapi', 'flask', 'django', 'unknown'
+    framework: string;    // 'nextjs', 'express', 'fastapi', 'flask', 'django', 'effect', 'nestjs', 'unknown'
 }
 
 const HTTP_METHODS = ['GET', 'POST', 'PATCH', 'DELETE', 'PUT'] as const;
@@ -30,6 +33,10 @@ const HTTP_METHODS = ['GET', 'POST', 'PATCH', 'DELETE', 'PUT'] as const;
 const PATTERNS: { regex: string; framework: string }[] = [
     // Next.js App Router: export async function GET / POST / etc.
     { regex: 'export\\s+async\\s+function\\s+(GET|POST|PATCH|DELETE|PUT)\\b', framework: 'nextjs' },
+    // Effect-TS: HttpApiEndpoint.get('path', ...) / HttpRouter.post('/path', ...)
+    { regex: 'Http(ApiEndpoint|Router)\\.(get|post|patch|delete|put)\\s*\\(\\s*[\'"`]', framework: 'effect' },
+    // NestJS: @Get('path') / @Post('path') / ...
+    { regex: '@(Get|Post|Patch|Delete|Put)\\s*\\(\\s*[\'"`]', framework: 'nestjs' },
     // Express: app.METHOD( or router.METHOD(
     { regex: '(app|router)\\.(get|post|patch|delete|put)\\s*\\(', framework: 'express' },
     // Express: app.all(

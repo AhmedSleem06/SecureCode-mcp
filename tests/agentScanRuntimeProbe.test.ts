@@ -237,6 +237,61 @@ describe('toolAgentScan — runtime probe fallback', () => {
         expect(result.reviewQueue.added).toHaveLength(0);
     });
 
+    it('falls back to a derived endpoint when the map has none for the file (Effect-TS)', async () => {        // The deterministic map returns ZERO endpoints — the Effect-TS case.
+        // The scanned file itself contains the route registration, so the
+        // fallback derives the probe candidate from the code window.
+        const effectCode = [
+            "import { HttpApiEndpoint } from '@effect/platform'",
+            '',
+            "export const bootstrapApi = HttpApiEndpoint.post('bootstrap', () => {",
+            '  // exchanges a bootstrap token for a session token without ownership checks',
+            '})',
+            '',
+            '// pad',
+            '// pad',
+            '// pad',
+            '// pad',
+            'const vulnerableExchange = (token: string) => token // finding at line 12',
+        ].join('\n');
+        fs.writeFileSync(path.join(workspaceRoot, 'routes.ts'), effectCode);
+
+        setupScan([makeFinding({ line: 12 })], []);
+        const requestApproval = setupApproval(true);
+        const mockPostJson = setupPostJson({ canProbe: true, plan: PROBE_PLAN, costUsd: 0.01, scanCredits: 99 });
+
+        const result = await runScan();
+
+        expect(mockPostJson).toHaveBeenCalledTimes(1);
+        expect(mockPostJson).toHaveBeenCalledWith('/verify/probe-plan', expect.objectContaining({
+            endpoint: expect.objectContaining({
+                method: 'POST',
+                path: '/bootstrap',
+            }),
+        }));
+        expect(requestApproval).toHaveBeenCalledTimes(1);
+        expect(executeProbePlan).toHaveBeenCalledTimes(1);
+
+        const finding = result.agentFindings[0];
+        expect(finding.proven).toBe('PROVEN');
+        expect(finding.verificationLevel).toBe('impact-confirmed');
+        expect(finding.probeRule).toBe('sqli-error-based');
+    });
+
+    it('requests endpoint context with the ABSOLUTE path (map lookup regression)', async () => {
+        // Regression: the tool used to pass the raw (relative) filePath to
+        // getEndpointContextForFile, producing a garbage relative-path key
+        // and empty endpoint context even for supported frameworks.
+        setupScan([makeFinding()], ENDPOINTS);
+        setupApproval(false);
+
+        await runScan();
+
+        expect(vi.mocked(getEndpointContextForFile)).toHaveBeenCalledWith(
+            path.join(workspaceRoot, 'routes.ts'),
+            workspaceRoot,
+        );
+    });
+
     it('keeps INCONCLUSIVE and queues review when the API refuses a probe plan', async () => {
         setupScan([makeFinding()]);
         setupApproval(true);

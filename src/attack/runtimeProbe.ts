@@ -80,6 +80,36 @@ export const PROBE_ELIGIBLE_TYPES: ReadonlySet<string> = new Set([
 
 const PROBE_VERIFY_REASON_RE = /(timed? ?out|full runtime|cannot test in sandbox|runtime|DOM\/jsdom)/i;
 
+/** Route-registration idioms the fallback derives endpoints from.
+ *  Covers frameworks the deterministic project map does not extract
+ *  (Effect-TS, NestJS, Hono/Koa receivers) plus the common
+ *  Express/Fastify shapes as a safety net. */
+const FALLBACK_ROUTE_PATTERNS: { re: RegExp; methodGroup: number; pathGroup: number; methodFrom: (m: RegExpMatchArray) => string }[] = [
+    // Effect-TS: HttpApiEndpoint.get('path', ...) / HttpRouter.post('/path', ...)
+    {
+        re: /Http(?:ApiEndpoint|Router)\.(get|post|put|patch|delete|head|options)\s*\(\s*['"`]([^'"`]+)['"`]/,
+        methodGroup: 1,
+        pathGroup: 2,
+        methodFrom: m => m[1].toUpperCase(),
+    },
+    // NestJS: @Get('path')
+    {
+        re: /@(Get|Post|Put|Patch|Delete|Head|Options)\s*\(\s*['"`]([^'"`]+)['"`]/,
+        methodGroup: 1,
+        pathGroup: 2,
+        methodFrom: m => m[1].toUpperCase(),
+    },
+    // Express / Fastify / Hono / Koa: (app|router|...).(get|post|...)('/path', ...)
+    {
+        re: /\b(app|router|server|fastify|api|route|controller|rtr|koa)\.(get|post|put|patch|delete|head|options|all)\s*\(\s*['"`]([^'"`]+)['"`]/,
+        methodGroup: 2,
+        pathGroup: 3,
+        methodFrom: m => m[2] === 'all' ? 'GET' : m[2].toUpperCase(),
+    },
+];
+
+const FALLBACK_EVIDENCE_ROUTE_RE = /\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+['"`]?(\/[^\s'"`,;)]+)/i;
+
 function redactResponseHeaders(headers?: Record<string, string>): Record<string, string> {
     if (!headers) return {};
     const out: Record<string, string> = {};
@@ -348,4 +378,84 @@ export function isProbeEligible(
     if (!PROBE_ELIGIBLE_TYPES.has(finding.type)) return false;
     if (!PROBE_VERIFY_REASON_RE.test(verifyReason ?? '')) return false;
     return matchEndpointForFinding(finding, endpointContext) !== null;
+}
+
+export function isProbeEligibleType(findingType: string): boolean {
+    return PROBE_ELIGIBLE_TYPES.has(findingType);
+}
+
+export function hasProbeEligibleReason(verifyReason: string): boolean {
+    return PROBE_VERIFY_REASON_RE.test(verifyReason ?? '');
+}
+
+/**
+ * Derive an endpoint candidate when the deterministic project map has no
+ * endpoints for the finding's file — frameworks like Effect-TS, NestJS,
+ * Hono, or Koa that the map does not extract, or scans whose map lookup
+ * predates a map refresh.
+ *
+ * Pass 1 scans the target file's code within the same ±25 / +200 line
+ * window matchEndpointForFinding uses, so the derived candidate is always
+ * the route registration nearest the finding.
+ * Pass 2 mines the finding's own evidence/why text for explicit
+ * "METHOD '/path'" strings.
+ *
+ * Returns a ProbeEndpointCandidate with derived:true, or null.
+ */
+export function deriveEndpointFallback(
+    finding: {
+        line: number;
+        lineEnd?: number;
+        evidence?: string;
+        why?: string;
+        evidenceChain?: {
+            source?: { description?: string };
+            sink?: { description?: string };
+        };
+    },
+    code: string,
+): ProbeEndpointCandidate | null {
+    // Pass 1: route-registration scan in the code window around the finding.
+    const lines = code.split(/\r?\n/);
+    const windowStart = Math.max(0, finding.line - 26);
+    const windowEnd = Math.min(lines.length, finding.line + 200);
+    for (let i = windowStart; i < windowEnd; i++) {
+        const lineText = lines[i];
+        if (!lineText) continue;
+        for (const pat of FALLBACK_ROUTE_PATTERNS) {
+            const m = lineText.match(pat.re);
+            if (!m) continue;
+            const rawPath = m[pat.pathGroup] || '';
+            if (!rawPath) continue;
+            const normalizedPath = rawPath.startsWith('/') ? `/${rawPath.slice(1)}` : `/${rawPath}`;
+            return {
+                method: pat.methodFrom(m),
+                path: normalizedPath,
+                line: i + 1,
+                derived: true,
+            };
+        }
+    }
+
+    // Pass 2: mine the finding's own text for "METHOD '/path'" mentions —
+    // the agent has read the route definition, and often says so verbatim.
+    const texts = [
+        finding.evidence,
+        finding.why,
+        finding.evidenceChain?.source?.description,
+        finding.evidenceChain?.sink?.description,
+    ].filter((t): t is string => typeof t === 'string' && t.length > 0);
+    for (const text of texts) {
+        const m = text.match(FALLBACK_EVIDENCE_ROUTE_RE);
+        if (m) {
+            return {
+                method: m[1].toUpperCase(),
+                path: m[2],
+                line: finding.line,
+                derived: true,
+            };
+        }
+    }
+
+    return null;
 }
