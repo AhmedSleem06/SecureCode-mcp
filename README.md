@@ -124,7 +124,7 @@ claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/y
 | Tool | Description | Approval |
 |------|-------------|----------|
 | `securecode.fix` | Generate a patch for a specific finding | Yes |
-| `securecode.attack` | Endpoint red-team testing (beta) | Yes |
+| `securecode.attack` | Endpoint red-team testing (beta) with deterministic corroboration — findings arrive confirmed/refuted with rule citations, not just "suspected" | Yes |
 | `securecode.run-tests` | Run tests in sandbox for verification | Yes |
 
 ### Agent Memory (FP Learning)
@@ -167,7 +167,8 @@ The agent scan (`securecode.agent-scan`) is an AI security investigator that:
 6. **Self-critiques** before reporting (selfCritique field)
 7. **Gets reviewed** by an independent critique LLM
 8. **Proves** findings in a sandbox (PROVEN/UNPROVEN)
-9. **Generates fixes** for proven findings
+9. **Runtime-verifies** HTTP findings the sandbox can't reach — with your approval, executes baseline + attack requests against your local dev server to confirm real-world impact
+10. **Generates fixes** for proven findings
 
 Agent tools (20+): `read_file`, `search_code`, `trace_flow`, `trace_flow_cross_file`, `check_guard`, `check_policy`, `get_endpoints`, `list_imports`, `list_files`, `call_graph`, `git_blame`, `git_history`, `git_diff`, `check_dependencies`, `read_config`, `find_definition`, `find_references`, `find_tests`, `run_tests`, `finish`.
 
@@ -179,6 +180,32 @@ The deterministic control plane enforces proof quality:
 
 Languages: JavaScript, TypeScript, Python (partial).
 
+## Runtime Verification
+
+Some findings can't be proven in a sandbox — auth bypasses, runtime-dependent behavior, effects that only manifest in a live server. When an agent scan produces an HTTP-shaped finding that the sandbox couldn't prove, SecureCode can verify it against your **local dev server**:
+
+1. The agent generates a minimal probe plan (a baseline request + attack requests) grounded in its attack library
+2. You approve the probe once per scan (60-second approval window — silently skipped if you don't respond)
+3. SecureCode executes the plan against `127.0.0.1:<port>` and maps the outcome to a deterministic verdict
+
+Confirmed probes upgrade the finding to **impact-confirmed** with live response evidence.
+
+**Safety rails:**
+- Localhost only — no external traffic, ever
+- Unauthenticated endpoints only; auth headers (`Authorization`, cookies, API keys) are stripped from generated plans
+- Relative paths only, whitelisted methods, read-only payloads
+- Max 8 requests per finding, max 3 probed findings per scan (severity-ordered)
+- Plan credits are refunded if no probe can run
+
+**Dev server discovery** (first match wins):
+1. `SECURECODE_DEV_SERVER_PORT` environment variable
+2. `.securecode/runtime-probe.json` in the workspace root: `{ "port": 3000 }`
+3. Auto-detect across common dev ports (3000, 3001, 4000, 5173, 5174, 8000, 8080)
+
+Disable entirely with `SECURECODE_DISABLE_RUNTIME_PROBE=1`.
+
+> Note: probes currently fire for findings on endpoints the project map can detect (Express/Fastify-style routes). Support for other frameworks is on the roadmap.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -186,6 +213,8 @@ Languages: JavaScript, TypeScript, Python (partial).
 | `SECURECODE_API_TOKEN` | — | API token (alternative to login) |
 | `SECURECODE_API_URL` | `https://api.usesecurecode.tech` | API base URL |
 | `SECURECODE_ATTACK_ENABLED` | — | Set to `1` to enable the attack tool |
+| `SECURECODE_DEV_SERVER_PORT` | auto | Local dev server port for runtime verification |
+| `SECURECODE_DISABLE_RUNTIME_PROBE` | — | Set to `1` to disable runtime verification probes |
 
 ## Security
 
