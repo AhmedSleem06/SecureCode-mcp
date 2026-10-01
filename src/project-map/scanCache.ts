@@ -158,6 +158,47 @@ export function getCachedScan(
 }
 
 /**
+ * Summary of one completed scan currently served from the cache.
+ */
+export interface CachedScanSummary {
+    filePath: string;
+    findings: number;
+    scannedAt: string;
+}
+
+/**
+ * List completed scans currently served from the cache — the same
+ * read-guard getCachedScan applies (completed + agent_finish + current
+ * version + not TTL-expired). Used by the batch preflight to tell the
+ * assistant which files can still be retrieved without consuming a run.
+ */
+export function listCachedCompletedScans(workspaceRoot: string): CachedScanSummary[] {
+    const cache = readScanCache(workspaceRoot);
+    if (!cache) return [];
+
+    const now = Date.now();
+    const entries: Array<{ timestamp: number; summary: CachedScanSummary }> = [];
+    for (const [key, entry] of Object.entries(cache.entries)) {
+        if (entry.status !== 'completed') continue;
+        if (entry.terminationReason !== 'agent_finish') continue;
+        if (entry.version !== AGENT_SCAN_CACHE_VERSION) continue;
+        if (now - entry.timestamp > CACHE_TTL_MS) continue;
+        const sep = key.lastIndexOf(':');
+        entries.push({
+            timestamp: entry.timestamp,
+            summary: {
+                filePath: sep >= 0 ? key.slice(0, sep) : key,
+                findings: Array.isArray(entry.findings) ? entry.findings.length : 0,
+                scannedAt: new Date(entry.timestamp).toISOString(),
+            },
+        });
+    }
+
+    entries.sort((a, b) => b.timestamp - a.timestamp);
+    return entries.slice(0, 20).map(e => e.summary);
+}
+
+/**
  * Write a scan result to the cache. Merges with existing entries.
  */
 export function writeCachedScan(

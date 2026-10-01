@@ -171,23 +171,36 @@ export async function runArchitectureScout(
     let costSpentUsd = 0;
 
     try {
-        const startRespRaw = await client.postJson<ArchitectureScoutStartResponse>(
-            '/agent/architecture/start', { depth }, options.signal,
-        );
-        // Re-use the agent-scan start response validator — the shape is
-        // identical (runId, budget, scanCredits, refundId).
-        const startValidation = validateAgentStartResponse(startRespRaw);
-        if (!startValidation.ok) {
+        let startResp: ArchitectureScoutStartResponse;
+        try {
+            const startRespRaw = await client.postJson<ArchitectureScoutStartResponse>(
+                '/agent/architecture/start', { depth }, options.signal,
+            );
+            // Re-use the agent-scan start response validator — the shape is
+            // identical (runId, budget, scanCredits, refundId).
+            const startValidation = validateAgentStartResponse(startRespRaw);
+            if (!startValidation.ok) {
+                return {
+                    status: 'spawn_failed',
+                    architecture: null,
+                    transcript: [],
+                    stepsUsed: 0,
+                    costSpentUsd: 0,
+                    error: `API returned an invalid start response: ${startValidation.error}`,
+                };
+            }
+            startResp = startValidation.value;
+        } catch (startErr: any) {
             return {
                 status: 'spawn_failed',
                 architecture: null,
                 transcript: [],
                 stepsUsed: 0,
                 costSpentUsd: 0,
-                error: `API returned an invalid start response: ${startValidation.error}`,
+                error: startErr?.message || String(startErr),
+                apiCode: (startErr as any)?.apiCode || (startErr as any)?.code || '',
             };
         }
-        const startResp = startValidation.value;
 
         const transcript: ArchitectureScoutTranscriptStep[] = [];
         const readFiles = new Set<string>();
@@ -424,6 +437,7 @@ export async function runArchitectureScout(
             stepsUsed: stepsTaken,
             costSpentUsd,
             error: err.message || String(err),
+            apiCode: (err as any)?.apiCode || (err as any)?.code || '',
         };
     }
 }

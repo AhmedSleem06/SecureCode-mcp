@@ -257,7 +257,10 @@ async function runArchitectureAction(
     });
 
     if (result.status === 'spawn_failed') {
-        throw new Error(result.error || 'Architecture scout failed to start.');
+        const e: any = new Error(result.error || 'Architecture scout failed to start.');
+        e.apiCode = result.apiCode || '';
+        e.statusCode = result.apiCode === 'AGENT_SCAN_ALREADY_RUNNING' ? 409 : result.apiCode === 'AGENT_SCAN_DAILY_LIMIT' ? 429 : undefined;
+        throw e;
     }
 
     // 5. Cache + return.

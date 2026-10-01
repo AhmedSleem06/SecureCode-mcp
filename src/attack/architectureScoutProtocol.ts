@@ -227,6 +227,8 @@ export interface ArchitectureScoutResult {
     stepsUsed: number;
     costSpentUsd: number;
     error?: string;
+    /** API error code (e.g. AGENT_SCAN_ALREADY_RUNNING) when the start call was rejected. */
+    apiCode?: string;
 }
 
 export function isScoutFinishAction(a: ArchitectureScoutAction): a is ArchitectureScoutFinishAction {

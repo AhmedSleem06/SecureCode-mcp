@@ -35,6 +35,7 @@ import {
 } from '../attack/agentScanBatchProtocol';
 import type { CreditBalanceResponse } from '../api/types';
 import type { ArchitectureContext } from '../project-map/architectureContext';
+import { listCachedCompletedScans } from '../project-map/scanCache';
 
 interface ArchitectureToolResult {
     architecture?: ArchitectureContext | null;
@@ -104,6 +105,10 @@ async function toolAgentScanBatchInner(
             return aggregateBatchResult(
                 'architecture-failed' as AgentScanBatchStopReason,
                 topN, [], [],
+                {
+                    stopDetail: 'Architecture scout returned no architecture context.',
+                    cachedScans: listCachedCompletedScans(ctx.workspaceRoot),
+                },
             );
         }
 
@@ -111,12 +116,43 @@ async function toolAgentScanBatchInner(
             return aggregateBatchResult(
                 'architecture-incomplete' as AgentScanBatchStopReason,
                 topN, [], [],
+                {
+                    stopDetail: 'Architecture scout completed with completeness=failed — the survey was cut short.',
+                    cachedScans: listCachedCompletedScans(ctx.workspaceRoot),
+                },
             );
         }
     } catch (err: any) {
+        const apiCode = err?.apiCode || err?.code || '';
+        const msg = String(err?.message || err);
+        const cachedScans = listCachedCompletedScans(ctx.workspaceRoot);
+        if (apiCode === 'AGENT_SCAN_ALREADY_RUNNING' || err?.statusCode === 409 || /already running/i.test(msg)) {
+            return aggregateBatchResult(
+                'architecture-in-progress' as AgentScanBatchStopReason,
+                topN, [], [],
+                {
+                    stopDetail: `${msg} Completed files can be retrieved meanwhile — retry individual agent-scan calls without noCache (cache reads consume no runs).`,
+                    cachedScans,
+                },
+            );
+        }
+        if (apiCode === 'AGENT_SCAN_DAILY_LIMIT' || (/daily limit/i.test(msg))) {
+            return aggregateBatchResult(
+                'daily-limit-reached' as AgentScanBatchStopReason,
+                topN, [], [],
+                {
+                    stopDetail: `${msg} Architecture scouts share the agent-scan daily budget. Completed files are still retrievable from cache — retry individual agent-scan calls WITHOUT noCache (no run consumed).`,
+                    cachedScans,
+                },
+            );
+        }
         return aggregateBatchResult(
             'architecture-failed' as AgentScanBatchStopReason,
             topN, [], [],
+            {
+                stopDetail: msg,
+                cachedScans,
+            },
         );
     }
 

@@ -68,6 +68,8 @@ export type AgentScanBatchStopReason =
     | 'completed'
     | 'architecture-failed'
     | 'architecture-incomplete'
+    | 'architecture-in-progress'
+    | 'daily-limit-reached'
     | 'insufficient-credits'
     | 'scan-incomplete'
     | 'scan-failed'
@@ -77,6 +79,10 @@ export type AgentScanBatchStopReason =
 export interface AgentScanBatchResult {
     status: 'completed' | 'incomplete' | 'failed' | 'preflight-failed' | 'cancelled';
     stopReason: AgentScanBatchStopReason;
+    /** Human-readable explanation of why the batch stopped (preflight failures in particular). */
+    stopDetail?: string;
+    /** Completed scans currently available in the cache — retrievable without consuming a run. */
+    cachedScans?: { filePath: string; findings: number; scannedAt: string }[];
     requestedTopN: number;
     selectedFiles: string[];
     completed: AgentScanBatchFileResult[];
@@ -165,6 +171,11 @@ export function buildNotStartedFileResult(
     };
 }
 
+export interface AggregateBatchExtras {
+    stopDetail?: string;
+    cachedScans?: { filePath: string; findings: number; scannedAt: string }[];
+}
+
 /**
  * Aggregate per-file results into a batch result with totals.
  */
@@ -173,6 +184,7 @@ export function aggregateBatchResult(
     requestedTopN: number,
     selectedFiles: string[],
     fileResults: AgentScanBatchFileResult[],
+    extras?: AggregateBatchExtras,
 ): AgentScanBatchResult {
     const completed = fileResults.filter(f => f.status === 'completed');
     const incomplete = fileResults.filter(f => f.status === 'incomplete');
@@ -190,7 +202,13 @@ export function aggregateBatchResult(
         status = incomplete.length > 0 || failed.length > 0 ? 'incomplete' : 'completed';
     } else if (stopReason === 'cancelled') {
         status = 'cancelled';
-    } else if (stopReason === 'insufficient-credits' || stopReason === 'architecture-failed' || stopReason === 'architecture-incomplete') {
+    } else if (
+        stopReason === 'insufficient-credits'
+        || stopReason === 'architecture-failed'
+        || stopReason === 'architecture-incomplete'
+        || stopReason === 'architecture-in-progress'
+        || stopReason === 'daily-limit-reached'
+    ) {
         status = failed.length > 0 ? 'failed' : 'preflight-failed';
     } else if (stopReason === 'scan-failed') {
         status = 'failed';
@@ -217,5 +235,7 @@ export function aggregateBatchResult(
             stepsUsed: totalSteps,
             costSpentUsd: totalCost,
         },
+        stopDetail: extras?.stopDetail,
+        cachedScans: extras?.cachedScans,
     };
 }

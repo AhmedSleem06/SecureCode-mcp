@@ -8,6 +8,7 @@ import {
     writeCachedScan,
     computeMemoryFingerprint,
     filterCachedFindingsAgainstMemory,
+    listCachedCompletedScans,
     AGENT_SCAN_CACHE_VERSION,
 } from '../src/project-map/scanCache';
 
@@ -336,5 +337,157 @@ describe('non-completed results are never served', () => {
         });
 
         expect(getCachedScan(workspaceRoot, 'src/foo.ts', code)).toBeNull();
+    });
+});
+
+describe('listCachedCompletedScans', () => {
+    let workspaceRoot: string;
+    let cacheFile: string;
+
+    beforeEach(() => {
+        workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'scancache-list-'));
+        const dir = path.join(workspaceRoot, '.securecode');
+        fs.mkdirSync(dir, { recursive: true });
+        cacheFile = path.join(dir, 'scan-cache.json');
+    });
+
+    afterEach(() => {
+        try { fs.rmSync(workspaceRoot, { recursive: true, force: true }); } catch {}
+    });
+
+    function writeRawCache(entries: Record<string, any>) {
+        fs.writeFileSync(cacheFile, JSON.stringify({
+            version: AGENT_SCAN_CACHE_VERSION,
+            entries,
+        }, null, 2));
+    }
+
+    it('returns [] when no cache file exists', () => {
+        expect(listCachedCompletedScans(workspaceRoot)).toEqual([]);
+    });
+
+    it('returns [] for an empty cache', () => {
+        writeRawCache({});
+        expect(listCachedCompletedScans(workspaceRoot)).toEqual([]);
+    });
+
+    it('lists completed agent_finish entries with parsed paths and finding counts, sorted desc', () => {
+        const now = Date.now();
+        writeRawCache({
+            'src/old.ts:aaaa1111': {
+                fileHash: 'aaaa1111', version: AGENT_SCAN_CACHE_VERSION, timestamp: now - 5000,
+                findings: [{ type: 'xss' }, { type: 'sqli' }], status: 'completed',
+                terminationReason: 'agent_finish', stepsUsed: 3, costSpentUsd: 0, filePath: 'src/old.ts',
+            },
+            'src/new.ts:bbbb2222': {
+                fileHash: 'bbbb2222', version: AGENT_SCAN_CACHE_VERSION, timestamp: now,
+                findings: [{ type: 'ssrf' }], status: 'completed',
+                terminationReason: 'agent_finish', stepsUsed: 2, costSpentUsd: 0, filePath: 'src/new.ts',
+            },
+            'C:/proj/src/abs.ts:cccc3333': {
+                fileHash: 'cccc3333', version: AGENT_SCAN_CACHE_VERSION, timestamp: now - 1000,
+                findings: [], status: 'completed',
+                terminationReason: 'agent_finish', stepsUsed: 1, costSpentUsd: 0, filePath: 'C:/proj/src/abs.ts',
+            },
+        });
+
+        const list = listCachedCompletedScans(workspaceRoot);
+        expect(list).toHaveLength(3);
+        // Sorted by timestamp desc — newest first.
+        expect(list[0].filePath).toBe('src/new.ts');
+        expect(list[0].findings).toBe(1);
+        expect(list[1].filePath).toBe('C:/proj/src/abs.ts');
+        expect(list[1].findings).toBe(0);
+        expect(list[2].filePath).toBe('src/old.ts');
+        expect(list[2].findings).toBe(2);
+        // scannedAt is an ISO string of the entry timestamp.
+        expect(list[0].scannedAt).toBe(new Date(now).toISOString());
+    });
+
+    it('excludes incomplete and non-agent_finish entries', () => {
+        const now = Date.now();
+        writeRawCache({
+            'src/inc.ts:aaaa1111': {
+                fileHash: 'aaaa1111', version: AGENT_SCAN_CACHE_VERSION, timestamp: now,
+                findings: [], status: 'incomplete', terminationReason: 'wall_clock',
+                stepsUsed: 1, costSpentUsd: 0, filePath: 'src/inc.ts',
+            },
+            'src/blocked.ts:bbbb2222': {
+                fileHash: 'bbbb2222', version: AGENT_SCAN_CACHE_VERSION, timestamp: now,
+                findings: [], status: 'completed', terminationReason: 'blocked_read_recovery',
+                stepsUsed: 1, costSpentUsd: 0, filePath: 'src/blocked.ts',
+            },
+            'src/legacy.ts:cccc3333': {
+                fileHash: 'cccc3333', version: AGENT_SCAN_CACHE_VERSION, timestamp: now,
+                findings: [], status: 'completed',
+                stepsUsed: 1, costSpentUsd: 0, filePath: 'src/legacy.ts',
+            },
+        });
+
+        expect(listCachedCompletedScans(workspaceRoot)).toEqual([]);
+    });
+
+    it('excludes version-mismatched entries', () => {
+        const now = Date.now();
+        writeRawCache({
+            'src/stale.ts:aaaa1111': {
+                fileHash: 'aaaa1111', version: AGENT_SCAN_CACHE_VERSION - 1, timestamp: now,
+                findings: [{ type: 'xss' }], status: 'completed',
+                terminationReason: 'agent_finish', stepsUsed: 3, costSpentUsd: 0, filePath: 'src/stale.ts',
+            },
+        });
+
+        expect(listCachedCompletedScans(workspaceRoot)).toEqual([]);
+    });
+
+    it('excludes TTL-expired entries', () => {
+        writeRawCache({
+            'src/old.ts:aaaa1111': {
+                fileHash: 'aaaa1111', version: AGENT_SCAN_CACHE_VERSION,
+                timestamp: Date.now() - 8 * 24 * 60 * 60 * 1000,
+                findings: [], status: 'completed',
+                terminationReason: 'agent_finish', stepsUsed: 3, costSpentUsd: 0, filePath: 'src/old.ts',
+            },
+        });
+
+        expect(listCachedCompletedScans(workspaceRoot)).toEqual([]);
+    });
+
+    it('caps the listing at 20 entries', () => {
+        const now = Date.now();
+        const entries: Record<string, any> = {};
+        for (let i = 0; i < 25; i++) {
+            const key = `src/f${i}.ts:hash${String(i).padStart(4, '0')}`;
+            entries[key] = {
+                fileHash: `hash${String(i).padStart(4, '0')}`, version: AGENT_SCAN_CACHE_VERSION,
+                timestamp: now - i * 1000,
+                findings: [], status: 'completed', terminationReason: 'agent_finish',
+                stepsUsed: 1, costSpentUsd: 0, filePath: `src/f${i}.ts`,
+            };
+        }
+        writeRawCache(entries);
+
+        const list = listCachedCompletedScans(workspaceRoot);
+        expect(list).toHaveLength(20);
+        // Newest 20 — f0 (newest) through f19; f20..f24 dropped.
+        expect(list[0].filePath).toBe('src/f0.ts');
+        expect(list[19].filePath).toBe('src/f19.ts');
+        expect(list.some(s => s.filePath === 'src/f24.ts')).toBe(false);
+    });
+
+    it('lists entries written by writeCachedScan (key-format integration)', () => {
+        writeCachedScan(workspaceRoot, 'src/real.ts', 'const real = 1;', {
+            findings: [{ type: 'sql_injection' }],
+            status: 'completed',
+            terminationReason: 'agent_finish',
+            stepsUsed: 4,
+            costSpentUsd: 0.02,
+        });
+
+        const list = listCachedCompletedScans(workspaceRoot);
+        expect(list).toHaveLength(1);
+        expect(list[0].filePath).toBe('src/real.ts');
+        expect(list[0].findings).toBe(1);
+        expect(new Date(list[0].scannedAt).getTime()).toBeGreaterThan(0);
     });
 });
