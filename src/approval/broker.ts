@@ -175,9 +175,10 @@ export class ApprovalBroker {
         tool: string,
         summary: string,
         operationParts: unknown[],
-        timeoutMs: number = 60_000,
+        timeoutMs: number = 120_000,
         category: OperationCategory = 'paid-generation',
         workspaceRoot: string | null = null,
+        opts?: { onUrl?: (url: string) => void },
     ): Promise<ApprovalResult> {
         return new Promise<ApprovalResult>((resolve) => {
             if (this.pending.size >= MAX_PENDING) {
@@ -194,18 +195,21 @@ export class ApprovalBroker {
             const req = createApprovalRequest(tool, summary, operationParts, timeoutMs, category, workspaceRoot);
             const startTime = req.createdAt;
 
+            const url = `http://${LOOPBACK}:${this.port}/?id=${req.id}`;
+
             const timer = setTimeout(() => {
                 const entry = this.pending.get(req.id);
                 if (entry && !entry.settled) {
-                    this.settle(entry, false, 'timeout', 'Request timed out');
+                    this.settle(entry, false, 'timeout',
+                        `Request timed out after ${Math.round(timeoutMs / 1000)}s. The approval page was at ${url}. Approvals print to the MCP server console and appear in progress notifications when the client supports them.`);
                 }
             }, timeoutMs + 5000);
 
             const entry: PendingEntry = { req, resolve, timer, settled: false };
             this.pending.set(req.id, entry);
 
-            const url = `http://${LOOPBACK}:${this.port}/?id=${req.id}`;
             console.error(`[securecode] Approval required for ${tool}. Open: ${url}`);
+            opts?.onUrl?.(url);
             openBrowser(url);
         });
     }

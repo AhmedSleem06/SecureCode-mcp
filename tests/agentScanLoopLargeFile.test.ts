@@ -169,7 +169,9 @@ describe('runAgentScan — large-file read recovery', () => {
         expect(remainderRead!.observation).toContain('lines 400-450 of 1100');
 
         // (c) No duplicate-recovery rejection was ever issued.
-        expect(mockFn.mock.calls.length).toBe(11);
+        // 11 step-path calls + the final /agent/scan/close (the loop now
+        // confirms every exit — accepted finishes included).
+        expect(mockFn.mock.calls.length).toBe(12);
         const warned = (console.warn as any).mock.calls.some((c: any[]) => String(c[0]).includes('Duplicate recovery action'));
         expect(warned).toBe(false);
     });

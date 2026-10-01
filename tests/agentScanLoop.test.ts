@@ -9,6 +9,8 @@
 //   - Transcript accumulates action+observation pairs
 //   - Cost tracking accumulates from step responses
 //   - spawn_failed on API error (now 'failed')
+//   - Accepted finish closes the run with status 'completed'
+//   - Locally-rejected finish keeps the run alive — the loop keeps stepping
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -193,7 +195,7 @@ describe('runAgentScan — termination', () => {
         expect(result.coverageGaps.length).toBeGreaterThan(0);
     });
 
-    it('does not close the run after a delivered agent_finish', async () => {
+    it('closes the run with completed status after a delivered agent_finish', async () => {
         const mockFn = mockPostJson([
             { runId: 'run-ok', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 0.40, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
             ...completeChecklistSteps([], 'clean'),
@@ -208,8 +210,64 @@ describe('runAgentScan — termination', () => {
 
         expect(result.status).toBe('completed');
         expect(result.terminationReason).toBe('agent_finish');
+        // The accepted finish is confirmed server-side via /close —
+        // /step no longer completes the run row.
         const closeCall = (mockFn.mock.calls as any[]).find(c => c[0] === '/agent/scan/close');
-        expect(closeCall).toBeFalsy();
+        expect(closeCall).toBeTruthy();
+        expect(closeCall[1]).toEqual({
+            runId: 'run-ok',
+            status: 'completed',
+            terminationReason: 'agent_finish',
+        });
+    });
+
+    it('a locally-rejected finish does not kill the run — the loop keeps stepping', async () => {
+        // The production race: the API proposes finish while the local finish
+        // gate still sees incomplete investigation steps. The gate rejects the
+        // proposal, the loop keeps stepping, and a later finish is accepted —
+        // the run row must stay alive server-side until the accepted finish is
+        // confirmed via /close with status 'completed'.
+        const step = (next: any, remaining: number) => ({
+            next, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: remaining,
+        });
+        const mockFn = mockPostJson([
+            { runId: 'run-race', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 0.40, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
+            // Step 1: initial read only — cross-file-flow + tests-found incomplete
+            step({ type: 'read_file', path: 'test.ts', startLine: 1, endLine: 50, rationale: 'r' }, 39),
+            // Step 2: premature finish — the local gate must REJECT it
+            step({ type: 'finish', findings: [], summary: 'premature', selfCritique: 'done' }, 38),
+            // Steps 3+: the model continues the investigation
+            step({ type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, 37),
+            step({ type: 'check_policy', filePath: 'test.ts', rationale: 'r' }, 36),
+            step({ type: 'read_config', configKind: 'all', rationale: 'r' }, 35),
+            step({ type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, 34),
+            // Later finish — accepted by the gate
+            step({ type: 'finish', findings: [], summary: 'done', selfCritique: 'done' }, 33),
+        ]);
+        (executeReadFileAction as any).mockResolvedValue({
+            observation: 'file content here', actualStart: 1, actualEnd: 100, totalLines: 100, truncated: false,
+        });
+        (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
+
+        const result = await runAgentScan(ctx, target, {});
+
+        // The loop kept stepping after the rejected finish instead of dying
+        const stepCalls = (mockFn.mock.calls as any[]).filter(c => c[0] === '/agent/scan/step');
+        expect(stepCalls.length).toBeGreaterThanOrEqual(7);
+        // The rejection was surfaced to the model as a system event
+        expect(result.transcript.some(t =>
+            t.action.type === 'system_event' && (t.action as any).eventType === 'finish_rejected',
+        )).toBe(true);
+        // A later finish was accepted and the run completed
+        expect(result.status).toBe('completed');
+        expect(result.terminationReason).toBe('agent_finish');
+        // The final close carries the completed confirmation
+        const closeCall = (mockFn.mock.calls as any[]).find(c => c[0] === '/agent/scan/close');
+        expect(closeCall).toBeTruthy();
+        expect(closeCall[1].status).toBe('completed');
+        expect(closeCall[1].terminationReason).toBe('agent_finish');
+        expect(closeCall[1].runId).toBe('run-race');
     });
 
     it('accumulates cost from step responses', async () => {

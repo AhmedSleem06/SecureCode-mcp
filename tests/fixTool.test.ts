@@ -18,6 +18,7 @@ vi.mock('../src/approval/broker', () => ({
 
 import { toolFix } from '../src/tools/fix';
 import { ApiClient } from '../src/api/client';
+import { ApprovalBroker } from '../src/approval/broker';
 
 const ctx: any = { workspaceRoot: 'C:\\ws', apiUrl: 'http://localhost', apiToken: 't' };
 
@@ -121,5 +122,54 @@ describe('toolFix — enriched generation', () => {
         const result: any = await toolFix(ctx, BASE_ARGS);
 
         expect(result.syntax.retried).toBe(true);
+    });
+
+    describe('approval wiring', () => {
+        function lastBrokerInstance(): any {
+            const ctor = ApprovalBroker as any;
+            expect(ctor.mock.results.length).toBeGreaterThan(0);
+            return ctor.mock.results[ctor.mock.results.length - 1].value;
+        }
+
+        it('requests approval with a 120s timeout', async () => {
+            mockFixResponse({ fixed_code: 'fixed', replace_range: { start_line: 2, end_line: 2 } });
+
+            await toolFix(ctx, BASE_ARGS);
+
+            const requestApproval = lastBrokerInstance().requestApproval;
+            expect(requestApproval).toHaveBeenCalledTimes(1);
+            const call = requestApproval.mock.calls[0];
+            expect(call[0]).toBe('securecode.fix');
+            expect(call[3]).toBe(120_000);
+            expect(call[4]).toBe('paid-generation');
+            expect(call[5]).toBe(ctx.workspaceRoot);
+        });
+
+        it('wires opts.onUrl to args._progress so clients surface the approval URL live', async () => {
+            mockFixResponse({ fixed_code: 'fixed', replace_range: { start_line: 2, end_line: 2 } });
+            const progress = vi.fn();
+
+            await toolFix(ctx, { ...BASE_ARGS, _progress: progress });
+
+            const requestApproval = lastBrokerInstance().requestApproval;
+            const opts = requestApproval.mock.calls[0][6];
+            expect(typeof opts.onUrl).toBe('function');
+
+            const url = 'http://127.0.0.1:45678/?id=abc-123';
+            opts.onUrl(url);
+            expect(progress).toHaveBeenCalledTimes(1);
+            expect(progress).toHaveBeenCalledWith(0, 1, `⏸ Approval required — open ${url} (expires in 120s)`);
+        });
+
+        it('passes onUrl: undefined when the client sent no progress callback', async () => {
+            mockFixResponse({ fixed_code: 'fixed', replace_range: { start_line: 2, end_line: 2 } });
+
+            await toolFix(ctx, BASE_ARGS);
+
+            const requestApproval = lastBrokerInstance().requestApproval;
+            const opts = requestApproval.mock.calls[0][6];
+            expect(opts).toBeDefined();
+            expect(opts.onUrl).toBeUndefined();
+        });
     });
 });

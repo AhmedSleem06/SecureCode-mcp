@@ -188,6 +188,7 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
                 const name = params.name;
                 const args = params.arguments || {};
                 const progressToken = params._meta?.progressToken;
+                console.error(`[securecode-mcp] progress token: ${progressToken === undefined ? 'absent (client will not show live progress)' : 'present'}`);
                 const handler = name ? TOOL_HANDLERS[name] : undefined;
                 if (!handler) {
                     return { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${name}` } };

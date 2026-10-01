@@ -6,7 +6,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.scan',
         description:
-            'Scan a source file or code string for vulnerabilities. Read-only: no approval needed. Returns findings (type, severity, location, message, evidence). Uses the SecureCode AI multi-phase pipeline (Scout discovery, Juror verification, Reconcile).',
+            'Scan a source file or code string for vulnerabilities. Read-only: no approval needed. Returns findings (type, severity, location, message, evidence). Uses the SecureCode AI multi-phase pipeline (Scout discovery, Juror verification, Reconcile). depth=deep is LONG-RUNNING (1-5+ minutes on large files) and may exceed your AI client\'s tool-call timeout — prefer securecode.agent-scan (designed for long runs) or the CLI (`securecode-mcp scan --depth deep`) for large files.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -33,7 +33,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.architecture',
         description:
-            'Run the architecture-scout subagent: an AI security architect surveys the codebase, reads key files, and returns an ArchitectureContext — project type/frameworks, ranked important files, trust boundaries (entry points + input types), security controls with coverage notes, and a recommended scan order. Uses AI credits. Cached per depth until the project map changes; pass refresh:true to force a fresh survey.',
+            'Run the architecture-scout subagent: an AI security architect surveys the codebase, reads key files, and returns an ArchitectureContext — project type/frameworks, ranked important files, trust boundaries (entry points + input types), security controls with coverage notes, and a recommended scan order. Uses AI credits. Cached per depth until the project map changes; pass refresh:true to force a fresh survey. Typically takes 1-3 minutes. Cached per depth — one purchase upgrades subsequent scans.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -52,7 +52,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.fix',
         description:
-            'Generate a patch for a specific vulnerability finding. REQUIRES human approval before executing. Returns the fixed code + diff + explanation. Does NOT auto-apply; the human reviews and applies the patch.',
+            'Generate a patch for a specific vulnerability finding. REQUIRES human approval before executing. Returns the fixed code + diff + explanation. Does NOT auto-apply; the human reviews and applies the patch. May pause up to 120 seconds waiting for human approval before generating.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -119,7 +119,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.attack',
         description:
-            'Request an endpoint red-team attack against a localhost dev server. REQUIRES human approval. The target must be a real endpoint from the user\'s codebase (read the routes/source to find it) and the dev server must already be running on localhost. Beta: localhost targets only.',
+            'Request an endpoint red-team attack against a localhost dev server. REQUIRES human approval. The target must be a real endpoint from the user\'s codebase (read the routes/source to find it) and the dev server must already be running on localhost. Beta: localhost targets only. May pause up to 120 seconds waiting for human approval.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -216,7 +216,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.agent-scan',
         description:
-            'Agent-mode scan: an AI investigator that reads files, traces data flows, checks guards, and compares endpoint policies to find vulnerabilities. Slower but deeper than a deep scan. The agent replaces the Scout phase and its findings are verified by the Juror. Uses 5 scan credits. Best for complex access-control and cross-file vulnerabilities. Supports diff-aware scoping: pass baseRef to focus the scan on changed files and their blast radius (files that import or call the changed files).',
+            'Agent-mode scan: an AI investigator that reads files, traces data flows, checks guards, and compares endpoint policies to find vulnerabilities. Slower but deeper than a deep scan. The agent replaces the Scout phase and its findings are verified by the Juror. Uses 5 scan credits. Best for complex access-control and cross-file vulnerabilities. Supports diff-aware scoping: pass baseRef to focus the scan on changed files and their blast radius (files that import or call the changed files). LONG-RUNNING: typically 2-8 minutes per file. Tell the user it is running and roughly how long it takes BEFORE calling.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -239,6 +239,10 @@ const ALL_TOOLS: ToolDef[] = [
                 headRef: {
                     type: 'string',
                     description: 'Optional git ref to diff from baseRef (defaults to HEAD).',
+                },
+                noCache: {
+                    type: 'boolean',
+                    description: 'Set true to bypass the 7-day scan cache and force a fresh investigation. Use when a previous scan failed or the file may have changed.',
                 },
             },
         },
@@ -435,7 +439,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.agent-scan-batch',
         description:
-            'Maps the project and scans the selected top files sequentially. Do not call securecode.agent-scan separately in parallel for the same batch. Stops after the first incomplete or failed file and reports remaining files as not-started. Uses architecture scout to identify the most security-relevant files, then runs agent-scan on each one in order. Performs a credit preflight check before starting: if insufficient credits for the full batch (architecture + scans + verification), returns preflight-failed without starting any paid operation. Each scan costs 5 scan credits. The architecture scout costs 5/10/20 credits (quick/standard/deep). Result categories: completed (clean finish), incomplete (cut short with coverage gaps), failed (operational error), not-started (selected but never attempted), preflight-failed (insufficient credits).',
+            'Maps the project and scans the selected top files sequentially. Do not call securecode.agent-scan separately in parallel for the same batch. Stops after the first incomplete or failed file and reports remaining files as not-started. Uses architecture scout to identify the most security-relevant files, then runs agent-scan on each one in order. Performs a credit preflight check before starting: if insufficient credits for the full batch (architecture + scans + verification), returns preflight-failed without starting any paid operation. Each scan costs 5 scan credits. The architecture scout costs 5/10/20 credits (quick/standard/deep). Result categories: completed (clean finish), incomplete (cut short with coverage gaps), failed (operational error), not-started (selected but never attempted), preflight-failed (insufficient credits). LONG-RUNNING: typically 10-30 minutes for topN=5 (scout 2-5 min + 2-6 min per file, sequential). Tell the user it is running and roughly how long BEFORE calling.',
         inputSchema: {
             type: 'object',
             properties: {

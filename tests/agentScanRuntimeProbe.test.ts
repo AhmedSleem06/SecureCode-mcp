@@ -220,9 +220,10 @@ describe('toolAgentScan — runtime probe fallback', () => {
             'securecode.runtime-probe',
             expect.stringContaining('Runtime probe verification: 1 finding(s) need live-server confirmation against 127.0.0.1:3000'),
             expect.any(Array),
-            60_000,
+            120_000,
             'paid-generation',
             workspaceRoot,
+            expect.objectContaining({}),
         );
 
         const finding = result.agentFindings[0];
@@ -346,6 +347,7 @@ describe('toolAgentScan — runtime probe fallback', () => {
             expect.any(Number),
             'paid-generation',
             workspaceRoot,
+            expect.objectContaining({}),
         );
         expect(mockPostJson).not.toHaveBeenCalled();
         for (const finding of result.agentFindings) {

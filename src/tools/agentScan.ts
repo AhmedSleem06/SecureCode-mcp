@@ -355,10 +355,12 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
         // best-effort — proceed without memory
     }
 
-    // 2c. Check scan cache — if the file hasn't changed, return cached results
-    const skipCacheRead = !!args._noCache;
+    // 2c. Check scan cache — if the file hasn't changed, return cached results.
+    // `noCache` is the documented arg; `_noCache` is the internal alias used
+    // by batch scans — both bypass the cache read for a fresh scan.
+    const noCacheRequested = !!(args as any).noCache || !!(args as any)._noCache;
     const useCache = !!filePath;
-    if (useCache && !skipCacheRead) {
+    if (useCache && !noCacheRequested) {
         try {
             const cached = getCachedScan(ctx.workspaceRoot, filePath!, code);
             if (cached) {
@@ -722,9 +724,10 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                         devServer.port,
                         ...probeCandidates.map(c => `${c.endpoint.method} ${String(c.endpoint.mountedPath ?? '') || c.endpoint.path}`),
                     ],
-                    60_000,
+                    120_000,
                     'paid-generation',
                     ctx.workspaceRoot,
+                    { onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required — open ${url} (expires in 120s)`) : undefined },
                 );
 
                 if (!probeApproval.approved) {
@@ -887,9 +890,10 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                     'securecode.agent-scan (fix generation)',
                     fixSummary,
                     [code, language, finding.type, finding.line, finding.lineEnd, finding.evidence, finding.severity, finding.confidence],
-                    60_000,
+                    120_000,
                     'paid-generation',
                     ctx.workspaceRoot,
+                    { onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required — open ${url} (expires in 120s)`) : undefined },
                 );
 
                 if (!approval.approved) {
@@ -1061,10 +1065,12 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     }
     } // end else (skipFix)
 
-    // 5. Write to cache before returning — but never cache llm_degraded
-    // runs: they reflect a bad model-server window, not the file's true
-    // state, and must not be served for 7 days.
-    if (useCache && agentResult.terminationReason !== 'llm_degraded') {
+    // 5. Write to cache before returning — only fully-successful scans:
+    // status 'completed' AND terminationReason 'agent_finish'. Failed,
+    // degraded, or incomplete runs (llm_degraded, blocked reads, budget
+    // stops, crashes) reflect a bad model-server or environment window,
+    // not the file's true state, and must not be served for 7 days.
+    if (useCache && agentResult.status === 'completed' && agentResult.terminationReason === 'agent_finish') {
         try {
             writeCachedScan(ctx.workspaceRoot, filePath!, code, {
                 findings: provenFindings,

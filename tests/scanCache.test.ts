@@ -35,6 +35,7 @@ describe('scanCache — memory coherence', () => {
         writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
             findings: [{ type: 'sql_injection', line: 5, evidence: 'exec(input)' }],
             status: 'completed',
+            terminationReason: 'agent_finish',
             summary: 'ok',
             stepsUsed: 3,
             costSpentUsd: 0.01,
@@ -60,6 +61,7 @@ describe('scanCache — memory coherence', () => {
         writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
             findings: [{ type: 'sql_injection', line: 5, evidence: 'exec(input)' }],
             status: 'completed',
+            terminationReason: 'agent_finish',
             stepsUsed: 1, costSpentUsd: 0,
         }, memHash);
 
@@ -80,6 +82,7 @@ describe('scanCache — memory coherence', () => {
                 { type: 'xss', line: 10, evidence: 'innerHTML = userInput' },
             ],
             status: 'completed',
+            terminationReason: 'agent_finish',
             stepsUsed: 1, costSpentUsd: 0,
         }, '');  // empty fingerprint — no FPs at write time
 
@@ -138,10 +141,10 @@ describe('scanCache — memory coherence', () => {
         expect(cached!.status).toBe('completed');
     });
 
-    it('downgrades legacy completed entries without terminationReason to incomplete', () => {
+    it('returns null for legacy completed entries without terminationReason', () => {
         const code = 'const x = 1;';
         // Simulate a legacy entry: write with completed status but no
-        // terminationReason, then read back and verify it's downgraded.
+        // terminationReason — downgraded to incomplete, then rejected.
         const dir = path.join(workspaceRoot, '.securecode');
         const cacheFile = path.join(dir, 'scan-cache.json');
         const fileHash = crypto.createHash('sha256').update(code).digest('hex').slice(0, 16);
@@ -164,11 +167,10 @@ describe('scanCache — memory coherence', () => {
         }, null, 2));
 
         const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
-        expect(cached).not.toBeNull();
-        expect(cached!.status).toBe('incomplete');
+        expect(cached).toBeNull();
     });
 
-    it('downgrades completed entries with non-agent_finish terminationReason to incomplete', () => {
+    it('returns null for completed entries with non-agent_finish terminationReason', () => {
         const code = 'const x = 1;';
         writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
             findings: [],
@@ -178,11 +180,10 @@ describe('scanCache — memory coherence', () => {
         });
 
         const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
-        expect(cached).not.toBeNull();
-        expect(cached!.status).toBe('incomplete');
+        expect(cached).toBeNull();
     });
 
-    it('preserves incomplete status from cache', () => {
+    it('returns null for incomplete status entries', () => {
         const code = 'const x = 1;';
         writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
             findings: [],
@@ -192,12 +193,10 @@ describe('scanCache — memory coherence', () => {
         });
 
         const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
-        expect(cached).not.toBeNull();
-        expect(cached!.status).toBe('incomplete');
-        expect(cached!.terminationReason).toBe('wall_clock');
+        expect(cached).toBeNull();
     });
 
-    it('maps legacy capped status to incomplete', () => {
+    it('returns null for legacy capped status', () => {
         const code = 'const x = 1;';
         const dir = path.join(workspaceRoot, '.securecode');
         const cacheFile = path.join(dir, 'scan-cache.json');
@@ -213,10 +212,10 @@ describe('scanCache — memory coherence', () => {
         }, null, 2));
 
         const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
-        expect(cached!.status).toBe('incomplete');
+        expect(cached).toBeNull();
     });
 
-    it('maps legacy spawn_failed status to failed', () => {
+    it('returns null for legacy spawn_failed status', () => {
         const code = 'const x = 1;';
         const dir = path.join(workspaceRoot, '.securecode');
         const cacheFile = path.join(dir, 'scan-cache.json');
@@ -232,10 +231,10 @@ describe('scanCache — memory coherence', () => {
         }, null, 2));
 
         const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
-        expect(cached!.status).toBe('failed');
+        expect(cached).toBeNull();
     });
 
-    it('maps legacy blocked_recovery status to incomplete', () => {
+    it('returns null for legacy blocked_recovery status', () => {
         const code = 'const x = 1;';
         const dir = path.join(workspaceRoot, '.securecode');
         const cacheFile = path.join(dir, 'scan-cache.json');
@@ -251,6 +250,91 @@ describe('scanCache — memory coherence', () => {
         }, null, 2));
 
         const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
-        expect(cached!.status).toBe('incomplete');
+        expect(cached).toBeNull();
+    });
+});
+
+describe('non-completed results are never served', () => {
+    let workspaceRoot: string;
+
+    beforeEach(() => {
+        workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'scancache-'));
+        fs.mkdirSync(path.join(workspaceRoot, '.securecode'), { recursive: true });
+    });
+
+    afterEach(() => {
+        try { fs.rmSync(workspaceRoot, { recursive: true, force: true }); } catch {}
+    });
+
+    it('returns null for status incomplete', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [],
+            status: 'incomplete',
+            terminationReason: 'wall_clock',
+            stepsUsed: 1, costSpentUsd: 0,
+        });
+
+        expect(getCachedScan(workspaceRoot, 'src/foo.ts', code)).toBeNull();
+    });
+
+    it('returns null for status failed', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [],
+            status: 'failed',
+            stepsUsed: 1, costSpentUsd: 0,
+        });
+
+        expect(getCachedScan(workspaceRoot, 'src/foo.ts', code)).toBeNull();
+    });
+
+    it('returns null for status cancelled', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [],
+            status: 'cancelled',
+            stepsUsed: 1, costSpentUsd: 0,
+        });
+
+        expect(getCachedScan(workspaceRoot, 'src/foo.ts', code)).toBeNull();
+    });
+
+    it('returns null for legacy blocked_recovery status (downgraded to incomplete, then guarded)', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [],
+            status: 'blocked_recovery',
+            stepsUsed: 5, costSpentUsd: 0.03,
+        });
+
+        expect(getCachedScan(workspaceRoot, 'src/foo.ts', code)).toBeNull();
+    });
+
+    it('serves completed entries with terminationReason agent_finish (control case)', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [{ type: 'sql_injection', line: 5, evidence: 'exec(input)' }],
+            status: 'completed',
+            terminationReason: 'agent_finish',
+            stepsUsed: 3, costSpentUsd: 0.01,
+        });
+
+        const cached = getCachedScan(workspaceRoot, 'src/foo.ts', code);
+        expect(cached).not.toBeNull();
+        expect(cached!.status).toBe('completed');
+        expect(cached!.terminationReason).toBe('agent_finish');
+    });
+
+    it('returns null for completed entries with legacy budget_exhausted terminationReason (downgraded, then guarded)', () => {
+        const code = 'const x = 1;';
+        writeCachedScan(workspaceRoot, 'src/foo.ts', code, {
+            findings: [],
+            status: 'completed',
+            terminationReason: 'budget_exhausted',
+            stepsUsed: 50, costSpentUsd: 0.5,
+        });
+
+        expect(getCachedScan(workspaceRoot, 'src/foo.ts', code)).toBeNull();
     });
 });

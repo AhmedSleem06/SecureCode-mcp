@@ -60,13 +60,17 @@ export async function toolAttack(ctx: ServerContext, args: any): Promise<unknown
 
     const broker = new ApprovalBroker();
     await broker.start();
+    const progress = args._progress as ((c: number, t: number, m: string) => void) | undefined;
 
     try {
         const result = await broker.requestApproval(
             'securecode.attack',
             summary,
             [endpoint.path, targetHost, port, code, args.vulnerabilityType],
-            60_000,
+            120_000,
+            'paid-generation',
+            null,
+            { onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required — open ${url} (expires in 120s)`) : undefined },
         );
 
         if (!result.approved) {

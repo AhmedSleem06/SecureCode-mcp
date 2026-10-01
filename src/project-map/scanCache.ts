@@ -113,6 +113,9 @@ export function readScanCache(workspaceRoot: string): ScanCacheData | null {
 /**
  * Look up a cached scan result by file path + content hash.
  * Returns null if not found, expired, or version mismatch.
+ * Non-completed results (incomplete, failed, cancelled, or legacy statuses
+ * downgraded to one of those) are never served — they are treated as a
+ * cache miss and re-scanned.
  */
 export function getCachedScan(
     workspaceRoot: string,
@@ -137,18 +140,21 @@ export function getCachedScan(
     // Old entries used 'capped', 'degraded', 'spawn_failed', 'blocked_recovery'
     // which no longer exist. A 'completed' entry without terminationReason
     // 'agent_finish' was actually an incomplete scan (blocked_read_recovery or
-    // capped under the old naming).
+    // capped under the old naming). Downgraded entries fall through to the
+    // guard below and are rejected like any other non-completed result.
+    let normalized = entry;
     if (entry.status === 'capped' || entry.status === 'degraded' || entry.status === 'blocked_recovery') {
-        return { ...entry, status: 'incomplete' };
-    }
-    if (entry.status === 'spawn_failed') {
-        return { ...entry, status: 'failed' };
-    }
-    if (entry.status === 'completed' && entry.terminationReason !== 'agent_finish') {
-        return { ...entry, status: 'incomplete' };
+        normalized = { ...entry, status: 'incomplete' };
+    } else if (entry.status === 'spawn_failed') {
+        normalized = { ...entry, status: 'failed' };
+    } else if (entry.status === 'completed' && entry.terminationReason !== 'agent_finish') {
+        normalized = { ...entry, status: 'incomplete' };
     }
 
-    return entry;
+    // Never serve non-completed results — treat as a miss so the file is re-scanned.
+    if (normalized.status !== 'completed') return null;
+
+    return normalized;
 }
 
 /**

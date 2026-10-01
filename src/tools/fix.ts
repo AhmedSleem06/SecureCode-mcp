@@ -24,15 +24,17 @@ export async function toolFix(ctx: ServerContext, args: any): Promise<unknown> {
 
     const broker = new ApprovalBroker();
     await broker.start();
+    const progress = args._progress as ((c: number, t: number, m: string) => void) | undefined;
 
     try {
         const result = await broker.requestApproval(
             'securecode.fix',
             summary,
             [code, language, args.vulnerabilityType, args.lineStart, args.lineEnd, args.evidenceSnippet],
-            60_000,
+            120_000,
             'paid-generation',
             ctx.workspaceRoot,
+            { onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required — open ${url} (expires in 120s)`) : undefined },
         );
 
         if (!result.approved) {

@@ -96,12 +96,17 @@ export async function runAgentScan(
         let meaningfulProgressSinceLastExtension = false;
     let activeRunId: string | null = null;
 
-    // Best-effort run close: on any exit that is not a delivered
-    // agent_finish, tell the API to mark the run terminal immediately
-    // instead of waiting up to 30 minutes for the janitor. The janitor
-    // remains the fallback (refund happens there, not here).
+    // Best-effort run close: called on EVERY exit with an active run.
+    // Accepted finishes send status 'completed' + terminationReason
+    // 'agent_finish' — the API flips the row to 'completed' there (the
+    // /step route only heartbeats; it never completes the row, because
+    // the local finish gate may reject an API-proposed finish and keep
+    // stepping). Every other exit sends an abnormal terminationReason
+    // so the row expires immediately instead of waiting up to 30
+    // minutes for the janitor. The janitor remains the fallback
+    // (refund happens there, not here).
     const closeRun = async (result: AgentScanResult): Promise<AgentScanResult> => {
-        if (activeRunId && result.terminationReason !== 'agent_finish') {
+        if (activeRunId) {
             try {
                 await client.postJson(
                     '/agent/scan/close',

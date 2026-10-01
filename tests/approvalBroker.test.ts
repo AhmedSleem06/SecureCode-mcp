@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from 'vitest';
 import * as http from 'http';
 import { ApprovalBroker } from '../src/approval/broker';
 import { hashOperation, createApprovalRequest, isExpired } from '../src/approval/types';
@@ -246,7 +246,8 @@ describe('ApprovalBroker lifecycle', () => {
             );
             const result = await approvalPromise;
             expect(result.approved).toBe(false);
-            expect(result.reason).toBe('Request timed out');
+            expect(result.reason).toContain('Request timed out');
+            expect(result.reason).toContain('approval page was at');
         } finally {
             await broker.stop();
         }
@@ -350,5 +351,59 @@ describe('Audit log', () => {
         const last = after[after.length - 1];
         expect(last.tool).toBe('securecode.fix');
         expect(last.approved).toBe(true);
+    });
+});
+
+describe('ApprovalBroker timeout + onUrl (fake timers)', () => {
+    let broker: ApprovalBroker;
+    let port: number;
+
+    beforeEach(async () => {
+        broker = new ApprovalBroker();
+        port = await broker.start();
+        vi.useFakeTimers();
+    });
+
+    afterEach(async () => {
+        vi.useRealTimers();
+        await broker.stop();
+    });
+
+    it('default timeout is 120s: not settled at 124.9s, settled with the approval URL in the reason at 125s', async () => {
+        let settled: any = null;
+        const pending = broker.requestApproval('securecode.fix', 'default timeout probe', ['code'])
+            .then((r) => { settled = r; return r; });
+        expect(settled).toBeNull();
+
+        // 120s + 5000ms buffer minus 1ms — still pending.
+        await vi.advanceTimersByTimeAsync(120_000 + 4_999);
+        expect(settled).toBeNull();
+
+        await vi.advanceTimersByTimeAsync(1);
+        const result = await pending;
+        expect(result.approved).toBe(false);
+        expect(result.reason).toContain('Request timed out after 120s');
+        expect(result.reason).toContain(`The approval page was at http://127.0.0.1:${port}/?id=${result.requestId}`);
+        expect(result.reason).toContain('progress notifications');
+    });
+
+    it('invokes opts.onUrl with the loopback approval URL', () => {
+        const onUrl = vi.fn();
+        broker.requestApproval('securecode.fix', 'onUrl probe', ['code'], 30_000, 'paid-generation', null, { onUrl });
+
+        expect(onUrl).toHaveBeenCalledTimes(1);
+        const url = onUrl.mock.calls[0][0] as string;
+        expect(url).toMatch(new RegExp(`^http://127\\.0\\.0\\.1:${port}/\\?id=[0-9a-f-]{36}$`));
+    });
+
+    it('timeout reason tells the user where the approval page was (explicit timeout)', async () => {
+        const pending = broker.requestApproval('securecode.fix', 'short timeout probe', ['code'], 30_000);
+
+        await vi.advanceTimersByTimeAsync(35_000);
+        const result = await pending;
+        expect(result.approved).toBe(false);
+        expect(result.reason).toContain('approval page was at');
+        expect(result.reason).toContain(`http://127.0.0.1:${port}/`);
+        expect(result.reason).toContain('Request timed out after 30s');
     });
 });
