@@ -55,6 +55,7 @@ const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<u
             action: 'architecture',
             depth: args?.depth,
             _noCache: args?.refresh === true,
+            _progress: args?._progress,
         }),
     'securecode.fix': toolFix,
     ...(ATTACK_ENABLED ? { 'securecode.attack': toolAttack } : {}),

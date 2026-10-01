@@ -7,6 +7,8 @@ import { startServer } from './mcp/server';
 import type { ServerContext } from './mcp/types';
 import { ApiClient } from './api/client';
 
+const VERSION = require('../package.json').version as string;
+
 function printUsage(): void {
     console.log(`SecureCode MCP — standalone security scanner for AI coding tools
 
@@ -17,7 +19,8 @@ Usage:
   securecode-mcp logout                        Remove stored credentials
   securecode-mcp scan <filePath> [--json]      Scan a single file for vulnerabilities
   securecode-mcp doctor                        Verify setup (credentials, API, scan)
-  securecode-mcp --help                        Show this help
+  securecode-mcp version                       Show the installed version
+  securecode-mcp --help                        Show this help (see also: --version)
 
 Scan options:
   --json                    Output results as JSON (for CI/automation)
@@ -161,6 +164,7 @@ async function cmdLogin(args: string[]): Promise<void> {
 }
 
 function cmdStatus(): void {
+    console.log(`securecode-mcp v${VERSION}`);
     const creds = CredentialStore.get();
     if (!creds) {
         console.log('Not authenticated. Run: securecode-mcp login');
@@ -387,6 +391,11 @@ async function cmdDoctor(): Promise<void> {
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
     const command = args[0];
+
+    if (command === '--version' || command === '-v' || command === 'version') {
+        console.log(VERSION);
+        process.exit(0);
+    }
 
     if (!command || command === '--help' || command === '-h') {
         printUsage();
