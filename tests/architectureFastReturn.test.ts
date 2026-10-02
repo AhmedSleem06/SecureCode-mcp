@@ -1,10 +1,14 @@
 /**
- * securecode.architecture — fast-return behavior (v0.10.4).
+ * securecode.architecture — fast-return behavior (v0.10.4, extended v0.10.5).
  *
  * The scout runs 2-5 minutes, but MCP clients time out at ~60s. The tool
  * now returns INSTANTLY ({status:'started'} / {status:'in-progress'}) and
  * runs the scout in a detached background task that writes its result to
  * the architecture cache. Clients poll by retrying the same call.
+ *
+ * v0.10.5: the foreground buildProjectMap (30-90s+ on cold map caches)
+ * also moved into the background task — a cold map no longer blocks the
+ * fast return. Internal callers keep the synchronous build via `_wait`.
  *
  * Internal callers (agent-scan-batch) pass `_wait: true` to keep the old
  * blocking behavior, including spawn_failed errors thrown with .apiCode
@@ -39,7 +43,7 @@ vi.mock('../src/project-map/cache', () => ({
 import { toolMap, __scoutTrackerForTests, __clearScoutTrackerForTests } from '../src/tools/map';
 import { ApiClient } from '../src/api/client';
 import { buildProjectMap } from '../src/project-map/mapBuilder';
-import { readCache } from '../src/project-map/cache';
+import { readCache, writeCache } from '../src/project-map/cache';
 import {
     getCachedArchitectureContext,
     readArchitectureCache,
@@ -356,5 +360,115 @@ describe('securecode.architecture — fast-return', () => {
         const entry = __scoutTrackerForTests().get(`${workspaceRoot}:standard`);
         expect(entry).toBeDefined();
         expect(entry!.state).toBe('running');
+    });
+
+    it('cold map cache: returns {status:"started"} instantly — the map build never blocks the call', async () => {
+        // Cold project-map cache: readCache returns null and buildProjectMap
+        // is a deferred promise we control. If runArchitectureAction awaited
+        // the build (v0.10.4 behavior), this call would hang until the test
+        // timed out — resolving before the deferred proves it did not.
+        (readCache as any).mockReturnValue(null);
+        const builtMap = makeProjectMap();
+        let resolveBuild!: (v: any) => void;
+        (buildProjectMap as any).mockImplementation(
+            () => new Promise<any>((res) => { resolveBuild = res; }),
+        );
+        mockScoutSuccess();
+
+        const result: any = await toolMap(ctx, { action: 'architecture', depth: 'standard' });
+
+        expect(result.status).toBe('started');
+        expect(result.depth).toBe('standard');
+        expect(result.hint).toContain('builds the project map');
+        expect(result.architecture).toBeUndefined();
+
+        // The background task started the build synchronously (before its
+        // first await) and is parked on our deferred.
+        expect(buildProjectMap).toHaveBeenCalledTimes(1);
+
+        const entry = __scoutTrackerForTests().get(`${workspaceRoot}:standard`);
+        expect(entry).toBeDefined();
+        expect(entry!.state).toBe('running');
+
+        // Resolve the deferred — the background task now writes the map
+        // cache, builds the inventory, runs the scout, and writes the arch
+        // cache.
+        resolveBuild({ map: builtMap, filesProcessed: 2, filesSkipped: 0, errors: [], durationMs: 5 });
+        // The next call needs readCache to serve the freshly built map for
+        // the arch-cache staleness check.
+        (readCache as any).mockReturnValue(builtMap);
+
+        await vi.waitFor(() => {
+            expect(writeCache).toHaveBeenCalledWith(workspaceRoot, builtMap);
+            expect(getCachedArchitectureContext(workspaceRoot, 'standard', MAP_BUILT_AT, MAP_VERSION)).not.toBeNull();
+        });
+
+        // Tracker clears on success so the next call serves the cache.
+        expect(__scoutTrackerForTests().has(`${workspaceRoot}:standard`)).toBe(false);
+
+        const second: any = await toolMap(ctx, { action: 'architecture', depth: 'standard' });
+        expect(second.cached).toBe(true);
+        expect(second.architecture).toBeDefined();
+        expect(second.architecture.project.type).toBe('Express API');
+        expect(second.depth).toBe('standard');
+    });
+
+    it('cold map cache + _wait:true: batch path builds the map synchronously and returns the full result', async () => {
+        (readCache as any).mockReturnValue(null);
+        const builtMap = makeProjectMap();
+        (buildProjectMap as any).mockResolvedValue({
+            map: builtMap, filesProcessed: 2, filesSkipped: 0, errors: [], durationMs: 3,
+        });
+        mockScoutSuccess();
+
+        const result: any = await toolMap(ctx, { action: 'architecture', depth: 'standard', _wait: true });
+
+        expect(result.status).toBe('completed');
+        expect(result.cached).toBe(false);
+        expect(result.architecture).toBeDefined();
+        expect(result.architecture.project.type).toBe('Express API');
+        expect(result.stepsUsed).toBe(1);
+
+        // The synchronous path built + cached the map before the scout.
+        expect(buildProjectMap).toHaveBeenCalledTimes(1);
+        expect(writeCache).toHaveBeenCalledWith(workspaceRoot, builtMap);
+        expect(getCachedArchitectureContext(workspaceRoot, 'standard', MAP_BUILT_AT, MAP_VERSION)).not.toBeNull();
+    });
+
+    it('cold map cache + noCache: still clears the architecture cache, then starts a background scout', async () => {
+        (readCache as any).mockReturnValue(null);
+        // Seed a cached context that a hot-map call would serve — proving
+        // noCache clears it even without a map.
+        const seeded: any = {
+            ...makeArchPayload(),
+            version: 1,
+            depth: 'standard',
+            derivedAt: Date.now(),
+            projectMapBuiltAt: MAP_BUILT_AT,
+            projectMapVersion: MAP_VERSION,
+        };
+        writeCachedArchitectureContext(workspaceRoot, seeded);
+        expect(readArchitectureCache(workspaceRoot)).not.toBeNull();
+
+        // Park the background task on the map build.
+        let resolveBuild!: (v: any) => void;
+        (buildProjectMap as any).mockImplementation(
+            () => new Promise<any>((res) => { resolveBuild = res; }),
+        );
+        mockScoutHangs();
+
+        const result: any = await toolMap(ctx, { action: 'architecture', depth: 'standard', _noCache: true });
+
+        expect(result.status).toBe('started');
+        expect(result.hint).toContain('builds the project map');
+        expect(readArchitectureCache(workspaceRoot)).toBeNull(); // cleared, no map needed
+
+        const entry = __scoutTrackerForTests().get(`${workspaceRoot}:standard`);
+        expect(entry).toBeDefined();
+        expect(entry!.state).toBe('running');
+
+        // Let the parked build settle so teardown doesn't race it.
+        resolveBuild({ map: makeProjectMap(), filesProcessed: 0, filesSkipped: 0, errors: [], durationMs: 0 });
+        await new Promise((r) => setTimeout(r, 0));
     });
 });

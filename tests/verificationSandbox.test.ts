@@ -1,5 +1,17 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { parseVerdictCommandMode, pickImageForCommand, pickImageForRunner, runnerInvocation } from '../src/utils/verificationSandbox';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import {
+    parseVerdictCommandMode,
+    pickImageForCommand,
+    pickImageForRunner,
+    runnerInvocation,
+    fileExtFor,
+    __UnsafeHostSandboxForTests,
+} from '../src/utils/verificationSandbox';
+
+process.env.SECURECODE_TEST_MODE = '1';
 
 describe('parseVerdictCommandMode', () => {
     it('returns pass for exit code 0', () => {
@@ -70,11 +82,17 @@ describe('pickImageForCommand', () => {
         expect(result.reason).toContain('yarn');
     });
 
-    it('returns null for bun without env var', () => {
+    it('returns oven/bun:1 for bun without env var (works out of the box)', () => {
         delete process.env.SECURECODE_SANDBOX_BUN_IMAGE;
         const result = pickImageForCommand('bun');
-        expect(result.image).toBeNull();
-        expect(result.reason).toContain('bun');
+        expect(result.image).toBe('oven/bun:1');
+        expect(result.reason).toBeUndefined();
+    });
+
+    it('returns custom image for bun with env var', () => {
+        process.env.SECURECODE_SANDBOX_BUN_IMAGE = 'custom/bun:2';
+        const result = pickImageForCommand('bun');
+        expect(result.image).toBe('custom/bun:2');
     });
 
     it('returns null for unknown executable', () => {
@@ -87,6 +105,38 @@ describe('pickImageForCommand', () => {
         delete process.env.SECURECODE_SANDBOX_IMAGE;
         const result = pickImageForCommand('npx');
         expect(result.image).toBe('node:20-alpine');
+    });
+});
+
+// ── bun default image via vi.stubEnv (command + runner mode) ─────────────────
+
+describe('bun sandbox image — env stubbing', () => {
+    afterEach(() => {
+        vi.unstubAllEnvs();
+    });
+
+    it('pickImageForCommand defaults to oven/bun:1 with env unset', () => {
+        vi.stubEnv('SECURECODE_SANDBOX_BUN_IMAGE', '');
+        const result = pickImageForCommand('bun');
+        expect(result.image).toBe('oven/bun:1');
+    });
+
+    it('pickImageForCommand honors SECURECODE_SANDBOX_BUN_IMAGE override', () => {
+        vi.stubEnv('SECURECODE_SANDBOX_BUN_IMAGE', 'custom/bun');
+        const result = pickImageForCommand('bun');
+        expect(result.image).toBe('custom/bun');
+    });
+
+    it('pickImageForRunner defaults to oven/bun:1 with env unset', () => {
+        vi.stubEnv('SECURECODE_SANDBOX_BUN_IMAGE', '');
+        const result = pickImageForRunner('bun');
+        expect(result.image).toBe('oven/bun:1');
+    });
+
+    it('pickImageForRunner honors SECURECODE_SANDBOX_BUN_IMAGE override', () => {
+        vi.stubEnv('SECURECODE_SANDBOX_BUN_IMAGE', 'custom/bun');
+        const result = pickImageForRunner('bun');
+        expect(result.image).toBe('custom/bun');
     });
 });
 
@@ -136,11 +186,11 @@ describe('pickImageForRunner', () => {
         expect(pickImageForRunner('deno').image).toBe('denoland/deno:latest');
     });
 
-    it('returns null for bun without env var', () => {
+    it('returns oven/bun:1 for bun runner without env var (works out of the box)', () => {
         delete process.env.SECURECODE_SANDBOX_BUN_IMAGE;
         const r = pickImageForRunner('bun');
-        expect(r.image).toBeNull();
-        expect(r.reason).toContain('bun');
+        expect(r.image).toBe('oven/bun:1');
+        expect(r.reason).toBeUndefined();
     });
 
     it('returns image for bun with env var', () => {
@@ -203,5 +253,81 @@ describe('runnerInvocation', () => {
     it('falls back to node for unknown runner', () => {
         expect(runnerInvocation('ruby', '/workspace/.securecode/test.rb'))
             .toBe('node "/workspace/.securecode/test.rb"');
+    });
+});
+
+// ── fileExtFor (runner → generated-script extension) ────────────────────────
+
+describe('fileExtFor', () => {
+    it('node → .mjs (plain node runs ESM natively, never .ts)', () => {
+        expect(fileExtFor('node')).toBe('.mjs');
+    });
+
+    it('TS-capable runners → .ts', () => {
+        expect(fileExtFor('tsx')).toBe('.ts');
+        expect(fileExtFor('pnpm-tsx')).toBe('.ts');
+        expect(fileExtFor('yarn-tsx')).toBe('.ts');
+        expect(fileExtFor('bun')).toBe('.ts');
+        expect(fileExtFor('deno')).toBe('.ts');
+    });
+
+    it('python runners → .py', () => {
+        expect(fileExtFor('python')).toBe('.py');
+        expect(fileExtFor('python3')).toBe('.py');
+    });
+
+    it('unknown runner → .js fallback', () => {
+        expect(fileExtFor('ruby')).toBe('.js');
+    });
+
+    it('never emits a .test. infix (standalone scripts must not be discovered by workspace test runners)', () => {
+        for (const runner of ['node', 'tsx', 'pnpm-tsx', 'yarn-tsx', 'bun', 'deno', 'python', 'python3', 'ruby']) {
+            expect(fileExtFor(runner)).not.toContain('.test.');
+        }
+    });
+});
+
+// ── node-runner script regression (production v0.10.5 failure) ──────────────
+//
+// Generated node-runner scripts were saved as .ts — plain `node` cannot
+// execute TypeScript, so every node-runner script failed. The script must
+// now be saved as .mjs and execute to a passing verdict end to end.
+
+describe('__UnsafeHostSandboxForTests — node runner generated-script regression', () => {
+    it('executes a node-runner script printing PASS: to a passing verdict', async () => {
+        const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-node-runner-'));
+        const backend = new __UnsafeHostSandboxForTests();
+        try {
+            const result = await backend.execute({
+                mode: 'script',
+                script: 'console.log("PASS: regression-check-ran-on-" + process.version);',
+                runner: 'node',
+                workspaceRoot: ws,
+                timeoutMs: 30_000,
+            });
+            expect(result.verdict).toBe('pass');
+            expect(result.output).toContain('PASS: regression-check-ran-on-');
+        } finally {
+            try { fs.rmSync(ws, { recursive: true, force: true }); } catch { /* best effort */ }
+        }
+    });
+
+    it('cleans up the generated script file after execution', async () => {
+        const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-node-runner-'));
+        const backend = new __UnsafeHostSandboxForTests();
+        try {
+            await backend.execute({
+                mode: 'script',
+                script: 'console.log("PASS: cleanup-check");',
+                runner: 'node',
+                workspaceRoot: ws,
+                timeoutMs: 30_000,
+            });
+            const leftovers = fs.readdirSync(path.join(ws, '.securecode'))
+                .filter(f => f.startsWith('verify-'));
+            expect(leftovers).toHaveLength(0);
+        } finally {
+            try { fs.rmSync(ws, { recursive: true, force: true }); } catch { /* best effort */ }
+        }
     });
 });

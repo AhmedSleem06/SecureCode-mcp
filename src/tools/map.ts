@@ -201,6 +201,8 @@ export async function toolMap(ctx: ServerContext, args: any): Promise<unknown> {
 // the scout kept running in-process and cached its result. The tool now
 // returns instantly and drives the scout in a detached background task;
 // the client polls by retrying the same call until the cache serves it.
+// The project-map build (30-90s+ on large workspaces) also lives in the
+// background task — the foreground path only ever reads the map cache.
 
 interface ScoutTrackerEntry {
     state: 'running' | 'blocked';
@@ -223,6 +225,12 @@ function scoutKey(root: string, depth: string): string {
  * it finishes. Deliberately does NOT inherit the caller's AbortSignal —
  * the scout must complete (and cache) even if the client hangs up.
  *
+ * `map` may be null on a cold project-map cache: the background task then
+ * builds the map first (tree-sitter over the workspace, 30-90s+) before
+ * constructing the inventory and running the scout, so the tool call never
+ * blocks on the build. The synchronous section before the first await stays
+ * trivial for that path — no inventory construction before the map exists.
+ *
  * Tracker lifecycle: the entry is deleted on any non-spawn_failed outcome
  * (so the next call serves the cache) and flips to 'blocked' with a note
  * when the run pool refuses the start, so the next fast-return can tell
@@ -231,22 +239,29 @@ function scoutKey(root: string, depth: string): string {
 function startBackgroundScout(
     ctx: ServerContext,
     depth: ArchitectureDepth,
-    map: ProjectMap,
+    map: ProjectMap | null,
     progressFn: ((progress: number, total: number, message: string) => void) | undefined,
 ): void {
     const key = scoutKey(ctx.workspaceRoot, depth);
     activeScouts.set(key, { state: 'running', startedAt: Date.now() });
     void (async () => {
         try {
-            const inventory = buildArchitectureInventory(ctx.workspaceRoot, map);
+            let builtMap = map;
+            if (!builtMap) {
+                // Cold cache: build the map first, then continue.
+                const built = await buildProjectMap({ workspaceRoot: ctx.workspaceRoot });
+                writeCache(ctx.workspaceRoot, built.map);
+                builtMap = built.map;
+            }
+            const inventory = buildArchitectureInventory(ctx.workspaceRoot, builtMap);
             const defaults = scoutDefaultsForDepth(depth);
             const result = await runArchitectureScout(ctx, {
                 depth,
                 inventory,
                 maxImportantFiles: defaults.maxImportantFiles,
             }, {
-                projectMapBuiltAt: map.builtAt,
-                projectMapVersion: map.version,
+                projectMapBuiltAt: builtMap.builtAt,
+                projectMapVersion: builtMap.version,
                 onProgress: (steps, max, msg) => {
                     if (progressFn) progressFn(steps, max, msg);
                 },
@@ -286,17 +301,22 @@ export function __clearScoutTrackerForTests(): void {
  * subagent to survey the project and produce an ArchitectureContext.
  *
  * Flow (fast-return, default):
- *   1. Ensure the project map exists (build if not).
+ *   1. Read the project map from cache — do NOT build it here. The build
+ *      (tree-sitter over the workspace, 30-90s+) used to run in the
+ *      foreground and blew past short MCP client timeouts (~30s) on cold
+ *      caches; it now happens inside the background task.
  *   2. Check the architecture cache — return if valid and not stale.
  *   3. If a fresh tracker entry says a scout is running (or the run pool
  *      is blocked) → return 'in-progress'; the client retries shortly.
- *   4. Otherwise start a detached background scout → return 'started'.
- *      The background scout writes the result to the cache, which step 2
- *      serves on the next poll.
+ *   4. Otherwise start a detached background scout → return 'started'
+ *      instantly. With a cold map the background task builds the map
+ *      first, then runs the scout; the result lands in the cache, which
+ *      step 2 serves on the next poll.
  *
  * Internal synchronous callers (agent-scan-batch) pass `_wait: true` and
  * keep the old blocking behavior — they already run long and handle
- * their own preflight errors.
+ * their own preflight errors, and they still build the map synchronously
+ * on a cold cache.
  */
 async function runArchitectureAction(
     ctx: ServerContext,
@@ -307,34 +327,45 @@ async function runArchitectureAction(
     const noCache = !!args._noCache;
     const signal = (args as any)._signal as AbortSignal | undefined;
 
-    // 1. Ensure the project map exists.
-    let map = readCache(ctx.workspaceRoot);
-    if (!map) {
-        if (progressFn) progressFn(0, 1, 'Building project map...');
-        const result = await buildProjectMap({ workspaceRoot: ctx.workspaceRoot });
-        writeCache(ctx.workspaceRoot, result.map);
-        map = result.map;
-    }
+    // 1. Read the project map from cache — the build moved into the
+    // background path so a cold map never blocks the fast return.
+    const map = readCache(ctx.workspaceRoot);
 
-    // 2. Check the architecture cache.
-    if (!noCache) {
-        const cached = getCachedArchitectureContext(
-            ctx.workspaceRoot, depth, map.builtAt, map.version,
-        );
-        if (cached) {
-            if (progressFn) progressFn(1, 1, 'Cached architecture context — project map unchanged since last derivation.');
-            return { architecture: cached, cached: true, depth };
+    // 2. Check the architecture cache (requires a hot map — on a cold
+    //    cache any previously derived context is stale by definition).
+    if (map) {
+        if (!noCache) {
+            const cached = getCachedArchitectureContext(
+                ctx.workspaceRoot, depth, map.builtAt, map.version,
+            );
+            if (cached) {
+                if (progressFn) progressFn(1, 1, 'Cached architecture context — project map unchanged since last derivation.');
+                return { architecture: cached, cached: true, depth };
+            }
+        } else {
+            clearArchitectureCache(ctx.workspaceRoot);
         }
-    } else {
+    } else if (noCache) {
+        // noCache clears the architecture cache independent of the map.
         clearArchitectureCache(ctx.workspaceRoot);
     }
 
     if (args._wait === true) {
-        // 3. Build the deterministic inventory.
-        const inventory = buildArchitectureInventory(ctx.workspaceRoot, map);
+        // 3. Internal synchronous callers: build the map in the foreground
+        //    when the cache is cold, then run the scout blocking.
+        let waitMap = map;
+        if (!waitMap) {
+            if (progressFn) progressFn(0, 1, 'Building project map...');
+            const built = await buildProjectMap({ workspaceRoot: ctx.workspaceRoot });
+            writeCache(ctx.workspaceRoot, built.map);
+            waitMap = built.map;
+        }
+
+        // 4. Build the deterministic inventory.
+        const inventory = buildArchitectureInventory(ctx.workspaceRoot, waitMap);
         const defaults = scoutDefaultsForDepth(depth);
 
-        // 4. Run the scout loop (blocking — internal caller).
+        // 5. Run the scout loop (blocking — internal caller).
         if (progressFn) progressFn(0, defaults.maxSteps, `Architecture scout (${depth}) starting...`);
         const result = await runArchitectureScout(ctx, {
             depth,
@@ -342,8 +373,8 @@ async function runArchitectureAction(
             maxImportantFiles: defaults.maxImportantFiles,
         }, {
             signal,
-            projectMapBuiltAt: map.builtAt,
-            projectMapVersion: map.version,
+            projectMapBuiltAt: waitMap.builtAt,
+            projectMapVersion: waitMap.version,
             onProgress: (steps, max, msg) => {
                 if (progressFn) progressFn(steps, max, msg);
             },
@@ -356,7 +387,7 @@ async function runArchitectureAction(
             throw e;
         }
 
-        // 5. Cache + return.
+        // 6. Cache + return.
         if (result.architecture) {
             writeCachedArchitectureContext(ctx.workspaceRoot, result.architecture);
         }
@@ -395,12 +426,21 @@ async function runArchitectureAction(
     }
 
     // No fresh entry → cold cache, a noCache refresh, or a stale tracker
-    // entry: (re)start a background scout and return instantly.
+    // entry: (re)start a background scout and return instantly. A cold
+    // project map is built inside the background task before the scout.
     startBackgroundScout(ctx, depth, map, progressFn);
+    if (map) {
+        return {
+            status: 'started',
+            depth,
+            etaMinutes: depth === 'quick' ? 1 : depth === 'deep' ? 5 : 3,
+            hint: 'The scout is running in the background. Retry this same call in a few minutes to retrieve the cached result.',
+        };
+    }
     return {
         status: 'started',
         depth,
         etaMinutes: depth === 'quick' ? 1 : depth === 'deep' ? 5 : 3,
-        hint: 'The scout is running in the background. Retry this same call in a few minutes to retrieve the cached result.',
+        hint: 'The scout is running in the background (first run also builds the project map). Retry this same call in a few minutes to retrieve the cached result.',
     };
 }

@@ -75,7 +75,7 @@ describe('sandbox integration (Suite 3) — requires Docker', () => {
             const ws = makeWorkspace();
             try {
                 const script = `
-                    const http = require('http');
+                    import http from 'http';
                     const req = http.get('http://1.2.3.4:80/', (res) => {
                         console.log("FAIL: network reachable, status=" + res.statusCode);
                     });
@@ -99,7 +99,7 @@ describe('sandbox integration (Suite 3) — requires Docker', () => {
             const ws = makeWorkspace();
             try {
                 const script = `
-                    const fs = require('fs');
+                    import fs from 'fs';
                     try {
                         fs.writeFileSync('/workspace/escape.txt', 'gotcha');
                         console.log("FAIL: wrote to /workspace");
@@ -147,12 +147,12 @@ describe('sandbox integration (Suite 3) — requires Docker', () => {
             const ws = makeWorkspace();
             try {
                 const setup = `
-                    const fs = require('fs');
+                    import fs from 'fs';
                     fs.writeFileSync('/tmp/setup-marker.txt', 'setup-ran');
                     console.log('setup done');
                 `;
                 const test = `
-                    const fs = require('fs');
+                    import fs from 'fs';
                     try {
                         const marker = fs.readFileSync('/tmp/setup-marker.txt', 'utf8');
                         if (marker === 'setup-ran') {

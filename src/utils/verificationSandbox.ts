@@ -119,10 +119,9 @@ export function pickImageForCommand(executable: string): { image: string | null;
             : { image: null, reason: 'yarn is not available in the default sandbox image. Set SECURECODE_SANDBOX_YARN_IMAGE to a yarn-enabled image to enable yarn test execution.' };
     }
     if (executable === 'bun') {
-        const img = process.env.SECURECODE_SANDBOX_BUN_IMAGE;
-        return img
-            ? { image: img }
-            : { image: null, reason: 'bun is not available in the default sandbox image. Set SECURECODE_SANDBOX_BUN_IMAGE to a bun-enabled image to enable bun test execution.' };
+        // bun works out of the box on the default oven/bun:1 image;
+        // SECURECODE_SANDBOX_BUN_IMAGE is only an override for custom setups.
+        return { image: process.env.SECURECODE_SANDBOX_BUN_IMAGE || 'oven/bun:1' };
     }
     if (executable === 'pytest') {
         return { image: process.env.SECURECODE_SANDBOX_PY_IMAGE || 'python:3.11-slim' };
@@ -184,13 +183,28 @@ function probe(bin: string, args: string[] = ['--version']): boolean {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function fileExtFor(runner: string): string {
+/**
+ * Pick the file extension for a generated script-mode runner.
+ *
+ *   - node → '.mjs': plain `node` runs ESM .mjs natively and cannot execute
+ *     TypeScript — a .ts file is a guaranteed failure for every node-runner
+ *     script.
+ *   - tsx / pnpm-tsx / yarn-tsx / bun / deno → '.ts': TS-capable runners
+ *     (bun and deno execute TS natively; the tsx variants strip types).
+ *   - python / python3 → '.py'.
+ *   - anything else → '.js'.
+ *
+ * No '.test.' infix: these are standalone verification scripts, not
+ * test-suite files, and the infix risks accidental discovery by workspace
+ * test runners.
+ */
+export function fileExtFor(runner: string): string {
     if (runner === 'python' || runner === 'python3') return '.py';
-    if (runner === 'deno') return '.ts';
-    if (runner === 'tsx' || runner === 'bun' || runner === 'node' || runner === 'pnpm-tsx' || runner === 'yarn-tsx') {
-        return '.test.ts';
+    if (runner === 'node') return '.mjs';
+    if (runner === 'tsx' || runner === 'pnpm-tsx' || runner === 'yarn-tsx' || runner === 'bun' || runner === 'deno') {
+        return '.ts';
     }
-    return '.test.js';
+    return '.js';
 }
 
 function isPythonRunner(runner: string): boolean {
@@ -220,12 +234,11 @@ export function pickImageForRunner(runner: string): { image: string | null; reas
                 ? { image: img }
                 : { image: null, reason: 'deno runner requires a Deno image. Set SECURECODE_SANDBOX_DENO_IMAGE (e.g. denoland/deno) to enable deno script execution.' };
         }
-        case 'bun': {
-            const img = process.env.SECURECODE_SANDBOX_BUN_IMAGE;
-            return img
-                ? { image: img }
-                : { image: null, reason: 'bun runner requires a Bun image. Set SECURECODE_SANDBOX_BUN_IMAGE (e.g. oven/bun) to enable bun script execution.' };
-        }
+        case 'bun':
+            // bun executes TypeScript natively and works out of the box on the
+            // default oven/bun:1 image; SECURECODE_SANDBOX_BUN_IMAGE is only
+            // an override for custom setups.
+            return { image: process.env.SECURECODE_SANDBOX_BUN_IMAGE || 'oven/bun:1' };
         default:
             return { image: null, reason: `No sandbox image configured for runner: ${runner}` };
     }
