@@ -150,7 +150,7 @@ describe('runArchitectureAction (toolMap action=architecture) — error code pro
 
         let thrown: any;
         try {
-            await toolMap(ctx, { action: 'architecture', depth: 'standard' });
+            await toolMap(ctx, { action: 'architecture', depth: 'standard', _wait: true });
         } catch (e) {
             thrown = e;
         }
@@ -170,7 +170,7 @@ describe('runArchitectureAction (toolMap action=architecture) — error code pro
 
         let thrown: any;
         try {
-            await toolMap(ctx, { action: 'architecture', depth: 'standard' });
+            await toolMap(ctx, { action: 'architecture', depth: 'standard', _wait: true });
         } catch (e) {
             thrown = e;
         }
@@ -186,7 +186,7 @@ describe('runArchitectureAction (toolMap action=architecture) — error code pro
 
         let thrown: any;
         try {
-            await toolMap(ctx, { action: 'architecture', depth: 'standard' });
+            await toolMap(ctx, { action: 'architecture', depth: 'standard', _wait: true });
         } catch (e) {
             thrown = e;
         }

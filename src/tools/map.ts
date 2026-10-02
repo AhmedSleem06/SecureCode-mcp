@@ -194,17 +194,109 @@ export async function toolMap(ctx: ServerContext, args: any): Promise<unknown> {
     };
 }
 
+// ── Background scout tracker (fast-return) ───────────────────────────────────
+//
+// `securecode.architecture` used to block its MCP tools/call for the full
+// 2-5 minute scout run, so clients (opencode etc.) timed out at ~60s while
+// the scout kept running in-process and cached its result. The tool now
+// returns instantly and drives the scout in a detached background task;
+// the client polls by retrying the same call until the cache serves it.
+
+interface ScoutTrackerEntry {
+    state: 'running' | 'blocked';
+    startedAt: number;
+    lastNote?: string;
+}
+
+const activeScouts = new Map<string, ScoutTrackerEntry>();
+
+// Stuck 'running' entries older than this are restartable.
+const SCOUT_TRACKER_STALE_MS = 10 * 60 * 1000;
+
+function scoutKey(root: string, depth: string): string {
+    return `${root}:${depth}`;
+}
+
+/**
+ * Start the architecture scout detached from the MCP request. Returns
+ * immediately; the scout writes its result to the architecture cache when
+ * it finishes. Deliberately does NOT inherit the caller's AbortSignal —
+ * the scout must complete (and cache) even if the client hangs up.
+ *
+ * Tracker lifecycle: the entry is deleted on any non-spawn_failed outcome
+ * (so the next call serves the cache) and flips to 'blocked' with a note
+ * when the run pool refuses the start, so the next fast-return can tell
+ * the client what happened instead of blindly restarting.
+ */
+function startBackgroundScout(
+    ctx: ServerContext,
+    depth: ArchitectureDepth,
+    map: ProjectMap,
+    progressFn: ((progress: number, total: number, message: string) => void) | undefined,
+): void {
+    const key = scoutKey(ctx.workspaceRoot, depth);
+    activeScouts.set(key, { state: 'running', startedAt: Date.now() });
+    void (async () => {
+        try {
+            const inventory = buildArchitectureInventory(ctx.workspaceRoot, map);
+            const defaults = scoutDefaultsForDepth(depth);
+            const result = await runArchitectureScout(ctx, {
+                depth,
+                inventory,
+                maxImportantFiles: defaults.maxImportantFiles,
+            }, {
+                projectMapBuiltAt: map.builtAt,
+                projectMapVersion: map.version,
+                onProgress: (steps, max, msg) => {
+                    if (progressFn) progressFn(steps, max, msg);
+                },
+            });
+            if (result.architecture) {
+                writeCachedArchitectureContext(ctx.workspaceRoot, result.architecture);
+            }
+            if (result.status === 'spawn_failed') {
+                const apiCode = result.apiCode || '';
+                activeScouts.set(key, { state: 'blocked', startedAt: Date.now(), lastNote: `${apiCode}: ${result.error || 'spawn failed'}` });
+                console.warn(`[Architecture] background scout failed (${depth}): ${result.error}`);
+            } else {
+                // 'running' entries clear on success; blocked entries persist
+                // for visibility (the stale guard makes them restartable).
+                activeScouts.delete(key);
+            }
+        } catch (err: any) {
+            const apiCode = err?.apiCode || err?.code || '';
+            activeScouts.set(key, { state: 'blocked', startedAt: Date.now(), lastNote: `${apiCode}: ${err?.message || String(err)}` });
+            console.warn(`[Architecture] background scout threw (${depth}): ${err?.message || err}`);
+        }
+    })();
+}
+
+/** Test-only accessor for the in-process scout tracker. */
+export function __scoutTrackerForTests(): Map<string, ScoutTrackerEntry> {
+    return activeScouts;
+}
+
+/** Test-only reset for tracker isolation between tests. */
+export function __clearScoutTrackerForTests(): void {
+    activeScouts.clear();
+}
+
 /**
  * `securecode.architecture` — runs the architecture scout
  * subagent to survey the project and produce an ArchitectureContext.
  *
- * Flow:
+ * Flow (fast-return, default):
  *   1. Ensure the project map exists (build if not).
  *   2. Check the architecture cache — return if valid and not stale.
- *   3. Build the deterministic inventory from the project map.
- *   4. Run the architecture scout loop (MCP loop + API brain).
- *   5. Cache the result.
- *   6. Return the architecture context.
+ *   3. If a fresh tracker entry says a scout is running (or the run pool
+ *      is blocked) → return 'in-progress'; the client retries shortly.
+ *   4. Otherwise start a detached background scout → return 'started'.
+ *      The background scout writes the result to the cache, which step 2
+ *      serves on the next poll.
+ *
+ * Internal synchronous callers (agent-scan-batch) pass `_wait: true` and
+ * keep the old blocking behavior — they already run long and handle
+ * their own preflight errors.
  */
 async function runArchitectureAction(
     ctx: ServerContext,
@@ -237,44 +329,78 @@ async function runArchitectureAction(
         clearArchitectureCache(ctx.workspaceRoot);
     }
 
-    // 3. Build the deterministic inventory.
-    const inventory = buildArchitectureInventory(ctx.workspaceRoot, map);
-    const defaults = scoutDefaultsForDepth(depth);
+    if (args._wait === true) {
+        // 3. Build the deterministic inventory.
+        const inventory = buildArchitectureInventory(ctx.workspaceRoot, map);
+        const defaults = scoutDefaultsForDepth(depth);
 
-    // 4. Run the scout loop.
-    if (progressFn) progressFn(0, defaults.maxSteps, `Architecture scout (${depth}) starting...`);
-    const result = await runArchitectureScout(ctx, {
-        depth,
-        inventory,
-        maxImportantFiles: defaults.maxImportantFiles,
-    }, {
-        signal,
-        projectMapBuiltAt: map.builtAt,
-        projectMapVersion: map.version,
-        onProgress: (steps, max, msg) => {
-            if (progressFn) progressFn(steps, max, msg);
-        },
-    });
+        // 4. Run the scout loop (blocking — internal caller).
+        if (progressFn) progressFn(0, defaults.maxSteps, `Architecture scout (${depth}) starting...`);
+        const result = await runArchitectureScout(ctx, {
+            depth,
+            inventory,
+            maxImportantFiles: defaults.maxImportantFiles,
+        }, {
+            signal,
+            projectMapBuiltAt: map.builtAt,
+            projectMapVersion: map.version,
+            onProgress: (steps, max, msg) => {
+                if (progressFn) progressFn(steps, max, msg);
+            },
+        });
 
-    if (result.status === 'spawn_failed') {
-        const e: any = new Error(result.error || 'Architecture scout failed to start.');
-        e.apiCode = result.apiCode || '';
-        e.statusCode = result.apiCode === 'AGENT_SCAN_ALREADY_RUNNING' ? 409 : result.apiCode === 'AGENT_SCAN_DAILY_LIMIT' ? 429 : undefined;
-        throw e;
+        if (result.status === 'spawn_failed') {
+            const e: any = new Error(result.error || 'Architecture scout failed to start.');
+            e.apiCode = result.apiCode || '';
+            e.statusCode = result.apiCode === 'AGENT_SCAN_ALREADY_RUNNING' ? 409 : result.apiCode === 'AGENT_SCAN_DAILY_LIMIT' ? 429 : undefined;
+            throw e;
+        }
+
+        // 5. Cache + return.
+        if (result.architecture) {
+            writeCachedArchitectureContext(ctx.workspaceRoot, result.architecture);
+        }
+
+        return {
+            architecture: result.architecture,
+            status: result.status,
+            summary: result.summary,
+            stepsUsed: result.stepsUsed,
+            costSpentUsd: result.costSpentUsd,
+            depth,
+            cached: false,
+        };
     }
 
-    // 5. Cache + return.
-    if (result.architecture) {
-        writeCachedArchitectureContext(ctx.workspaceRoot, result.architecture);
+    // Fast-return path for MCP clients (default): never block tools/call.
+    const key = scoutKey(ctx.workspaceRoot, depth);
+    const entry = activeScouts.get(key);
+    const fresh = entry && (Date.now() - entry.startedAt) < SCOUT_TRACKER_STALE_MS;
+
+    if (fresh && entry!.state === 'running') {
+        return {
+            status: 'in-progress',
+            depth,
+            etaMinutes: depth === 'quick' ? 1 : depth === 'deep' ? 4 : 2,
+            hint: 'The architecture scout is running in the background. Retry this same call to retrieve the result when done.',
+        };
+    }
+    if (fresh && entry!.state === 'blocked') {
+        return {
+            status: 'in-progress',
+            depth,
+            etaMinutes: 2,
+            hint: `Another operation holds the agent run pool (${entry!.lastNote || 'already running'}). Wait ~60-120 seconds and retry this call.`,
+        };
     }
 
+    // No fresh entry → cold cache, a noCache refresh, or a stale tracker
+    // entry: (re)start a background scout and return instantly.
+    startBackgroundScout(ctx, depth, map, progressFn);
     return {
-        architecture: result.architecture,
-        status: result.status,
-        summary: result.summary,
-        stepsUsed: result.stepsUsed,
-        costSpentUsd: result.costSpentUsd,
+        status: 'started',
         depth,
-        cached: false,
+        etaMinutes: depth === 'quick' ? 1 : depth === 'deep' ? 5 : 3,
+        hint: 'The scout is running in the background. Retry this same call in a few minutes to retrieve the cached result.',
     };
 }

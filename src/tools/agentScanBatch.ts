@@ -91,6 +91,7 @@ async function toolAgentScanBatchInner(
         const archResult = await toolMap(ctx, {
             action: 'architecture',
             depth: architectureDepth,
+            _wait: true,
             _noCache: noCache,
             _signal: signal,
             _progress: progress ? (p: number, t: number, m: string) => {
