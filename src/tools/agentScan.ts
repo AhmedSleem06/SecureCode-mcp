@@ -772,7 +772,11 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                                 candidate.finding.probePending = true;
                                 continue;
                             }
-                            const probeResult = await executeProbePlan(planResp.plan, { signal: abortSignal });
+                            const probeResult = await executeProbePlan(planResp.plan, {
+                                signal: abortSignal,
+                                host: devServer.host,
+                                port: devServer.port,
+                            });
                             probedCount++;
                             candidate.finding.probeEvidence = probeResult.evidence;
                             candidate.finding.probeRule = probeResult.rule;

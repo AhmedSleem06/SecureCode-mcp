@@ -76,6 +76,22 @@ describe('executeProbePlan — policy enforcement', () => {
         expect(vi.mocked(executeHttpRequest)).not.toHaveBeenCalled();
     });
 
+    it('uses caller-provided host/port when the plan omits them (API plan shape)', async () => {
+        vi.mocked(executeHttpRequest).mockResolvedValue(makeResponse(200, 'ok'));
+        const plan: ProbePlan = { requests: [attackReq()] };
+        await executeProbePlan(plan, { host: '127.0.0.1', port: 3773 });
+        const call = vi.mocked(executeHttpRequest).mock.calls[0];
+        expect(call[0]).toEqual(expect.objectContaining({ host: '127.0.0.1', port: 3773 }));
+    });
+
+    it('returns INCONCLUSIVE when neither the plan nor the caller provides host/port', async () => {
+        const plan: ProbePlan = { requests: [attackReq()] };
+        const result = await executeProbePlan(plan);
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.reason).toContain('no target host/port');
+        expect(vi.mocked(executeHttpRequest)).not.toHaveBeenCalled();
+    });
+
     it('rejects path traversal in the probe path', async () => {
         const plan: ProbePlan = {
             host: '127.0.0.1',

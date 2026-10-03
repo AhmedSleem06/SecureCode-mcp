@@ -28,8 +28,9 @@ export interface ProbeRequest {
 }
 
 export interface ProbePlan {
-    host: string;
-    port: number;
+    /** Optional — the API's plan omits these; the MCP injects the detected dev-server address. */
+    host?: string;
+    port?: number;
     requests: ProbeRequest[];
 }
 
@@ -237,7 +238,7 @@ function buildEvidence(
 
 export async function executeProbePlan(
     plan: ProbePlan,
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; host?: string; port?: number } = {},
 ): Promise<ProbeResult> {
     const observed: ProbeRequestObservation[] = [];
 
@@ -257,6 +258,15 @@ export async function executeProbePlan(
         );
     }
 
+    // The plan comes from the API, which does not know the dev-server
+    // address — the MCP detected it. Caller-provided opts win; the plan's
+    // own host/port (legacy/test shape) are the fallback.
+    const targetHost = opts.host ?? plan.host;
+    const targetPort = opts.port ?? plan.port;
+    if (!targetHost || !targetPort) {
+        return inconclusive('Probe plan has no target host/port and none were provided by the caller.');
+    }
+
     const snapshots: ProbeSnapshot[] = [];
 
     for (const req of plan.requests) {
@@ -265,7 +275,7 @@ export async function executeProbePlan(
         }
         let safePath: string;
         try {
-            validateTarget({ host: plan.host, port: plan.port, path: req.path });
+            validateTarget({ host: targetHost, port: targetPort, path: req.path });
             safePath = encodeProbePath(req.path);
         } catch (err) {
             const message = err instanceof PolicyError ? err.message : String(err);
@@ -275,8 +285,8 @@ export async function executeProbePlan(
             {
                 method: req.method,
                 path: safePath,
-                host: plan.host,
-                port: plan.port,
+                host: targetHost,
+                port: targetPort,
                 headers: req.headers,
                 body: req.body,
             },
@@ -478,13 +488,27 @@ export function deriveEndpointFallback(
             const blockEnd = Math.min(lines.length, x.absLine + 40);
             return AUTH_MARKER_RE.test(lines.slice(blockStart, blockEnd).join('\n'));
         });
+        // Among auth-protected routes, prefer the ones whose handler block
+        // calls the vulnerable gate itself (an isXxxAuthorized-style check)
+        // over routes that merely sit behind generic auth middleware — the
+        // vulnerable-gate route is where the finding actually lives.
         const concrete = addMatches.filter(x => x.method !== '*' && !x.path.includes('*'));
+        const vulnerableGate = new RegExp(/[iI]s[A-Z]\w*Authorized/);
+        const hasVulnerableGate = (x: { absLine: number }): boolean => {
+            const blockStart = Math.max(0, x.absLine - 1);
+            const blockEnd = Math.min(lines.length, x.absLine + 40);
+            return vulnerableGate.test(lines.slice(blockStart, blockEnd).join('\n'));
+        };
         const pool = referenced.length > 0
             ? referenced
             : authProtected.length > 0
                 ? authProtected
                 : (concrete.length > 0 ? concrete : addMatches);
-        pool.sort((a, b) => Math.abs(a.absLine - finding.line) - Math.abs(b.absLine - finding.line));
+        pool.sort((a: { absLine: number }, b: { absLine: number }) => {
+            const gateDiff = (hasVulnerableGate(a) ? 0 : 1) - (hasVulnerableGate(b) ? 0 : 1);
+            if (gateDiff !== 0) return gateDiff;
+            return Math.abs(a.absLine - finding.line) - Math.abs(b.absLine - finding.line);
+        });
         const best = pool[0];
         return {
             method: best.method === '*' ? 'GET' : best.method,
