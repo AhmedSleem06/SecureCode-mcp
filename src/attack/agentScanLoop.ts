@@ -547,6 +547,28 @@ export async function runAgentScan(
                 actionConstraint,
             };
 
+            // Spiral-capture instrument: when a blocked-read streak forms,
+            // persist the byte-exact outgoing step request so the failing
+            // prompt can be replayed later (cross-hour, cross-model) to
+            // attribute the failure to the serving provider vs the payload.
+            // Diagnostic only — capture failures never affect the scan.
+            if (consecutiveBlockedReads >= 3) {
+                try {
+                    const fs = require('fs');
+                    const path = require('path');
+                    const capturePath = path.join(ctx.workspaceRoot, '.securecode', 'spiral-capture.json');
+                    fs.writeFileSync(capturePath, JSON.stringify({
+                        capturedAt: new Date().toISOString(),
+                        stepIndex: stepsTaken + 1,
+                        consecutiveBlockedReads,
+                        stepReq,
+                    }, null, 1));
+                    console.log(`[Agent Scan Loop] Spiral state captured to ${capturePath} (streak: ${consecutiveBlockedReads})`);
+                } catch (capErr: any) {
+                    console.warn(`[Agent Scan Loop] Spiral capture failed (non-fatal): ${capErr?.message || capErr}`);
+                }
+            }
+
             let stepResp: AgentScanStepResponse;
             try {
                 const stepRespRaw = await client.postJson<AgentStepResponse>('/agent/scan/step', stepReq, options.signal);
