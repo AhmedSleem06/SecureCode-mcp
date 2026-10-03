@@ -1673,6 +1673,17 @@ export function isCoherentText(text: string): boolean {
     return true;
 }
 
+/**
+ * Cross-repo budget contract (MCP <-> API): this 120K-char transcript budget,
+ * plus the ~40K-char initial user-prompt context and the ~47K-char system
+ * prompt, must ALWAYS stay under the API-side per-stage prompt budget for
+ * agent-scan stages — 500,000 chars as of 2026-10 (`max_prompt_chars` in
+ * scanner.yaml in the api repo). If the MCP ever raises this budget, the
+ * API's `max_prompt_chars` for the agent_scan / agent_scan_critique /
+ * architecture_scout / probe_plan stages must be raised FIRST, or the API
+ * will truncate the step prompt (its truncation preserves the tail, but the
+ * goal is to never truncate).
+ */
 const TRANSCRIPT_CHAR_BUDGET = 120_000;
 const TRANSCRIPT_KEEP_RECENT = 12;
 const TRANSCRIPT_SUMMARY_LEN = 200;
