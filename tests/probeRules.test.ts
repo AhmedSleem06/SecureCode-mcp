@@ -79,6 +79,42 @@ describe('applyProbeRules — Rule 1: status mismatch', () => {
         expect(result.rule).toBe('status-mismatch');
     });
 
+    it('confirms when predicted 401 but got 400 — request passed the auth gate, handler rejected it', () => {
+        const result = applyProbeRules(
+            makeRequest({ expectedStatus: [401] }),
+            makeResponse({ statusCode: 400 }),
+        );
+        expect(result.verdict).toBe('confirmed-bypass');
+        expect(result.rule).toBe('status-mismatch');
+        expect(result.reason).toContain('past the auth gate');
+    });
+
+    it('confirms when predicted 401 but got 422 — past-auth validation rejection', () => {
+        const result = applyProbeRules(
+            makeRequest({ expectedStatus: [401] }),
+            makeResponse({ statusCode: 422 }),
+        );
+        expect(result.verdict).toBe('confirmed-bypass');
+        expect(result.rule).toBe('status-mismatch');
+    });
+
+    it('does not confirm when predicted 401 but got 404 — ambiguous router miss vs resource-not-found', () => {
+        const result = applyProbeRules(
+            makeRequest({ expectedStatus: [401] }),
+            makeResponse({ statusCode: 404 }),
+        );
+        expect(result.verdict).not.toBe('confirmed-bypass');
+        expect(result.rule).not.toBe('status-mismatch');
+    });
+
+    it('does not confirm when predicted 401 and got 401 — auth did block', () => {
+        const result = applyProbeRules(
+            makeRequest({ expectedStatus: [401] }),
+            makeResponse({ statusCode: 401 }),
+        );
+        expect(result.verdict).not.toBe('confirmed-bypass');
+    });
+
     it('does not fire when status matches expected', () => {
         const result = applyProbeRules(
             makeRequest({ expectedStatus: [403] }),

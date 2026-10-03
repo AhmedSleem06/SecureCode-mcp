@@ -233,10 +233,15 @@ export function applyProbeRules(
     // Rule 1: status mismatch
     if (expected.length > 0 && !expected.includes(attackResp.statusCode)) {
         const predictedBlocked = expected.every(s => s === 401 || s === 403 || s === 404 || s >= 500);
-        if (predictedBlocked && attackResp.statusCode >= 200 && attackResp.statusCode < 300) {
+        const pastAuth =
+            (attackResp.statusCode >= 200 && attackResp.statusCode < 300) ||
+            attackResp.statusCode === 400 ||
+            attackResp.statusCode === 405 ||
+            attackResp.statusCode === 422;
+        if (predictedBlocked && pastAuth) {
             return {
                 verdict: 'confirmed-bypass', rule: 'status-mismatch',
-                reason: `Predicted blocked (${expected.join('/')}) but got ${attackResp.statusCode}.`,
+                reason: `Predicted blocked (${expected.join('/')}) but got ${attackResp.statusCode} — the request reached the handler past the auth gate.`,
                 requiredEvidence: ['baseline-returned-blocked-status', 'exploit-returned-success-status'],
             };
         }

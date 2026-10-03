@@ -78,7 +78,7 @@ export const PROBE_ELIGIBLE_TYPES: ReadonlySet<string> = new Set([
     'xss',
 ]);
 
-const PROBE_VERIFY_REASON_RE = /(timed? ?out|full runtime|cannot test in sandbox|runtime|DOM\/jsdom)/i;
+const PROBE_VERIFY_REASON_RE = /(timed? ?out|full runtime|cannot test in sandbox|runtime|DOM\/jsdom|baseline[- ]?failed|cannot distinguish)/i;
 
 /** Route-registration idioms the fallback derives endpoints from.
  *  Covers frameworks the deterministic project map does not extract
@@ -109,6 +109,11 @@ const FALLBACK_ROUTE_PATTERNS: { re: RegExp; methodGroup: number; pathGroup: num
 ];
 
 const FALLBACK_EVIDENCE_ROUTE_RE = /\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+['"`]?(\/[^\s'"`,;)]+)/i;
+
+/** Auth markers inside a route's handler block — routes whose handler
+ *  references auth are the protected routes, and the correct probe
+ *  targets for broken_access_control findings. */
+const AUTH_MARKER_RE = /requireAuthenticated|authenticate|authToken|[iI]s[A-Z]\w*Authorized/;
 
 function redactResponseHeaders(headers?: Record<string, string>): Record<string, string> {
     if (!headers) return {};
@@ -444,8 +449,10 @@ export function deriveEndpointFallback(
     // few hundred lines below the vulnerable function they share
     // middleware with. Preference: a route whose path the finding's own
     // evidence/why text names (the model read the route and often says so),
-    // then the nearest concrete (non-wildcard, non-"*"-method)
-    // registration, then anything else.
+    // then an auth-protected route (its handler block references auth — the
+    // correct probe target for broken_access_control findings), then the
+    // nearest concrete (non-wildcard, non-"*"-method) registration, then
+    // anything else.
     const evidenceTexts = [
         finding.evidence,
         finding.why,
@@ -466,8 +473,17 @@ export function deriveEndpointFallback(
     }
     if (addMatches.length > 0) {
         const referenced = addMatches.filter(x => evidenceTexts.includes(x.path));
+        const authProtected = addMatches.filter(x => {
+            const blockStart = Math.max(0, x.absLine - 1);
+            const blockEnd = Math.min(lines.length, x.absLine + 40);
+            return AUTH_MARKER_RE.test(lines.slice(blockStart, blockEnd).join('\n'));
+        });
         const concrete = addMatches.filter(x => x.method !== '*' && !x.path.includes('*'));
-        const pool = referenced.length > 0 ? referenced : (concrete.length > 0 ? concrete : addMatches);
+        const pool = referenced.length > 0
+            ? referenced
+            : authProtected.length > 0
+                ? authProtected
+                : (concrete.length > 0 ? concrete : addMatches);
         pool.sort((a, b) => Math.abs(a.absLine - finding.line) - Math.abs(b.absLine - finding.line));
         const best = pool[0];
         return {

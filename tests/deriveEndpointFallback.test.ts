@@ -164,6 +164,33 @@ describe('deriveEndpointFallback', () => {
         expect(candidate!.path).toBe('/api/thread-export');
     });
 
+    it('prefers the auth-protected route over a nearer unprotected route', () => {
+        const lines: string[] = [];
+        for (let i = 1; i <= 400; i++) lines[i] = `const filler${i} = ${i};`;
+        lines[30] = 'function isLegacyTokenAuthorized(config) { return !config.authToken; }';
+        lines[100] = 'const projectFaviconEffectRouteLayer = HttpRouter.add(';
+        lines[101] = '  "GET",';
+        lines[102] = '  "/api/project-favicon",';
+        lines[103] = '  Effect.gen(function* () {';
+        lines[104] = '    yield* Effect.succeed(faviconBytes);';
+        lines[105] = '  })';
+        lines[270] = 'const threadExportEffectRouteLayer = HttpRouter.add(';
+        lines[271] = '  "GET",';
+        lines[272] = '  "/api/thread-export",';
+        lines[273] = '  Effect.gen(function* () {';
+        lines[274] = '    const session = yield* requireAuthenticated;';
+        lines[275] = '    if (!isLegacyTokenAuthorized(config)) {';
+        lines[276] = '      yield* Effect.fail(new AccessDeniedError());';
+        lines[277] = '    }';
+        lines[278] = '  })';
+        const code = lines.map((l, i) => l ?? '').join('\n');
+        const candidate = deriveEndpointFallback({ line: 30 } as any, code);
+        expect(candidate).not.toBeNull();
+        expect(candidate!.method).toBe('GET');
+        expect(candidate!.path).toBe('/api/thread-export');
+        expect(candidate!.line).toBe(271);
+    });
+
     it('falls back to a wildcard registration with GET method when nothing concrete exists', () => {
         const code = [
             'function isLegacyTokenAuthorized(config) { return !config.authToken; }',
@@ -191,6 +218,13 @@ describe('probe eligibility helpers', () => {
     it('hasProbeEligibleReason matches runtime-shaped verify reasons', () => {
         expect(hasProbeEligibleReason('Effect-TS module with full runtime dependencies cannot be imported in sandbox — 10 timeouts confirm')).toBe(true);
         expect(hasProbeEligibleReason('Test timed out after 12 rounds')).toBe(true);
+        expect(hasProbeEligibleReason('Guard checks out; input sanitized')).toBe(false);
+    });
+
+    it('hasProbeEligibleReason matches baseline-failed proof-gate shapes', () => {
+        expect(hasProbeEligibleReason('Proof gate rejected: baseline-failed. Baseline secure case did not pass — cannot distinguish exploit from normal behavior')).toBe(true);
+        expect(hasProbeEligibleReason('baseline failed: the secure request also succeeded, cannot distinguish')).toBe(true);
+        expect(hasProbeEligibleReason('INCONCLUSIVE: cannot distinguish exploit from normal behavior')).toBe(true);
         expect(hasProbeEligibleReason('Guard checks out; input sanitized')).toBe(false);
     });
 });
