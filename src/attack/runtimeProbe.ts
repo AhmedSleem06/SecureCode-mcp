@@ -437,6 +437,47 @@ export function deriveEndpointFallback(
         }
     }
 
+    // Pass 1b: multi-line route registrations. Effect's
+    // HttpRouter.add("GET", "/path", handler) puts the method and the path
+    // on separate lines, which the per-line scan above can never match.
+    // Scan a wider window as joined text — route layers frequently sit a
+    // few hundred lines below the vulnerable function they share
+    // middleware with. Preference: a route whose path the finding's own
+    // evidence/why text names (the model read the route and often says so),
+    // then the nearest concrete (non-wildcard, non-"*"-method)
+    // registration, then anything else.
+    const evidenceTexts = [
+        finding.evidence,
+        finding.why,
+        finding.evidenceChain?.source?.description,
+        finding.evidenceChain?.sink?.description,
+    ].filter((t): t is string => typeof t === 'string' && t.length > 0).join('\n');
+    const wideStart = Math.max(0, finding.line - 26);
+    const wideEnd = Math.min(lines.length, finding.line + 400);
+    const wideText = lines.slice(wideStart, wideEnd).join('\n');
+    const addRe = /HttpRouter\.add\(\s*"(get|post|put|patch|delete|head|options|\*)"\s*,\s*"([^"]+)"/gi;
+    const addMatches: { method: string; path: string; absLine: number }[] = [];
+    let addm: RegExpExecArray | null;
+    while ((addm = addRe.exec(wideText)) !== null) {
+        const path = addm[2];
+        if (!path.startsWith('/')) continue;
+        const relLine = wideText.slice(0, addm.index).split('\n').length;
+        addMatches.push({ method: addm[1].toUpperCase(), path, absLine: wideStart + relLine });
+    }
+    if (addMatches.length > 0) {
+        const referenced = addMatches.filter(x => evidenceTexts.includes(x.path));
+        const concrete = addMatches.filter(x => x.method !== '*' && !x.path.includes('*'));
+        const pool = referenced.length > 0 ? referenced : (concrete.length > 0 ? concrete : addMatches);
+        pool.sort((a, b) => Math.abs(a.absLine - finding.line) - Math.abs(b.absLine - finding.line));
+        const best = pool[0];
+        return {
+            method: best.method === '*' ? 'GET' : best.method,
+            path: best.path,
+            line: best.absLine,
+            derived: true,
+        };
+    }
+
     // Pass 2: mine the finding's own text for "METHOD '/path'" mentions —
     // the agent has read the route definition, and often says so verbatim.
     const texts = [

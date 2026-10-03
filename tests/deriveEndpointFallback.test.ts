@@ -108,6 +108,76 @@ describe('deriveEndpointFallback', () => {
         const candidate = deriveEndpointFallback({ line: 1 } as any, code);
         expect(candidate!.path).toBe('/users');
     });
+
+    it('derives a multi-line HttpRouter.add registration below the finding', () => {
+        const lines: string[] = [];
+        for (let i = 1; i <= 120; i++) lines[i] = `const filler${i} = ${i};`;
+        lines[30] = 'function isLegacyTokenAuthorized(config) { return !config.authToken; }';
+        lines[100] = 'export const threadExportEffectRouteLayer = HttpRouter.add(';
+        lines[101] = '  "GET",';
+        lines[102] = '  "/api/thread-export",';
+        lines[103] = '  Effect.gen(function* () {';
+        const code = lines.map((l, i) => l ?? '').join('\n');
+        const candidate = deriveEndpointFallback({ line: 30 } as any, code);
+        expect(candidate).not.toBeNull();
+        expect(candidate!.method).toBe('GET');
+        expect(candidate!.path).toBe('/api/thread-export');
+    });
+
+    it('prefers the concrete registration over a nearer wildcard auth layer', () => {
+        const lines: string[] = [];
+        for (let i = 1; i <= 400; i++) lines[i] = `const filler${i} = ${i};`;
+        lines[30] = 'function isLegacyTokenAuthorized(config) { return !config.authToken; }';
+        lines[97] = 'export const authEffectRouteLayer = HttpRouter.add(';
+        lines[98] = '  "*",';
+        lines[99] = '  "/api/auth/*",';
+        lines[100] = '  Effect.gen(function* () {';
+        lines[270] = 'const threadExportEffectRouteLayer = HttpRouter.add(';
+        lines[271] = '  "GET",';
+        lines[272] = '  "/api/thread-export",';
+        lines[273] = '  Effect.gen(function* () {';
+        const code = lines.map((l, i) => l ?? '').join('\n');
+        const candidate = deriveEndpointFallback({ line: 30 } as any, code);
+        expect(candidate).not.toBeNull();
+        expect(candidate!.method).toBe('GET');
+        expect(candidate!.path).toBe('/api/thread-export');
+    });
+
+    it('boosts the registration the finding evidence names over nearer concrete routes', () => {
+        const lines: string[] = [];
+        for (let i = 1; i <= 400; i++) lines[i] = `const filler${i} = ${i};`;
+        lines[30] = 'function isLegacyTokenAuthorized(config) { return !config.authToken; }';
+        lines[200] = 'const projectFaviconEffectRouteLayer = HttpRouter.add(';
+        lines[201] = '  "GET",';
+        lines[202] = '  "/api/project-favicon",';
+        lines[203] = '  Effect.gen(function* () {';
+        lines[370] = 'const threadExportEffectRouteLayer = HttpRouter.add(';
+        lines[371] = '  "GET",';
+        lines[372] = '  "/api/thread-export",';
+        lines[373] = '  Effect.gen(function* () {';
+        const code = lines.map((l, i) => l ?? '').join('\n');
+        const candidate = deriveEndpointFallback({
+            line: 30,
+            evidence: 'The bypass exposes GET /api/thread-export to unauthenticated loopback requests',
+        } as any, code);
+        expect(candidate).not.toBeNull();
+        expect(candidate!.path).toBe('/api/thread-export');
+    });
+
+    it('falls back to a wildcard registration with GET method when nothing concrete exists', () => {
+        const code = [
+            'function isLegacyTokenAuthorized(config) { return !config.authToken; }',
+            '',
+            'export const authEffectRouteLayer = HttpRouter.add(',
+            '  "*",',
+            '  "/api/auth/*",',
+            '  Effect.gen(function* () {',
+        ].join('\n');
+        const candidate = deriveEndpointFallback({ line: 1 } as any, code);
+        expect(candidate).not.toBeNull();
+        expect(candidate!.method).toBe('GET');
+        expect(candidate!.path).toBe('/api/auth/*');
+    });
 });
 
 describe('probe eligibility helpers', () => {
