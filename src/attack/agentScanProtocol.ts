@@ -11,7 +11,7 @@ export const AGENT_SCAN_DEFAULTS = {
     hardMaxSteps: 80,
     maxSteps: 80,
     costCapUsd: 4.00,
-    wallClockMs: 1_800_000,
+    wallClockMs: 2_700_000,
     perStepEstimateUsd: 0.08,
     creditsPerRun: 5,
     dailyRunLimit: 20,
