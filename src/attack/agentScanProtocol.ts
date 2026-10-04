@@ -10,7 +10,7 @@ export const AGENT_SCAN_DEFAULTS = {
     extensionSize: 10,
     hardMaxSteps: 80,
     maxSteps: 80,
-    costCapUsd: 1.20,
+    costCapUsd: 4.00,
     wallClockMs: 1_800_000,
     perStepEstimateUsd: 0.08,
     creditsPerRun: 5,
