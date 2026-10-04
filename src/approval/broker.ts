@@ -159,11 +159,25 @@ export class ApprovalBroker {
             this.settle(entry, false, 'shutdown', 'Broker shutting down');
         }
         return new Promise<void>((resolve) => {
-            if (this.server) {
-                this.server.close(() => resolve());
-            } else {
+            if (!this.server) {
                 resolve();
+                return;
             }
+            let settled = false;
+            const done = () => {
+                if (settled) return;
+                settled = true;
+                resolve();
+            };
+            this.server.close(() => done());
+            // close() alone waits for open keep-alive connections (e.g. the
+            // approval client's /decide fetch) that may never close on their
+            // own — that hang froze a scan after its runtime probe completed,
+            // losing the probe results before they reached the queue. Destroy
+            // lingering sockets and bound the wait regardless.
+            (this.server as any).closeAllConnections?.();
+            const failSafe = setTimeout(done, 2000);
+            (failSafe as any).unref?.();
         });
     }
 
