@@ -79,7 +79,7 @@ export const PROBE_ELIGIBLE_TYPES: ReadonlySet<string> = new Set([
     'xss',
 ]);
 
-const PROBE_VERIFY_REASON_RE = /(timed? ?out|full runtime|cannot test in sandbox|runtime|DOM\/jsdom|baseline[- ]?failed|cannot distinguish)/i;
+const PROBE_VERIFY_REASON_RE = /(timed? ?out|full runtime|cannot test in sandbox|runtime|DOM\/jsdom|baseline[- ]?failed|cannot distinguish|non[- ]?discriminating|not discriminating|mutation test errored)/i;
 
 /** Route-registration idioms the fallback derives endpoints from.
  *  Covers frameworks the deterministic project map does not extract
