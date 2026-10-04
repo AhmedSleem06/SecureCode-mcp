@@ -448,10 +448,77 @@ export async function runAgentScan(
             return [...autoGaps, ...taskGaps, ...rangeGaps];
         };
 
+        // Salvage for hard terminations (wall clock / cost cap / step
+        // budget). These exits used to discard the entire investigation —
+        // findings deleted, 0 delivered — because they never ran the
+        // finish gate's forced-incomplete acceptance. When the model has
+        // proposed a finish at any point (even a rejected one), surface
+        // its findings; convert unproven candidates into investigation
+        // notes; record what was never covered. Returns null when there
+        // is nothing worth salvaging (no finish, no candidates).
+        const salvageHardTermination = async (terminationReason: string, summary: string): Promise<AgentScanResult | null> => {
+            const activeCandidates = candidateStore.getActive().filter(c =>
+                c.status === 'discovered' || c.status === 'investigating' || c.status === 'supported');
+            if (!lastFinishAction && activeCandidates.length === 0) return null;
+
+            const finish = lastFinishAction;
+            const findings = finish ? sanitizeFindings(finish.findings) : [];
+            const investigationNotes = [...(finish?.investigationNotes ?? [])];
+            for (const candidate of activeCandidates) {
+                const missingDims = candidate.requiredProofDimensions?.filter(d =>
+                    !candidate.satisfiedDimensions?.includes(d),
+                ) || [];
+                investigationNotes.push({
+                    title: candidate.claim,
+                    detail: `Candidate was not fully verified before the run ended (${terminationReason}). Status: ${candidate.status}. Missing proof dimensions: ${missingDims.join(', ') || 'none'}. Evidence refs: ${candidate.evidenceRefs.length}.`,
+                    file: candidate.locations[0]?.filePath || target.filePath,
+                    line: candidate.locations[0]?.line,
+                    verificationLevel: 'logic-confirmed' as any,
+                    rootCauseId: candidate.rootCauseId,
+                    requiredEvidence: missingDims.map(d => `Satisfy the ${d} proof dimension`),
+                    priority: candidate.severity === 'critical' || candidate.severity === 'high' ? 'high' : 'medium',
+                });
+                candidateStore.setUnproven(candidate.id, `Converted to note: missing proof dimensions ${missingDims.join(', ')}`);
+            }
+
+            const coverageGaps = [...(finish?.coverageGaps ?? []), ...buildCoverageGaps()];
+            if (finish && lastFinishRejectionReasons.length > 0) {
+                coverageGaps.push({
+                    title: 'Finish was salvaged after local gate rejection',
+                    detail: `Local finish gate still flagged: ${lastFinishRejectionReasons.join('; ')}`,
+                    requiredEvidence: [],
+                    suggestedNextAction: 'Re-run a scan to cover the flagged gaps.',
+                    priority: 'medium' as any,
+                });
+            }
+
+            terminateScan(scanState, 'forced_incomplete', summary);
+            qualityTracker.recordForcedTermination('forced_incomplete');
+            const salvageSummary = `${summary} Investigation salvaged: ${findings.length} finding(s) and ${investigationNotes.length} note(s) recovered from the terminated run.`;
+            console.warn(`[Agent Scan Loop] ${terminationReason}: salvaging investigation — ${findings.length} finding(s), ${investigationNotes.length} note(s).`);
+            trace.logRunCompleted('completed');
+            return closeRun({
+                status: 'completed',
+                findings,
+                investigationNotes,
+                coverageGaps,
+                transcript,
+                stepsUsed: stepsTaken,
+                stepsGranted,
+                extensionsGranted,
+                costSpentUsd,
+                terminationReason: 'forced_incomplete',
+                summary: salvageSummary,
+                qualityMetrics: qualityTracker.getMetrics(),
+            });
+        };
+
         while (true) {
             // Wall clock check
             if (Date.now() - startTime > wallClockMs) {
                 terminateScan(scanState, 'wall_clock', `Wall clock limit (${wallClockMs}ms) exceeded.`);
+                const salvaged = await salvageHardTermination('wall_clock', `Wall clock limit (${wallClockMs}ms) exceeded.`);
+                if (salvaged) return salvaged;
                 return closeRun({
                     status: 'incomplete',
                     findings: [],
@@ -777,6 +844,17 @@ export async function runAgentScan(
 
             // Null next = done (cost capped or steps exhausted)
             if (!stepResp.next) {
+                const hardReason = stepResp.costCapped ? 'cost_cap' : 'budget_exhausted';
+                terminateScan(scanState, stepResp.costCapped ? 'cost_cap' : 'budget_exhausted', stepResp.costCapped
+                    ? `Cost cap ($${budget.costCapUsd.toFixed(2)}) reached.`
+                    : 'Agent completed without explicit finish.');
+                const salvaged = await salvageHardTermination(
+                    hardReason,
+                    stepResp.costCapped
+                        ? `Cost cap ($${budget.costCapUsd.toFixed(2)}) reached.`
+                        : 'Step budget exhausted.',
+                );
+                if (salvaged) return salvaged;
                 const status: AgentScanRunStatus = stepResp.costCapped
                     ? 'incomplete'
                     : (stepResp.degraded ? 'incomplete' : 'completed');

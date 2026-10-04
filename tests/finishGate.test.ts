@@ -82,6 +82,30 @@ describe('Finish Gate', () => {
         expect(result.coverageGaps?.length).toBeGreaterThan(0);
     });
 
+    it('accepts finish at the soft deadline (75% of wall clock spent) even with budget remaining', () => {
+        const investigation = new InvestigationState();
+        const state = createScanRunState('run-1', target, { ...budget, stepsRemaining: 40 });
+        // Simulate 80% of a 45-minute wall clock already spent
+        (state.budget as any).startedAt = Date.now() - 36 * 60 * 1000;
+        (state.budget as any).wallClockMs = 45 * 60 * 1000;
+        const input = makeInput({ investigation, state });
+        const result = evaluateFinishGate(input);
+        expect(result.accepted).toBe(true);
+        expect(result.mode).toBe('forced-incomplete');
+        expect(result.coverageGaps?.length).toBeGreaterThan(0);
+    });
+
+    it('rejects finish before the soft deadline when budget remains', () => {
+        const investigation = new InvestigationState();
+        const state = createScanRunState('run-1', target, { ...budget, stepsRemaining: 40 });
+        (state.budget as any).startedAt = Date.now() - 10 * 60 * 1000;
+        (state.budget as any).wallClockMs = 45 * 60 * 1000;
+        const input = makeInput({ investigation, state });
+        const result = evaluateFinishGate(input);
+        expect(result.accepted).toBe(false);
+        expect(result.mode).toBe('continue');
+    });
+
     it('reports unresolved tasks for both finding and non-finding finishes', () => {
         const investigation = new InvestigationState();
         investigation.addInvestigationTasks([{

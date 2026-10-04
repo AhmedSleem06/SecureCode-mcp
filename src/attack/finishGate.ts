@@ -63,6 +63,15 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
     const hasBudget = state.budget.stepsRemaining > 0 &&
                       state.budget.costSpentUsd < state.budget.costCapUsd;
     const hasWallClock = Date.now() - state.budget.startedAt < state.budget.wallClockMs;
+    // Soft deadline: once 75% of the wall clock is spent, the gate stops
+    // rejecting finishes. Unbounded checks (unread auth ranges, executable
+    // work, scheduler actions) can never converge on a large auth-heavy
+    // file, so a hard "reject while budget remains" rule grinds deep
+    // investigators into a wall-clock discard. The last quarter of the
+    // run is the landing window: finishes are accepted with their
+    // un-investigated areas recorded as coverage gaps.
+    const wallClockElapsedMs = Date.now() - state.budget.startedAt;
+    const softDeadlinePassed = wallClockElapsedMs >= state.budget.wallClockMs * 0.75;
 
     // Check 1: Incomplete investigation steps
     const incompleteSteps = investigation.getIncompleteSteps();
@@ -216,8 +225,9 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
 
     // Decision:
     // - If no reasons → accept as complete
-    // - If reasons exist but no budget/wall-clock → accept as forced-incomplete
-    // - If reasons exist and budget remains → reject and continue
+    // - If reasons exist but no budget/wall-clock, or the soft deadline
+    //   (75% of the wall clock) has passed → accept as forced-incomplete
+    // - If reasons exist and budget remains (and no soft deadline) → reject and continue
 
     if (reasons.length === 0) {
         return {
@@ -228,8 +238,8 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
         };
     }
 
-    // Check if we can continue (budget + wall clock available)
-    const canContinue = hasBudget && hasWallClock && !isScanTerminal(state);
+    // Check if we can continue (budget + wall clock available, before the soft deadline)
+    const canContinue = hasBudget && hasWallClock && !softDeadlinePassed && !isScanTerminal(state);
 
     if (!canContinue) {
         // Forced-incomplete: budget or wall clock exhausted
