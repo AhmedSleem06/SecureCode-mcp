@@ -274,6 +274,64 @@ describe('runAgentScan — termination', () => {
         expect(closeCall[1].runId).toBe('run-race');
     });
 
+    it('escapes a non-converging finish loop: 4 same-reason rejections land as forced-incomplete', async () => {
+        // Production pathology (2026-10-10, synara scan 361553ee): a
+        // high-severity candidate requires the 'impact' and 'verification'
+        // proof dimensions, which no in-loop tool can satisfy. The agent
+        // proposes finish, the gate rejects with the identical reason set,
+        // recovery cannot converge — 16 rejections in 7 minutes, grinding
+        // toward the 45-minute wall clock. The escape hatch accepts the
+        // 4th consecutive identical-signature finish as forced-incomplete.
+        const step = (next: any, remaining: number) => ({
+            next, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: remaining,
+        });
+        const finding = { line: 10, type: 'broken_access_control', severity: 'high', confidence: 85, evidence: 'no check', why: 'missing ownership' };
+        const fin = (remaining: number) => step({ type: 'finish', findings: [finding], summary: 'stuck on same candidate', selfCritique: 'done' }, remaining);
+        const mockFn = mockPostJson([
+            { runId: 'run-loop', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 0.40, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },
+            // Complete the generic-utility checklist first so the ONLY blocker
+            // that remains is the candidate (stable signature across rejections).
+            step({ type: 'read_file', path: 'test.ts', startLine: 1, endLine: 50, rationale: 'r' }, 39),
+            step({ type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, 38),
+            step({ type: 'check_policy', filePath: 'test.ts', rationale: 'r' }, 37),
+            step({ type: 'read_config', configKind: 'all', rationale: 'r' }, 36),
+            step({ type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, 35),
+            // Four finishes, each rejected with the same reason codes.
+            fin(34),
+            fin(33),
+            fin(32),
+            fin(31),
+            // Spares in case a gate recovery consumes a step slot.
+            fin(30),
+            fin(29),
+            fin(28),
+        ]);
+        (executeReadFileAction as any).mockResolvedValue({
+            observation: 'file content here', actualStart: 1, actualEnd: 100, totalLines: 100, truncated: false,
+        });
+        (executeAction as any).mockResolvedValue('ok');
+        (executeFlowAction as any).mockResolvedValue({ observation: 'flow result', flowResult: { status: 'confirmed', hops: [{ filePath: 'test.ts', line: 1 }], truncated: false } });
+
+        const result = await runAgentScan(ctx, target, {});
+
+        // The escape fired on the 4th consecutive same-signature rejection
+        expect(result.status).toBe('completed');
+        expect(result.terminationReason).toBe('forced_incomplete');
+        expect(result.transcript.some(t =>
+            t.action.type === 'system_event' &&
+            (t.action as any).eventType === 'finish_gate' &&
+            String(t.observation).includes('FINISH GATE LOOP DETECTED'),
+        )).toBe(true);
+        // The finish was salvaged, not discarded — the finding survived
+        expect(result.findings.some(f => f.type === 'broken_access_control')).toBe(true);
+        // The run closed with the forced-incomplete reason
+        const closeCall = (mockFn.mock.calls as any[]).find(c => c[0] === '/agent/scan/close');
+        expect(closeCall).toBeTruthy();
+        expect(closeCall[1].terminationReason).toBe('forced_incomplete');
+        // It escaped early — far fewer than the 40 granted steps were burned
+        expect(result.stepsUsed).toBeLessThan(15);
+    });
+
     it('accumulates cost from step responses', async () => {
         mockPostJson([
             { runId: 'run-1', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 0.40, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' },

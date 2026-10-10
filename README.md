@@ -177,6 +177,7 @@ The deterministic control plane enforces proof quality:
 - Unproven concerns become investigation notes, not findings
 - Architecture risks expand across related files (callers, implementations, sinks)
 - The finish gate rejects finish while proof requirements remain unsatisfied
+- A non-converging finish loop escapes early: 4 consecutive rejections with the identical reason set land as `forced-incomplete` (findings salvaged, gaps recorded) instead of burning to the 45-minute wall clock
 
 Languages: JavaScript, TypeScript, Python (partial).
 
@@ -209,6 +210,11 @@ calls), so each poll response carries live progress:
 Long synchronous tools (agent-scan, fix, attack) additionally emit standard MCP
 `notifications/progress` when the client sends a `progressToken` — that lights
 up automatically in clients that support it.
+
+**Cancelling works.** The server honors MCP `notifications/cancelled` — aborting
+a tool call in your client fires an AbortSignal through the running scan, which
+closes the run server-side (cancelled) and salvages findings found so far,
+instead of orphaning a 30-45 minute scan.
 
 ## Runtime Verification
 

@@ -41,7 +41,7 @@ import { HandlerInventory } from '../project-map/handlerInventory';
 import { CandidateStore } from './candidateStore';
 import { schedule as schedulerDecision, actionFingerprint } from './scanScheduler';
 import { createLlmHealthMonitor } from './llmHealth';
-import { evaluateFinishGate } from './finishGate';
+import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped } from './finishGate';
 import { QualityMetricsTracker } from './qualityMetrics';
 import { extractFunctionBoundaries } from './agentScanExecutor';
 import {
@@ -406,6 +406,7 @@ export async function runAgentScan(
         let aggressiveCompaction = false;
         let lastFinishAction: AgentScanFinishAction | null = null;
         let lastFinishRejectionReasons: string[] = [];
+        const finishLoop = newFinishLoopTracker();
         const attemptedRecoveryFingerprints = new Set<string>();
         const RECOVERY_FAILURE_LIMIT = 3;
 
@@ -1017,7 +1018,7 @@ export async function runAgentScan(
                     functionBoundaries,
                 });
 
-                const gateResult = evaluateFinishGate({
+                let gateResult = evaluateFinishGate({
                     proposal: action,
                     state: scanState,
                     evidence: evidenceLedger,
@@ -1028,6 +1029,28 @@ export async function runAgentScan(
                     scheduler: schedDecision,
                     target: { filePath: target.filePath, fileContent: target.fileContent },
                 });
+
+                // Finish-loop escape: when the identical gate reasons have
+                // rejected several consecutive finishes, the recovery loop
+                // cannot converge — accept this finish as forced-incomplete
+                // (the same salvage semantics as the 75% soft deadline)
+                // instead of looping to the wall clock.
+                if (!gateResult.accepted) {
+                    trackFinishRejection(finishLoop, gateResult.reasons);
+                    if (finishLoopEscaped(finishLoop)) {
+                        const loopNote = `[FINISH GATE LOOP DETECTED] The same gate reasons have now rejected ${finishLoop.rejections} consecutive finishes. Accepting this finish as forced-incomplete — unresolved items are recorded as coverage gaps instead of looping to the wall clock.`;
+                        transcript.push({
+                            action: { type: 'system_event', eventType: 'finish_gate', message: loopNote } as any,
+                            observation: loopNote,
+                        });
+                        gateResult = {
+                            ...gateResult,
+                            accepted: true,
+                            mode: 'forced-incomplete',
+                            normalizedFinish: gateResult.normalizedFinish ?? action,
+                        };
+                    }
+                }
 
                 if (gateResult.accepted) {
                     trace.logRunCompleted('completed');

@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { evaluateFinishGate } from '../src/attack/finishGate';
+import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, FINISH_LOOP_ESCAPE_THRESHOLD } from '../src/attack/finishGate';
 import { createScanRunState } from '../src/attack/scanState';
 import { EvidenceLedger } from '../src/attack/evidenceLedger';
 import { WorkItemQueue, createProfileWorkItem } from '../src/attack/workItem';
@@ -195,5 +195,46 @@ describe('Finish Gate', () => {
         const result = evaluateFinishGate(input);
         expect(result.accepted).toBe(true);
         expect(result.mode).toBe('forced-incomplete');
+    });
+});
+
+describe('Finish Loop Tracker', () => {
+    const reasons = (codes: string[]) => codes.map(code => ({ code, description: 'x' }));
+
+    it('the same reason-code signature climbs to the escape threshold at exactly 4', () => {
+        const t = newFinishLoopTracker();
+        trackFinishRejection(t, reasons(['non-terminal-candidate']));
+        trackFinishRejection(t, reasons(['non-terminal-candidate']));
+        trackFinishRejection(t, reasons(['non-terminal-candidate']));
+        expect(finishLoopEscaped(t)).toBe(false);
+        trackFinishRejection(t, reasons(['non-terminal-candidate']));
+        expect(finishLoopEscaped(t)).toBe(true);
+    });
+
+    it('a changed signature resets the counter — genuine progress keeps the gate strict', () => {
+        const t = newFinishLoopTracker();
+        for (let i = 0; i < 3; i++) trackFinishRejection(t, reasons(['non-terminal-candidate']));
+        trackFinishRejection(t, reasons(['incomplete-checklist'])); // changed → reset to 1
+        expect(finishLoopEscaped(t)).toBe(false);
+        expect(t.rejections).toBe(1);
+        trackFinishRejection(t, reasons(['incomplete-checklist']));
+        trackFinishRejection(t, reasons(['incomplete-checklist']));
+        trackFinishRejection(t, reasons(['incomplete-checklist']));
+        expect(finishLoopEscaped(t)).toBe(true);
+    });
+
+    it('the signature is order-insensitive across code sets', () => {
+        const t = newFinishLoopTracker();
+        trackFinishRejection(t, reasons(['a', 'b']));
+        trackFinishRejection(t, reasons(['b', 'a']));
+        expect(t.rejections).toBe(2);
+    });
+
+    it('a shrinking code set (progress) resets the counter', () => {
+        const t = newFinishLoopTracker();
+        for (let i = 0; i < 3; i++) trackFinishRejection(t, reasons(['non-terminal-candidate', 'unsatisfied-evidence-requirement']));
+        trackFinishRejection(t, reasons(['non-terminal-candidate'])); // one blocker resolved
+        expect(t.rejections).toBe(1);
+        expect(finishLoopEscaped(t)).toBe(false);
     });
 });

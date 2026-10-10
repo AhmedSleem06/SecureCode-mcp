@@ -25,6 +25,7 @@ let initialized = false;
 let clientSupportsRoots = false;
 let nextRequestId = 100;
 const pendingRootsRequests = new Set<number>();
+const activeToolCalls = new Map<string | number, AbortController>();
 
 function send(msg: JsonRpcResponse | { jsonrpc: '2.0'; method: string; params?: unknown }): void {
     process.stdout.write(JSON.stringify(msg) + '\n');
@@ -207,13 +208,34 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
                     args._progress = (progress: number, total: number, message: string) =>
                         sendProgress(progressToken, progress, total, message);
                 }
-                const result_data = await handler(ctx, args);
+                // Cancellation: hand the handler an AbortSignal tied to this
+                // request id so notifications/cancelled can stop long-running
+                // work (a 30-45 min agent scan) instead of orphaning it.
+                const cancelController = new AbortController();
+                args._signal = cancelController.signal;
+                activeToolCalls.set(id as string | number, cancelController);
+                let result_data: unknown;
+                try {
+                    result_data = await handler(ctx, args);
+                } finally {
+                    activeToolCalls.delete(id as string | number);
+                }
                 return {
                     jsonrpc: '2.0', id,
                     result: {
                         content: [{ type: 'text', text: JSON.stringify(result_data, null, 2) }],
                     },
                 };
+            }
+            case 'notifications/cancelled': {
+                const rid = (req.params as any)?.requestId;
+                const controller = activeToolCalls.get(rid);
+                if (controller) {
+                    activeToolCalls.delete(rid);
+                    controller.abort();
+                    console.error(`[securecode-mcp] cancelled tools/call ${rid} — aborting in-flight work`);
+                }
+                return { jsonrpc: '2.0', id: null };
             }
             default: {
                 if (req.method.startsWith('notifications/')) {

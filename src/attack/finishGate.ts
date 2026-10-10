@@ -29,6 +29,44 @@ import type { ScheduleDecision } from './scanScheduler';
 
 export type FinishGateMode = 'complete' | 'continue' | 'forced-incomplete';
 
+/**
+ * When the identical reason-code set rejects this many CONSECUTIVE finishes,
+ * the loop accepts the next finish as forced-incomplete (the same salvage
+ * semantics as the 75% soft deadline) instead of grinding to the wall clock.
+ * Production showed a candidate-blocked agent proposing finish ~16 times with
+ * the recovery loop unable to converge — 33 minutes of burn for one finding.
+ */
+export const FINISH_LOOP_ESCAPE_THRESHOLD = 4;
+
+export interface FinishLoopTracker {
+    rejections: number;
+    signature: string;
+}
+
+export function newFinishLoopTracker(): FinishLoopTracker {
+    return { rejections: 0, signature: '' };
+}
+
+/**
+ * Record a rejected finish against the tracker. An identical reason-code
+ * signature climbs the counter; a changed signature means the investigation
+ * is still making progress (fewer/different blockers) and resets it.
+ */
+export function trackFinishRejection(tracker: FinishLoopTracker, reasons: FinishGateReason[]): FinishLoopTracker {
+    const signature = reasons.map(r => r.code).sort().join('|');
+    if (signature === tracker.signature) {
+        tracker.rejections++;
+    } else {
+        tracker.rejections = 1;
+        tracker.signature = signature;
+    }
+    return tracker;
+}
+
+export function finishLoopEscaped(tracker: FinishLoopTracker): boolean {
+    return tracker.rejections >= FINISH_LOOP_ESCAPE_THRESHOLD;
+}
+
 export interface FinishGateReason {
     code: string;
     description: string;
