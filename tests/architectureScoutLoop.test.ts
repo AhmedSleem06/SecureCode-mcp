@@ -1,13 +1,17 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+﻿import { describe, it, expect, beforeEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         postJson: vi.fn(),
     })),
-}));
+    };
+});
 
 vi.mock('../src/attack/architectureScoutExecutor', () => ({
     executeScoutAction: vi.fn(),

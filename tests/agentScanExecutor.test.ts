@@ -1,4 +1,4 @@
-// Vitest suite for the scan agent executor — tool dispatch.
+﻿// Vitest suite for the scan agent executor — tool dispatch.
 //
 // Covers:
 //   - read_file: reads file, returns numbered content
@@ -28,11 +28,15 @@ vi.mock('../src/utils/searchCode', () => ({
     formatSearchResult: vi.fn(),
 }));
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         postJson: vi.fn(),
     })),
-}));
+    };
+});
 
 import { executeAction, executeReadFileAction } from '../src/attack/agentScanExecutor';
 import { trackTaint } from '../src/project-map/taintTracker';

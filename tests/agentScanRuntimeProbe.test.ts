@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+﻿import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -18,11 +18,15 @@ vi.mock('../src/attack/agentScanLoop', () => ({
     runAgentScan: vi.fn(),
 }));
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         postJson: vi.fn(),
     })),
-}));
+    };
+});
 
 vi.mock('../src/approval/broker', () => ({
     ApprovalBroker: vi.fn().mockImplementation(() => ({

@@ -13,6 +13,7 @@ import {
 } from '../project-map/architectureContext';
 import { runArchitectureScout } from '../attack/architectureScoutLoop';
 import { scoutDefaultsForDepth, type ArchitectureInventory } from '../attack/architectureScoutProtocol';
+import { ApiClient, describeApiError } from '../api/client';
 
 function summarizeFiles(map: ProjectMap) {
     const files = Object.values(map.files);
@@ -205,9 +206,19 @@ export async function toolMap(ctx: ServerContext, args: any): Promise<unknown> {
 // background task — the foreground path only ever reads the map cache.
 
 interface ScoutTrackerEntry {
-    state: 'running' | 'blocked';
+    state: 'running' | 'blocked' | 'failed';
     startedAt: number;
+    /** For 'blocked'/'failed': the reason. For 'running': unused (see lastMessage). */
     lastNote?: string;
+    /** For 'failed': the concrete fix (login, top-up, network). */
+    remedy?: string;
+    /** For 'failed': whether a plain retry can succeed without user action. */
+    retryable?: boolean;
+    /** Live progress — updated by the background scout's onProgress. */
+    stepsDone?: number;
+    stepsMax?: number;
+    lastMessage?: string;
+    updatedAt?: number;
 }
 
 const activeScouts = new Map<string, ScoutTrackerEntry>();
@@ -249,6 +260,11 @@ function startBackgroundScout(
             let builtMap = map;
             if (!builtMap) {
                 // Cold cache: build the map first, then continue.
+                const cur = activeScouts.get(key);
+                if (cur && cur.state === 'running') {
+                    cur.lastMessage = 'Building project map...';
+                    cur.updatedAt = Date.now();
+                }
                 const built = await buildProjectMap({ workspaceRoot: ctx.workspaceRoot });
                 writeCache(ctx.workspaceRoot, built.map);
                 builtMap = built.map;
@@ -264,24 +280,65 @@ function startBackgroundScout(
                 projectMapVersion: builtMap.version,
                 onProgress: (steps, max, msg) => {
                     if (progressFn) progressFn(steps, max, msg);
+                    const cur = activeScouts.get(key);
+                    if (cur && cur.state === 'running') {
+                        cur.stepsDone = steps;
+                        cur.stepsMax = max;
+                        cur.lastMessage = msg;
+                        cur.updatedAt = Date.now();
+                    }
                 },
             });
             if (result.architecture) {
                 writeCachedArchitectureContext(ctx.workspaceRoot, result.architecture);
             }
             if (result.status === 'spawn_failed') {
-                const apiCode = result.apiCode || '';
-                activeScouts.set(key, { state: 'blocked', startedAt: Date.now(), lastNote: `${apiCode}: ${result.error || 'spawn failed'}` });
-                console.warn(`[Architecture] background scout failed (${depth}): ${result.error}`);
+                const poolBusy = result.apiCode === 'AGENT_SCAN_ALREADY_RUNNING' || result.statusCode === 409;
+                if (poolBusy) {
+                    activeScouts.set(key, { state: 'blocked', startedAt: Date.now(), lastNote: `${result.apiCode}: ${result.error || 'spawn failed'}` });
+                    console.warn(`[Architecture] background scout blocked (${depth}): ${result.error}`);
+                } else {
+                    const d = describeApiError({
+                        statusCode: result.statusCode,
+                        apiCode: result.apiCode,
+                        error: result.error,
+                    });
+                    const cur = activeScouts.get(key);
+                    if (cur) {
+                        cur.state = 'failed';
+                        cur.lastNote = d.error;
+                        cur.remedy = d.remedy;
+                        cur.retryable = d.retryable;
+                        cur.updatedAt = Date.now();
+                    } else {
+                        activeScouts.set(key, { state: 'failed', startedAt: Date.now(), lastNote: d.error, remedy: d.remedy, retryable: d.retryable });
+                    }
+                    console.warn(`[Architecture] background scout failed (${depth}): ${result.error}${d.remedy ? ` — ${d.remedy}` : ''}`);
+                }
             } else {
-                // 'running' entries clear on success; blocked entries persist
-                // for visibility (the stale guard makes them restartable).
+                // 'running' entries clear on success; blocked/failed entries persist
+                // for visibility (the poll branch reports them).
                 activeScouts.delete(key);
             }
         } catch (err: any) {
-            const apiCode = err?.apiCode || err?.code || '';
-            activeScouts.set(key, { state: 'blocked', startedAt: Date.now(), lastNote: `${apiCode}: ${err?.message || String(err)}` });
-            console.warn(`[Architecture] background scout threw (${depth}): ${err?.message || err}`);
+            const poolBusy = (err?.status === 409) || (err?.apiCode === 'AGENT_SCAN_ALREADY_RUNNING');
+            const d = describeApiError(err);
+            const cur = activeScouts.get(key);
+            if (poolBusy) {
+                const entry: ScoutTrackerEntry = cur
+                    ? { ...cur, state: 'blocked', lastNote: `${err?.apiCode || ''}: ${err?.message || String(err)}`, updatedAt: Date.now() }
+                    : { state: 'blocked', startedAt: Date.now(), lastNote: `${err?.apiCode || ''}: ${err?.message || String(err)}` };
+                activeScouts.set(key, entry);
+            } else if (cur) {
+                cur.state = 'failed';
+                cur.lastNote = d.error;
+                cur.remedy = d.remedy;
+                cur.retryable = d.retryable;
+                cur.updatedAt = Date.now();
+            } else {
+                activeScouts.set(key, { state: 'failed', startedAt: Date.now(), lastNote: d.error, remedy: d.remedy, retryable: d.retryable });
+            }
+            console.warn(`[Architecture] background scout threw (${depth}): ${err?.message || err}${d.remedy ? ` — ${d.remedy}` : ''}`);
         }
     })();
 }
@@ -289,6 +346,38 @@ function startBackgroundScout(
 /** Test-only accessor for the in-process scout tracker. */
 export function __scoutTrackerForTests(): Map<string, ScoutTrackerEntry> {
     return activeScouts;
+}
+
+/**
+ * Pre-flight + start for background scouts. Returns a failure response
+ * (never 'started') when auth is obviously broken — a missing token needs
+ * no network at all; anything else costs one GET /credits/balance (~300ms).
+ * Returns null when the scout was actually started.
+ */
+async function tryStartScout(
+    ctx: ServerContext,
+    depth: ArchitectureDepth,
+    map: ProjectMap | null,
+    progressFn: ((progress: number, total: number, message: string) => void) | undefined,
+): Promise<unknown | null> {
+    if (!ctx.apiToken) {
+        return {
+            status: 'failed',
+            depth,
+            error: 'Not authenticated — your SecureCode session is missing or expired.',
+            remedy: 'Run `securecode-mcp login` and retry.',
+            retryable: false,
+        };
+    }
+    try {
+        const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
+        await client.getJson('/credits/balance');
+    } catch (err: any) {
+        const d = describeApiError(err);
+        return { status: 'failed', depth, error: d.error, remedy: d.remedy, retryable: d.retryable };
+    }
+    startBackgroundScout(ctx, depth, map, progressFn);
+    return null;
 }
 
 /** Test-only reset for tracker isolation between tests. */
@@ -381,9 +470,17 @@ async function runArchitectureAction(
         });
 
         if (result.status === 'spawn_failed') {
-            const e: any = new Error(result.error || 'Architecture scout failed to start.');
+            const poolBusy = result.apiCode === 'AGENT_SCAN_ALREADY_RUNNING' || result.statusCode === 409;
+            const message = poolBusy
+                ? (result.error || 'Architecture scout failed to start.')
+                : (() => {
+                    const d = describeApiError({ statusCode: result.statusCode, apiCode: result.apiCode, error: result.error });
+                    return d.remedy ? `${d.error} ${d.remedy}` : d.error;
+                })();
+            const e: any = new Error(message);
             e.apiCode = result.apiCode || '';
-            e.statusCode = result.apiCode === 'AGENT_SCAN_ALREADY_RUNNING' ? 409 : result.apiCode === 'AGENT_SCAN_DAILY_LIMIT' ? 429 : undefined;
+            e.statusCode = result.statusCode
+                ?? (result.apiCode === 'AGENT_SCAN_ALREADY_RUNNING' ? 409 : result.apiCode === 'AGENT_SCAN_DAILY_LIMIT' ? 429 : undefined);
             throw e;
         }
 
@@ -412,8 +509,11 @@ async function runArchitectureAction(
         return {
             status: 'in-progress',
             depth,
+            progress: { done: entry!.stepsDone ?? 0, total: entry!.stepsMax ?? 0 },
+            lastMessage: entry!.lastMessage,
+            elapsedMs: Date.now() - entry!.startedAt,
             etaMinutes: depth === 'quick' ? 1 : depth === 'deep' ? 4 : 2,
-            hint: 'The architecture scout is running in the background. Retry this same call to retrieve the result when done.',
+            hint: 'The architecture scout is running in the background. Retry this same call in ~60-90 seconds to watch live progress and retrieve the result when done.',
         };
     }
     if (fresh && entry!.state === 'blocked') {
@@ -424,23 +524,40 @@ async function runArchitectureAction(
             hint: `Another operation holds the agent run pool (${entry!.lastNote || 'already running'}). Wait ~60-120 seconds and retry this call.`,
         };
     }
+    if (fresh && entry!.state === 'failed') {
+        // Report the previous failure AND immediately attempt a fresh start —
+        // if the underlying problem was fixed (e.g. re-login), this call
+        // heals; if not, the fresh pre-flight fails in <1s without drawing
+        // credits and the new failure is reported instead.
+        const restart = await tryStartScout(ctx, depth, map, progressFn);
+        if (restart) return restart;
+        return {
+            status: 'failed',
+            depth,
+            error: entry!.lastNote || 'The architecture scout failed to start.',
+            remedy: entry!.remedy,
+            retryable: entry!.retryable ?? false,
+            hint: 'This failure was from the previous attempt. A fresh attempt was just started — retry this call in ~60-90 seconds to watch its progress.',
+        };
+    }
 
     // No fresh entry → cold cache, a noCache refresh, or a stale tracker
     // entry: (re)start a background scout and return instantly. A cold
     // project map is built inside the background task before the scout.
-    startBackgroundScout(ctx, depth, map, progressFn);
+    const preflight = await tryStartScout(ctx, depth, map, progressFn);
+    if (preflight) return preflight;
     if (map) {
         return {
             status: 'started',
             depth,
             etaMinutes: depth === 'quick' ? 1 : depth === 'deep' ? 5 : 3,
-            hint: 'The scout is running in the background. Retry this same call in a few minutes to retrieve the cached result.',
+            hint: 'The scout is running in the background. Retry this same call in ~60-90 seconds to watch live progress and retrieve the cached result.',
         };
     }
     return {
         status: 'started',
         depth,
         etaMinutes: depth === 'quick' ? 1 : depth === 'deep' ? 5 : 3,
-        hint: 'The scout is running in the background (first run also builds the project map). Retry this same call in a few minutes to retrieve the cached result.',
+        hint: 'The scout is running in the background (first run also builds the project map). Retry this same call in ~60-90 seconds to watch live progress and retrieve the cached result.',
     };
 }

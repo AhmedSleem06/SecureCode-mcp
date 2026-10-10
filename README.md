@@ -180,6 +180,36 @@ The deterministic control plane enforces proof quality:
 
 Languages: JavaScript, TypeScript, Python (partial).
 
+## Tool Errors and Progress
+
+**Failures say what to do, not just what broke.** A missing or expired session
+returns `"Not authenticated — run securecode-mcp login and retry"`, not a bare
+`Unauthorized`. Insufficient credits name the amounts and point at the top-up
+page; daily limits say so; network failures say to check the connection.
+
+The architecture scout pre-flights auth on every start, so a doomed scout never
+reports `"started"`. If a background start fails anyway, the next poll returns:
+
+```json
+{ "status": "failed", "error": "Not authenticated — ...", "remedy": "Run `securecode-mcp login` and retry.", "retryable": false }
+```
+
+Retry after fixing the cause — the same call re-starts the scout automatically.
+Run-pool contention (409, another scan mid-flight) is still reported as
+`in-progress` with a wait hint, because waiting is the correct action there.
+
+**Progress works in every client, no `progressToken` needed.** The
+architecture tool is fast-return + poll by design (MCP clients time out long
+calls), so each poll response carries live progress:
+
+```json
+{ "status": "in-progress", "progress": { "done": 12, "total": 40 }, "lastMessage": "Reading apps/server/src/http.ts (step 12)", "elapsedMs": 214000, "etaMinutes": 2 }
+```
+
+Long synchronous tools (agent-scan, fix, attack) additionally emit standard MCP
+`notifications/progress` when the client sends a `progressToken` — that lights
+up automatically in clients that support it.
+
 ## Runtime Verification
 
 Some findings can't be proven in a sandbox — auth bypasses, runtime-dependent behavior, effects that only manifest in a live server. When an agent scan produces an HTTP-shaped finding that the sandbox couldn't prove, SecureCode can verify it against your **local dev server**:

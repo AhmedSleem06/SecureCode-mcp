@@ -1,4 +1,4 @@
-// Cache-guard tests for the agent-scan tool:
+﻿// Cache-guard tests for the agent-scan tool:
 //  - only fully-successful scans (status 'completed' + terminationReason
 //    'agent_finish') are written to the scan cache
 //  - incomplete/failed scans never write to cache
@@ -23,9 +23,13 @@ vi.mock('../src/attack/fixVerifyLoop', () => ({
     runFixVerifyLoop: vi.fn(),
 }));
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({ postJson: vi.fn() })),
-}));
+    };
+});
 
 vi.mock('../src/approval/broker', () => ({
     ApprovalBroker: vi.fn().mockImplementation(() => ({

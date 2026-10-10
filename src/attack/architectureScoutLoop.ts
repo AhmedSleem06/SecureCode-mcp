@@ -199,6 +199,7 @@ export async function runArchitectureScout(
                 costSpentUsd: 0,
                 error: startErr?.message || String(startErr),
                 apiCode: (startErr as any)?.apiCode || (startErr as any)?.code || '',
+                statusCode: (startErr as any)?.status ?? (startErr as any)?.statusCode,
             };
         }
 
@@ -438,6 +439,7 @@ export async function runArchitectureScout(
             costSpentUsd,
             error: err.message || String(err),
             apiCode: (err as any)?.apiCode || (err as any)?.code || '',
+            statusCode: (err as any)?.status ?? (err as any)?.statusCode,
         };
     }
 }

@@ -1,4 +1,4 @@
-// Integration tests for the agent-scan fix REGENERATION loop:
+﻿// Integration tests for the agent-scan fix REGENERATION loop:
 // a fix that fails verification is regenerated ONCE with the failure
 // feedback appended to the prompt, under the same approval.
 
@@ -19,9 +19,13 @@ vi.mock('../src/attack/fixVerifyLoop', () => ({
     runFixVerifyLoop: vi.fn(),
 }));
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({ postJson: vi.fn() })),
-}));
+    };
+});
 
 vi.mock('../src/approval/broker', () => ({
     ApprovalBroker: vi.fn().mockImplementation(() => ({

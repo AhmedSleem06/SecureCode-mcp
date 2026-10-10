@@ -1,4 +1,4 @@
-/**
+﻿/**
  * securecode.architecture — fast-return behavior (v0.10.4, extended v0.10.5).
  *
  * The scout runs 2-5 minutes, but MCP clients time out at ~60s. The tool
@@ -20,11 +20,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         postJson: vi.fn(),
+        getJson: vi.fn().mockResolvedValue({}),
     })),
-}));
+    };
+});
 
 vi.mock('../src/attack/architectureScoutExecutor', () => ({
     executeScoutAction: vi.fn().mockResolvedValue('mock observation'),
@@ -139,14 +144,14 @@ function makeProjectMap(): ProjectMap {
 let danglingRejects: Array<(reason?: any) => void> = [];
 
 function setPostJson(impl: (...args: any[]) => Promise<any>) {
-    (ApiClient as any).mockImplementation(() => ({ postJson: vi.fn(impl) }));
+    (ApiClient as any).mockImplementation(() => ({ postJson: vi.fn(impl), getJson: vi.fn().mockResolvedValue({}) }));
 }
 
 function mockScoutSuccess() {
     const fn = vi.fn()
         .mockResolvedValueOnce(START_RESPONSE)
         .mockResolvedValueOnce(makeFinishResponse());
-    (ApiClient as any).mockImplementation(() => ({ postJson: fn }));
+    (ApiClient as any).mockImplementation(() => ({ postJson: fn, getJson: vi.fn().mockResolvedValue({}) }));
     return fn;
 }
 
@@ -161,7 +166,7 @@ function mockScoutHangs() {
 function mockScoutStartRejected(apiCode: string, message: string, statusCode?: number) {
     const apiErr: any = new Error(message);
     apiErr.apiCode = apiCode;
-    if (statusCode !== undefined) apiErr.statusCode = statusCode;
+    if (statusCode !== undefined) { apiErr.statusCode = statusCode; apiErr.status = statusCode; }
     setPostJson(() => Promise.reject(apiErr));
     return apiErr;
 }

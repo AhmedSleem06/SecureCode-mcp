@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Architecture scout — API error-code propagation (v0.10.3).
  *
  * Production showed the scout's /agent/architecture/start being rejected
@@ -16,11 +16,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         postJson: vi.fn(),
     })),
-}));
+    };
+});
 
 import { runArchitectureScout } from '../src/attack/architectureScoutLoop';
 import { toolMap } from '../src/tools/map';

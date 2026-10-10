@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+﻿import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -38,13 +38,17 @@ const mockScanResponse = (filePath: string) => {
     };
 };
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         postJson: vi.fn().mockImplementation((_p: string, body: any) =>
             Promise.resolve(mockScanResponse(body.filePath || '')),
         ),
     })),
-}));
+    };
+});
 
 describe('securecode.scan-batch', () => {
     let workspace: string;

@@ -1,4 +1,4 @@
-// Vitest suite for the scan agent loop — large-file read recovery.
+﻿// Vitest suite for the scan agent loop — large-file read recovery.
 //
 // Regression coverage for the production blocked_read_recovery death
 // spiral on a >300-line file:
@@ -20,11 +20,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         postJson: vi.fn(),
     })),
-}));
+    };
+});
 
 vi.mock('../src/attack/agentScanExecutor', async (importOriginal) => {
     const actual = await importOriginal<typeof import('../src/attack/agentScanExecutor')>();

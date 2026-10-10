@@ -229,6 +229,8 @@ export interface ArchitectureScoutResult {
     error?: string;
     /** API error code (e.g. AGENT_SCAN_ALREADY_RUNNING) when the start call was rejected. */
     apiCode?: string;
+    /** HTTP status of the rejected start call (401 auth, 402 credits, 429 limit) — for describeApiError. */
+    statusCode?: number;
 }
 
 export function isScoutFinishAction(a: ArchitectureScoutAction): a is ArchitectureScoutFinishAction {

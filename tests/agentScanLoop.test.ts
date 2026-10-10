@@ -1,4 +1,4 @@
-// Vitest suite for the scan agent loop — termination conditions + transcript.
+﻿// Vitest suite for the scan agent loop — termination conditions + transcript.
 //
 // Covers:
 //   - Loop terminates on finish action
@@ -14,11 +14,15 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         postJson: vi.fn(),
     })),
-}));
+    };
+});
 
 vi.mock('../src/attack/agentScanExecutor', () => ({
     executeAction: vi.fn(),

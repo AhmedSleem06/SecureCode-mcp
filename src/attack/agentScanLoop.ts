@@ -17,7 +17,7 @@
  *   3. return result
  */
 
-import { ApiClient } from '../api/client';
+import { ApiClient, describeApiError } from '../api/client';
 import type { ServerContext } from '../mcp/types';
 import { executeAction, executeReadFileAction, executeFlowAction } from './agentScanExecutor';
 import { AgentTraceLogger } from './agentTrace';
@@ -1745,6 +1745,13 @@ export async function runAgentScan(
                 );
             } catch { /* best-effort — janitor will expire the run */ }
         }
+        // Auth (401), credit (402) and limit (429) failures get a plain-language
+        // sentence with a concrete remedy — a bare "Unauthorized" tells the
+        // agent nothing it can act on.
+        const described = describeApiError(err);
+        const errorMessage = described.remedy
+            ? `${err.message || String(err)} — ${described.remedy}`
+            : (err.message || String(err));
         return {
             status: 'failed',
             findings: [],
@@ -1754,7 +1761,7 @@ export async function runAgentScan(
             extensionsGranted,
             costSpentUsd,
             terminationReason: 'api_error',
-            error: err.message || String(err),
+            error: errorMessage,
             investigationNotes: [],
             coverageGaps: [],
         };

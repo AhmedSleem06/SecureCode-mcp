@@ -1,12 +1,16 @@
-// Unit tests for the enriched fix tool — evidence passthrough, patch-apply
+﻿// Unit tests for the enriched fix tool — evidence passthrough, patch-apply
 // validation, and syntax flag surfacing (previously dropped at the MCP
 // boundary).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({ postJson: vi.fn() })),
-}));
+    };
+});
 
 vi.mock('../src/approval/broker', () => ({
     ApprovalBroker: vi.fn().mockImplementation(() => ({

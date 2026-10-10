@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock runVerifyLoop to return sandbox-unavailable — simulates a user
 // without Docker/Deno. Then verify that toolAgentScan falls back to
@@ -12,11 +12,15 @@ vi.mock('../src/attack/agentScanLoop', () => ({
     runAgentScan: vi.fn(),
 }));
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         postJson: vi.fn(),
     })),
-}));
+    };
+});
 
 vi.mock('../src/approval/broker', () => ({
     ApprovalBroker: vi.fn().mockImplementation(() => ({

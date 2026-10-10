@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+﻿import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('../src/tools/map', () => ({
     toolMap: vi.fn(),
@@ -12,11 +12,15 @@ vi.mock('../src/attack/agentScanBatchSelection', () => ({
     selectAgentScanBatchFiles: vi.fn(),
 }));
 
-vi.mock('../src/api/client', () => ({
+vi.mock('../src/api/client', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
     ApiClient: vi.fn().mockImplementation(() => ({
         getJson: vi.fn().mockResolvedValue({ scanCredits: 1000, attackerCredits: 100 }),
     })),
-}));
+    };
+});
 
 import { toolAgentScanBatch } from '../src/tools/agentScanBatch';
 import { toolMap } from '../src/tools/map';

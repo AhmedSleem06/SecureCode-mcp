@@ -57,6 +57,69 @@ export class ApiClientError extends Error {
     }
 }
 
+export interface ApiErrorDescription {
+    /** Human-readable one-sentence description of what went wrong. */
+    error: string;
+    /** A concrete fix the user can perform (login, top-up, wait, network). */
+    remedy?: string;
+    /** Whether retrying the same call can succeed without user action. */
+    retryable: boolean;
+}
+
+/**
+ * Turn any API failure (ApiClientError, a thrown Error, or a spawn-failure
+ * descriptor with {statusCode, apiCode, error}) into a plain-language
+ * sentence with a concrete remedy. Tool layers use this so MCP clients
+ * see "run securecode-mcp login" instead of a bare "Unauthorized".
+ */
+export function describeApiError(err: unknown): ApiErrorDescription {
+    const status = (err as any)?.status ?? (err as any)?.statusCode;
+    const apiCode = (err as any)?.apiCode ?? (err as any)?.code ?? '';
+    const raw = (err as any)?.message ?? (err as any)?.error ?? String(err);
+
+    if (status === 401) {
+        return {
+            error: 'Not authenticated — your SecureCode session is missing or expired.',
+            remedy: 'Run `securecode-mcp login` and retry.',
+            retryable: false,
+        };
+    }
+    if (status === 402) {
+        const required = (err as any)?.required;
+        const available = (err as any)?.available ?? (err as any)?.balance;
+        const detail = typeof required === 'number'
+            ? ` (requires ${required}${typeof available === 'number' ? `, have ${available}` : ''} credits)`
+            : '';
+        return {
+            error: `Insufficient credits${detail}.`,
+            remedy: 'Top up at https://usesecurecode.tech and retry.',
+            retryable: false,
+        };
+    }
+    if (status === 429 || apiCode === 'AGENT_SCAN_DAILY_LIMIT') {
+        return {
+            error: raw,
+            remedy: 'Try again later (daily limits reset at midnight UTC).',
+            retryable: true,
+        };
+    }
+    if (status === 409 || apiCode === 'AGENT_SCAN_ALREADY_RUNNING') {
+        return {
+            error: raw,
+            remedy: 'Another scan holds the agent run pool — wait ~60-120 seconds and retry.',
+            retryable: true,
+        };
+    }
+    if (status === 0 || status === 503) {
+        return {
+            error: `Could not reach the API (${raw}).`,
+            remedy: 'Check your network connection or VPN and retry.',
+            retryable: true,
+        };
+    }
+    return { error: raw, retryable: true };
+}
+
 export interface ApiClientOptions {
     baseUrl: string;
     token: string;
