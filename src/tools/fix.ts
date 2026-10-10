@@ -20,6 +20,21 @@ export async function toolFix(ctx: ServerContext, args: any): Promise<unknown> {
         throw Object.assign(new Error('Provide code or filePath.'), { code: -32602 });
     }
 
+    // Line-range consistency guard: findings carry line numbers from the
+    // SCANNED file. When the caller sends an inline excerpt shorter than that
+    // file, no patch can ever apply — the fixer would inject the finding
+    // line as replace_range and run past the end of the provided code
+    // (production case 2026-10-10: 43-line excerpt + line-121 finding).
+    // Fail fast with an actionable reason; the calling agent retries with
+    // filePath and gets a real fix instead of a doomed generation.
+    const lineStartNum = Number(args.lineStart) || 0;
+    if (lineStartNum > 0 && lineStartNum > code.split('\n').length) {
+        return {
+            applied: false,
+            reason: `Finding line ${lineStartNum} is outside the provided code (${code.split('\n').length} lines). Finding line numbers refer to the file that was scanned — pass filePath (the full file) instead of an inline code excerpt, then retry.`,
+        };
+    }
+
     const summary = `Fix ${args.vulnerabilityType} at line ${args.lineStart}-${args.lineEnd}\n\nEvidence: ${args.evidenceSnippet?.substring(0, 200) || '(not provided)'}`;
 
     const broker = new ApprovalBroker();

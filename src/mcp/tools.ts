@@ -52,7 +52,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.fix',
         description:
-            'Generate a patch for a specific vulnerability finding. REQUIRES human approval before executing. Returns the fixed code + diff + explanation. Does NOT auto-apply; the human reviews and applies the patch. May pause up to 120 seconds waiting for human approval before generating.',
+            'Generate a patch for a specific vulnerability finding. REQUIRES human approval before executing. Returns the fixed code + diff + explanation. Does NOT auto-apply; the human reviews and applies the patch. May pause up to 120 seconds waiting for human approval before generating. IMPORTANT: when fixing a finding that came from a file scan, pass filePath (the full scanned file) — finding line numbers refer to the scanned file, and inline code excerpts shorter than that file cause line-range mismatches the fixer cannot apply.',
         inputSchema: {
             type: 'object',
             properties: {

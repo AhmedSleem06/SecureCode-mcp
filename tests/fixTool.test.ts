@@ -128,6 +128,45 @@ describe('toolFix — enriched generation', () => {
         expect(result.syntax.retried).toBe(true);
     });
 
+    describe('line-range consistency guard', () => {
+        it('returns an actionable result when the finding line exceeds the provided code — no approval, no API call', async () => {
+            // Production case 2026-10-10: a 43-line inline excerpt with a
+            // finding from line 121 of the full file. The tool must fail fast
+            // with a reason the calling agent can act on (retry with filePath)
+            // instead of generating a patch that can never apply.
+            const postJson = vi.fn().mockRejectedValue(new Error('API must not be called'));
+            (ApiClient as any).mockImplementation(() => ({ postJson }));
+
+            const result: any = await toolFix(ctx, {
+                ...BASE_ARGS,
+                lineStart: 121,
+                lineEnd: 121,
+            });
+
+            expect(result.applied).toBe(false);
+            expect(result.reason).toContain('line 121 is outside the provided code (4 lines)');
+            expect(result.reason).toContain('filePath');
+            expect(postJson).not.toHaveBeenCalled();
+            // The guard fires before the approval broker is ever constructed.
+            expect((ApprovalBroker as any).mock.results.length).toBe(0);
+        });
+
+        it('still passes lineStart=0 (no line info) straight through', async () => {
+            const postJson = mockFixResponse({
+                fixed_code: 'fixed',
+                replace_range: { start_line: 2, end_line: 2 },
+                syntax_valid: true,
+                syntax_checked: true,
+            });
+
+            const result: any = await toolFix(ctx, { ...BASE_ARGS, lineStart: 0, lineEnd: 0 });
+
+            expect(postJson).toHaveBeenCalledTimes(1);
+            expect(result.applied).toBe(false);
+            expect(result.fix).toBeDefined();
+        });
+    });
+
     describe('approval wiring', () => {
         function lastBrokerInstance(): any {
             const ctor = ApprovalBroker as any;
