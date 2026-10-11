@@ -416,9 +416,14 @@ async function cmdUpdate(): Promise<void> {
     console.log('Updating @securecode-ai/mcp to the latest published version...');
 
     // npm is npm.cmd on Windows and npm elsewhere; stdio:inherit streams
-    // npm's own progress output into the terminal.
+    // npm's own progress output into the terminal. shell:true is REQUIRED
+    // on Windows: Node >= 20 refuses to spawn .cmd/.bat files directly
+    // (EINVAL). The args are fixed literals, so shell quoting is safe.
     const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const child = spawn(npmBin, ['install', '-g', '@securecode-ai/mcp@latest'], { stdio: 'inherit' });
+    const child = spawn(npmBin, ['install', '-g', '@securecode-ai/mcp@latest'], {
+        stdio: 'inherit',
+        shell: process.platform === 'win32',
+    });
 
     const exitCode: number = await new Promise((resolve) => {
         child.on('close', (code) => resolve(code ?? 1));
