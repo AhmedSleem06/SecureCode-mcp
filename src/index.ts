@@ -19,6 +19,7 @@ Usage:
   securecode-mcp logout                        Remove stored credentials
   securecode-mcp scan <filePath> [--json]      Scan a single file for vulnerabilities
   securecode-mcp doctor                        Verify setup (credentials, API, scan)
+  securecode-mcp update                        Update to the latest version
   securecode-mcp version                       Show the installed version
   securecode-mcp --help                        Show this help (see also: --version)
 
@@ -305,6 +306,25 @@ async function cmdDoctor(): Promise<void> {
     console.log('═══════════════════════════════════════════════════');
     console.log('');
 
+    // 0. Version freshness (informational only — never fails the doctor)
+    try {
+        const res = await fetch('https://registry.npmjs.org/@securecode-ai/mcp/latest', {
+            signal: AbortSignal.timeout(10_000),
+        });
+        if (res.ok) {
+            const latest = (await res.json()) as { version?: string };
+            if (latest.version && latest.version !== VERSION) {
+                console.log(`⚠ Version: ${VERSION} installed, ${latest.version} available.`);
+                console.log('  Update with: securecode-mcp update');
+            } else if (latest.version) {
+                console.log(`✓ Version: ${VERSION} (up to date)`);
+            }
+        }
+    } catch {
+        console.log(`⚠ Version: ${VERSION} (could not reach the npm registry to check for updates)`);
+    }
+    console.log('');
+
     // 1. Check credentials
     if (!creds) {
         console.log('✗ Credentials: Not authenticated. Run: securecode-mcp login');
@@ -388,6 +408,44 @@ async function cmdDoctor(): Promise<void> {
     process.exit(allOk && creds ? 0 : 1);
 }
 
+async function cmdUpdate(): Promise<void> {
+    const { spawn } = require('child_process') as typeof import('child_process');
+    const pkgPath = path.join(__dirname, '..', 'package.json');
+
+    console.log(`Current version: ${VERSION}`);
+    console.log('Updating @securecode-ai/mcp to the latest published version...');
+
+    // npm is npm.cmd on Windows and npm elsewhere; stdio:inherit streams
+    // npm's own progress output into the terminal.
+    const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const child = spawn(npmBin, ['install', '-g', '@securecode-ai/mcp@latest'], { stdio: 'inherit' });
+
+    const exitCode: number = await new Promise((resolve) => {
+        child.on('close', (code) => resolve(code ?? 1));
+        child.on('error', (err) => {
+            console.error(`Could not run npm: ${err.message}`);
+            resolve(1);
+        });
+    });
+
+    if (exitCode !== 0) {
+        console.error('Update failed. If this is a permissions error, run the manual command:');
+        console.error('  npm install -g @securecode-ai/mcp@latest');
+        process.exit(exitCode);
+    }
+
+    // The running process has the OLD module in memory; read the freshly
+    // installed package.json from disk to report what actually landed.
+    const fresh = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version: string };
+    if (fresh.version === VERSION) {
+        console.log(`Already up to date: ${VERSION}`);
+    } else {
+        console.log(`Updated: ${VERSION} → ${fresh.version}`);
+    }
+    console.log('Restart your MCP client (opencode, Cursor, Claude Code, ...) to pick up the');
+    console.log('new version — a running MCP server keeps the old code until restarted.');
+}
+
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
     const command = args[0];
@@ -422,6 +480,9 @@ async function main(): Promise<void> {
             break;
         case 'doctor':
             await cmdDoctor();
+            break;
+        case 'update':
+            await cmdUpdate();
             break;
         default:
             console.error(`Unknown command: ${command}`);

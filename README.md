@@ -20,6 +20,7 @@ npx @securecode-ai/mcp scan src/app.ts
 securecode-mcp login              # Authenticate (email + OTP)
 securecode-mcp doctor             # Verify your setup works
 securecode-mcp scan src/app.ts    # Scan a file from the CLI
+securecode-mcp update             # Update to the latest version
 securecode-mcp serve              # Start the MCP server (for AI clients)
 ```
 
@@ -33,6 +34,7 @@ securecode-mcp logout                              Remove stored credentials
 securecode-mcp scan <filePath> [--json]            Scan a single file
   [--depth <fast|deep|agent>] [--workspace <path>]
 securecode-mcp doctor                              Verify setup (credentials, API, scan)
+securecode-mcp update                              Update to the latest published version
 securecode-mcp --help                              Show help
 ```
 
