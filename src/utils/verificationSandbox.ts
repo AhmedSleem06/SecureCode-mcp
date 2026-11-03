@@ -161,6 +161,16 @@ function probe(bin: string, args: string[] = ['--version']): boolean {
     if (probeCache.has(key)) return probeCache.get(key)!;
     let ok = false;
     try {
+        if (process.platform === 'win32' && bin === 'docker') {
+            const pipes = [
+                '\\\\.\\pipe\\dockerDesktopLinuxEngine',
+                '\\\\.\\pipe\\docker_engine',
+            ];
+            if (!pipes.some(p => fs.existsSync(p))) {
+                probeCache.set(key, false);
+                return false;
+            }
+        }
         let cmd = bin;
         let cmdArgs = args;
         const resolved = resolveWindowsBin(bin);

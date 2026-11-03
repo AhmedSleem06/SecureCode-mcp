@@ -113,9 +113,18 @@ export class AgentScanCoordinator {
 
         await lock.acquire(options?.signal, options?.maxWaitMs);
 
+        let operationTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-            return await operation();
+            const operationPromise = operation();
+            const MAX_OPERATION_MS = 15 * 60 * 1000;
+            const timeoutPromise = new Promise<never>((_, reject) => {
+                operationTimer = setTimeout(() => {
+                    reject(new Error(`Agent scan operation timed out after ${MAX_OPERATION_MS / 1000}s — releasing lock.`));
+                }, MAX_OPERATION_MS);
+            });
+            return await Promise.race([operationPromise, timeoutPromise]);
         } finally {
+            if (operationTimer) clearTimeout(operationTimer);
             lock.release();
             if (!lock.isActive && lock.queueLength === 0) {
                 this.locks.delete(workspaceRoot);
