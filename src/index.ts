@@ -14,7 +14,7 @@ function printUsage(): void {
 
 Usage:
   securecode-mcp serve [--workspace <path>]    Start the MCP stdio server
-  securecode-mcp login [--api-url <url>]        Authenticate via email + OTP
+  securecode-mcp login [--password] [--api-url <url>]  Authenticate via email code or password
   securecode-mcp status                        Show current auth status
   securecode-mcp logout                        Remove stored credentials
   securecode-mcp scan <filePath> [--json]      Scan a single file for vulnerabilities
@@ -106,7 +106,34 @@ async function cmdLogin(args: string[]): Promise<void> {
         process.exit(1);
     }
 
-    // Step 3: Send OTP
+    // Step 3: Choose login method — email code (default) or password.
+    const usePasswordFlag = args.includes('--password');
+    const methodAnswer = usePasswordFlag
+        ? '2'
+        : (await ask('Log in with [1] email code or [2] password? (1): ')).trim();
+    if (methodAnswer === '2' || methodAnswer.toLowerCase() === 'password') {
+        const password = await askHidden(rl, 'Password: ');
+        rl.close();
+        if (!password) {
+            console.error('Error: A password is required.');
+            process.exit(1);
+        }
+        console.log('Verifying...');
+        try {
+            const resp = await ApiClient.postJsonNoAuth(apiUrl, '/auth/login-password', { email, password });
+            if (!resp.token) {
+                console.error('Error: No token returned from login.');
+                process.exit(1);
+            }
+            saveLoginToken(resp.token, resp.plan || 'free', apiUrl);
+        } catch (err: any) {
+            console.error(`Error: ${err.message || err}`);
+            console.error('No password yet? Set one at https://usesecurecode.tech/auth?method=password ("Forgot password?").');
+            process.exit(1);
+        }
+        return;
+    }
+
     console.log('Sending verification code...');
     try {
         await ApiClient.postJsonNoAuth(apiUrl, '/auth/send-otp', { email });
@@ -143,7 +170,10 @@ async function cmdLogin(args: string[]): Promise<void> {
         process.exit(1);
     }
 
-    // Step 6: Store the token
+    saveLoginToken(token, plan, apiUrl);
+}
+
+function saveLoginToken(token: string, plan: string, apiUrl: string): void {
     const result = CredentialStore.save({
         apiToken: token,
         apiUrl,
@@ -162,6 +192,21 @@ async function cmdLogin(args: string[]): Promise<void> {
     }
     console.log('');
     console.log('You can now run: securecode-mcp serve --workspace /path/to/project');
+}
+
+function askHidden(rl: any, question: string): Promise<string> {
+    return new Promise((resolve) => {
+        const output = rl.output as NodeJS.WriteStream;
+        const originalWrite = rl._writeToOutput?.bind(rl);
+        rl._writeToOutput = (s: string) => {
+            if (s.startsWith(question)) output.write(question);
+            else if (s.includes('\n') || s.includes('\r')) output.write('\n');
+        };
+        rl.question(question, (answer: string) => {
+            if (originalWrite) rl._writeToOutput = originalWrite;
+            resolve(answer);
+        });
+    });
 }
 
 function cmdStatus(): void {
