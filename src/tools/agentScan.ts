@@ -224,8 +224,6 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
 }
 
 async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknown> {
-    const _diag = (msg: string) => { try { require('fs').appendFileSync(require('path').join(ctx.workspaceRoot, '.securecode', 'agent-diag.log'), `${new Date().toISOString()} [tool] ${msg}\n`); } catch {} };
-    _diag('toolAgentScanInner START');
     const progress = args._progress as ((progress: number, total: number, message: string) => void) | undefined;
     const skipFix = !!args._skipFix;
 
@@ -277,7 +275,6 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     }
 
     // 2. Build endpoint context + related files from the project map
-    _diag('building endpoint context + related files');
     let endpointContext: any[] = [];
     let relatedFiles: any[] = [];
     if (filePath) {
@@ -285,16 +282,14 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
             const absPath = path.isAbsolute(filePath)
                 ? filePath
                 : path.join(ctx.workspaceRoot, filePath);
-            _diag('calling getEndpointContextForFile + getRelatedFilesForFile');
             const [eps, rels] = await Promise.all([
                 getEndpointContextForFile(absPath, ctx.workspaceRoot),
                 getRelatedFilesForFile(absPath, ctx.workspaceRoot),
             ]);
-            _diag(`endpoint context: ${eps.length} eps, ${rels.length} related files`);
             endpointContext = eps;
             relatedFiles = rels;
         } catch {
-            _diag('endpoint context failed (best-effort)');
+            // best-effort — proceed without context
         }
     }
 
@@ -304,7 +299,6 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     // the agent to focus on changed files and their dependents.
     let scope: AgentScanScope | undefined;
     const baseRef = args.baseRef as string | undefined;
-    _diag(`baseRef=${baseRef || 'none'}`);
     if (baseRef) {
         try {
             const diffResult = await getGitChangedFiles(ctx.workspaceRoot, baseRef, args.headRef);
@@ -345,7 +339,6 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     //     pre-v22 entries): filter the cached findings against current
     //     memory before returning.
     //   - On cache miss: pass the memory into the agent target as before.
-    _diag('loading workspace memory');
     let workspaceMemory: string | undefined;
     let memoryFingerprint = '';
     let falsePositives: Array<{ findingType: string; evidenceHash: string }> = [];
@@ -428,7 +421,6 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     // (workspaceMemory was loaded above)
 
     // 3b. Auto-load a cached architecture context (if present and valid)
-    _diag('loading architecture context');
     // so the vulnerability investigator starts with project-wide context
     // instead of having to discover "where is auth?", "what's the data
     // layer?" from scratch. The architecture context is produced by
@@ -472,7 +464,6 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
         architectureContext: architectureContextStr,
     };
 
-    _diag('calling runAgentScan');
     const agentResult = await runAgentScan(ctx, target, {
         signal: (args as any)._signal as AbortSignal | undefined,
         onProgress: (steps, max, msg) => {

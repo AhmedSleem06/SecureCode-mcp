@@ -142,21 +142,16 @@ export async function runAgentScan(
         }
         const startResp = startValidation.value;
         activeRunId = startResp.runId;
-        const _diagLog = (msg: string) => { try { require('fs').appendFileSync(require('path').join(ctx.workspaceRoot, '.securecode', 'agent-diag.log'), `${new Date().toISOString()} ${msg}\n`); } catch {} };
-        _diagLog(`start received, runId=${startResp.runId}`);
 
         const trace = new AgentTraceLogger(ctx.workspaceRoot, startResp.runId);
         trace.logRunStarted();
-        _diagLog(`trace logger created`);
 
-        _diagLog(`creating LLM health monitor`);
         const llmHealth = createLlmHealthMonitor();
 
         // Authoritative scan state — the single source of truth for phase,
         // budget, recovery, and lifecycle. Local counters below are kept in
         // sync with this state until they are fully replaced.
         const scanState = createScanRunState(startResp.runId, target, budget);
-        _diagLog(`scan state created`);
         scanState.budget.wallClockMs = wallClockMs;
         const qualityTracker = new QualityMetricsTracker();
 
@@ -179,7 +174,6 @@ export async function runAgentScan(
         // resolve the actual implementation so the investigation can follow
         // the real code, not just signatures.
         let implementationResolution: string | null = null;
-        _diagLog(`checking implementation resolution`);
         try {
             const fs = require('fs');
             const absPath = require('path').resolve(ctx.workspaceRoot, target.filePath);
@@ -195,7 +189,6 @@ export async function runAgentScan(
                 }
             }
         } catch { /* best-effort */ }
-        _diagLog(`implementation resolution done`);
 
         // Control plane infrastructure — evidence ledger, work items, handler
         // inventory, candidate store, and scheduler work together to ensure
@@ -290,12 +283,10 @@ export async function runAgentScan(
         const readFileCounts = new Map<string, number>();
         // Pre-compute function boundaries for chunk alignment
         let functionBoundaries: { name: string; startLine: number; endLine: number }[] | undefined;
-        _diagLog(`extracting function boundaries`);
         try {
             const fb = await extractFunctionBoundaries(target.fileContent, target.filePath);
             if (fb) functionBoundaries = fb;
         } catch { /* best-effort */ }
-        _diagLog(`function boundaries done`);
         // Dynamic read cap based on file size:
         //   < 200 lines  → 5 reads (small file, 5 chunks is enough)
         //   < 1000 lines  → 8 reads (medium file)
@@ -520,7 +511,6 @@ export async function runAgentScan(
             });
         };
 
-        _diagLog(`entering main loop`);
         while (true) {
             // Wall clock check
             if (Date.now() - startTime > wallClockMs) {
@@ -644,7 +634,6 @@ export async function runAgentScan(
                 }
             }
 
-            _diagLog(`sending step ${stepsTaken + 1}`);
             let stepResp: AgentScanStepResponse;
             try {
                 const stepRespRaw = await client.postJson<AgentStepResponse>('/agent/scan/step', stepReq, options.signal);
