@@ -50,6 +50,7 @@ export interface FixVerifyLoopOptions {
     signal?: AbortSignal;
     budgetTracker?: VerifyBudgetTracker;
     onProgress?: (round: number, maxRounds: number, message: string) => void;
+    runId?: string;
 }
 
 export interface FixVerifyLoopResult {
@@ -60,6 +61,7 @@ export interface FixVerifyLoopResult {
     roundsUsed: number;
     fixedCodeHash: string;
     testOutput?: string;
+    scanBudgetExhausted?: boolean;
 }
 
 const PER_FIX_MAX_ROUNDS = 3;
@@ -111,10 +113,24 @@ export async function runFixVerifyLoop(opts: FixVerifyLoopOptions): Promise<FixV
         signal: opts.signal,
         verificationPhase: 'fix',
         onProgress: opts.onProgress,
+        ...(opts.runId ? { runId: opts.runId } : {}),
     });
 
     // 5. Map the verify loop result to a fix verification status.
     const fixedVerdict = result.verdict;
+
+    if (result.budgetExhaustedReason === 'scan-budget') {
+        return {
+            status: 'inconclusive',
+            reason: result.reason,
+            originalVerdict: opts.originalVerdict,
+            fixedVerdict,
+            roundsUsed: result.roundsUsed,
+            fixedCodeHash,
+            testOutput: result.testOutput,
+            scanBudgetExhausted: true,
+        };
+    }
 
     // Handle special sub-verdicts that short-circuit the closure decision.
     if (result.subVerdict === 'sandbox-unavailable') {

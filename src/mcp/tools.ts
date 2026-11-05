@@ -216,7 +216,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.agent-scan',
         description:
-            'Agent-mode scan: an AI investigator that reads files, traces data flows, checks guards, and compares endpoint policies to find vulnerabilities. Slower but deeper than a deep scan. The agent replaces the Scout phase and its findings are verified by the Juror. Uses 5 scan credits. Best for complex access-control and cross-file vulnerabilities. Supports diff-aware scoping: pass baseRef to focus the scan on changed files and their blast radius (files that import or call the changed files). LONG-RUNNING: typically 2-8 minutes per file. Tell the user it is running and roughly how long it takes BEFORE calling. If your client times out, the scan continues in the background and caches its result — retry the same call to retrieve it. A 409 \'already running\' means it is still executing: wait ~60-120 seconds and retry.',
+            'Agent-mode scan: an AI investigator that reads files, traces data flows, checks guards, and compares endpoint policies to find vulnerabilities. Slower but deeper than a deep scan. The agent replaces the Scout phase and its findings are verified by the Juror. An agent scan uses 5 credits; large files can use up to 15 (extended 2 credits at a time). Unused extension credits are refunded. Best for complex access-control and cross-file vulnerabilities. Supports diff-aware scoping: pass baseRef to focus the scan on changed files and their blast radius (files that import or call the changed files). LONG-RUNNING: typically 2-8 minutes per file. Tell the user it is running and roughly how long it takes BEFORE calling. If the scan is not finished within ~50 seconds, this call returns { status: \'running\', jobId } while the scan keeps running in the background — call securecode.job-status with that jobId in ~60 seconds to get the result (or use securecode.agent-scan-start to get a jobId right away). A \'busy\' response names the scan already running in this workspace.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -439,7 +439,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.agent-scan-batch',
         description:
-            'Maps the project and scans the selected top files sequentially. Do not call securecode.agent-scan separately in parallel for the same batch. Stops after the first incomplete or failed file and reports remaining files as not-started. Uses architecture scout to identify the most security-relevant files, then runs agent-scan on each one in order. Performs a credit preflight check before starting: if insufficient credits for the full batch (architecture + scans + verification), returns preflight-failed without starting any paid operation. Each scan costs 5 scan credits. The architecture scout costs 5/10/20 credits (quick/standard/deep). Result categories: completed (clean finish), incomplete (cut short with coverage gaps), failed (operational error), not-started (selected but never attempted), preflight-failed (insufficient credits). LONG-RUNNING: typically 10-30 minutes for topN=5 (scout 2-5 min + 2-6 min per file, sequential). Tell the user it is running and roughly how long BEFORE calling. If your client times out, the batch continues in the background — completed files are served from cache on retry and failed files re-scan fresh. A 409 \'already running\' means it is still executing: wait ~60-120 seconds and retry. Architecture scouts share the agent-scan daily budget (10 runs/day). On daily-limit-reached, completed files remain retrievable from cache via individual agent-scan calls without noCache.',
+            'Maps the project and scans the selected top files sequentially. Do not call securecode.agent-scan separately in parallel for the same batch. Stops after the first incomplete or failed file and reports remaining files as not-started. Uses architecture scout to identify the most security-relevant files, then runs agent-scan on each one in order. Performs a credit preflight check before starting: if insufficient credits for the full batch (architecture + 5 credits per file), returns preflight-failed without starting any paid operation. An agent scan uses 5 credits; large files can use up to 15 (extended 2 credits at a time). Unused extension credits are refunded. Exploit verification is included in each scan budget. The architecture scout costs 5/10/20 credits (quick/standard/deep). Result categories: completed (clean finish), incomplete (cut short with coverage gaps), failed (operational error), not-started (selected but never attempted), preflight-failed (insufficient credits). LONG-RUNNING: typically 10-30 minutes for topN=5 (scout 2-5 min + 2-6 min per file, sequential). Tell the user it is running and roughly how long BEFORE calling. If the batch is not finished within ~50 seconds, this call returns { status: \'running\', jobId } while the batch keeps running in the background — call securecode.job-status with that jobId about every 60 seconds to get the result (or use securecode.agent-scan-batch-start to get a jobId right away). A \'busy\' response names the scan already running in this workspace. Architecture scouts share the agent-scan daily budget (10 runs/day). On daily-limit-reached, completed files remain retrievable from cache via individual agent-scan calls without noCache.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -473,6 +473,65 @@ const ALL_TOOLS: ToolDef[] = [
         },
     },
 ];
+
+function inputSchemaOf(name: string): Record<string, unknown> {
+    const tool = ALL_TOOLS.find(t => t.name === name);
+    if (!tool) throw new Error(`Tool ${name} is not defined.`);
+    return tool.inputSchema;
+}
+
+ALL_TOOLS.push(
+    {
+        name: 'securecode.agent-scan-start',
+        description:
+            'Start an agent-mode scan (same inputs and credit use as securecode.agent-scan) as a background job and return IMMEDIATELY with { jobId, status, estimatedMinutes }. Use this for long scans so your client never times out. Then call securecode.job-status with the jobId about every 60 seconds until status is completed (the full result is included), failed, cancelled, or interrupted. If the same file is already being scanned, the running job is returned instead of starting a second one; if a different scan is running in this workspace, returns status "busy" with runningJobId.',
+        inputSchema: inputSchemaOf('securecode.agent-scan'),
+    },
+    {
+        name: 'securecode.agent-scan-batch-start',
+        description:
+            'Start securecode.agent-scan-batch (same inputs and credit use) as a background job and return IMMEDIATELY with { jobId, status, estimatedMinutes }. A batch typically takes 10-30 minutes. Call securecode.job-status with the jobId about every 60 seconds until it finishes; the full batch result is included when completed. Returns status "busy" with runningJobId if another scan is running in this workspace.',
+        inputSchema: inputSchemaOf('securecode.agent-scan-batch'),
+    },
+    {
+        name: 'securecode.job-status',
+        description:
+            'Check a background scan job started by securecode.agent-scan-start, securecode.agent-scan-batch-start, or a long securecode.agent-scan / agent-scan-batch call that returned { status: "running", jobId }. Returns status (running, completed, failed, cancelled, interrupted) and progress; when completed it includes the full scan result. Omit jobId to get the most recent job in this workspace. Free, read-only. While status is running, check again in ~60 seconds.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                jobId: {
+                    type: 'string',
+                    description: 'Job id returned by a start call. Omit for the latest job in this workspace.',
+                },
+            },
+        },
+    },
+    {
+        name: 'securecode.job-cancel',
+        description:
+            'Cancel a running background scan job. The scan stops at the next safe point and findings so far are kept in the job result. Check securecode.job-status afterwards for the final state.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                jobId: {
+                    type: 'string',
+                    description: 'Job id to cancel.',
+                },
+            },
+            required: ['jobId'],
+        },
+    },
+    {
+        name: 'securecode.job-list',
+        description:
+            'List recent background scan jobs in this workspace (last 50, up to 7 days) with their status and progress, newest first. Results are not included; use securecode.job-status for a job\'s full result.',
+        inputSchema: {
+            type: 'object',
+            properties: {},
+        },
+    },
+);
 
 export const TOOLS: ToolDef[] = ATTACK_ENABLED
     ? ALL_TOOLS

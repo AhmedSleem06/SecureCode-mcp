@@ -170,6 +170,11 @@ describe('SecureCode MCP — protocol conformance', () => {
                         why_secure: 'Input is no longer concatenated',
                         confidence: 95,
                     }));
+                } else if (req.url === '/agent/scan/start') {
+                    setTimeout(() => {
+                        res.writeHead(503, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'unavailable in test' }));
+                    }, 4000);
                 } else {
                     res.writeHead(404);
                     res.end('{}');
@@ -182,6 +187,7 @@ describe('SecureCode MCP — protocol conformance', () => {
             SECURECODE_API_TOKEN: MCP_TOKEN,
             SECURECODE_API_URL: mockApi.baseUrl,
             WORKSPACE_ROOT: workspace,
+            SECURECODE_TOOL_WAIT_MS: '300',
         });
     });
 
@@ -230,10 +236,23 @@ describe('SecureCode MCP — protocol conformance', () => {
             'securecode.review-findings',
             'securecode.decide-finding',
             'securecode.clear-finding-reviews',
+            'securecode.agent-scan-start',
+            'securecode.agent-scan-batch-start',
+            'securecode.job-status',
+            'securecode.job-cancel',
+            'securecode.job-list',
         ]));
         expect(names).not.toContain('securecode.attack');
         expect(names).not.toContain('securecode.map');
-        expect(names.length).toBe(16);
+        expect(names.length).toBe(21);
+    });
+
+    it('job start tools reuse the legacy input schemas', async () => {
+        const res = await client.request('tools/list');
+        const byName = (n: string) => res.tools.find((t: any) => t.name === n);
+        expect(byName('securecode.agent-scan-start').inputSchema).toEqual(byName('securecode.agent-scan').inputSchema);
+        expect(byName('securecode.agent-scan-batch-start').inputSchema).toEqual(byName('securecode.agent-scan-batch').inputSchema);
+        expect(byName('securecode.job-cancel').inputSchema.required).toEqual(['jobId']);
     });
 
     it('every tool carries a valid JSON Schema', async () => {
@@ -351,6 +370,37 @@ describe('SecureCode MCP — protocol conformance', () => {
             // surfaces as an error, not a process crash
             expect(err).toBeDefined();
         }
+    });
+
+    it('legacy agent-scan returns running + jobId after the wait window, and job tools track it', async () => {
+        const res = await client.callTool('securecode.agent-scan', { filePath: 'vuln.js', noCache: true });
+        const payload = JSON.parse(res.content[0].text);
+        expect(payload.status).toBe('running');
+        expect(payload.jobId).toMatch(/^job-/);
+        expect(payload.next).toMatch(/securecode\.job-status/);
+
+        const status = JSON.parse((await client.callTool('securecode.job-status', { jobId: payload.jobId })).content[0].text);
+        expect(status.jobId).toBe(payload.jobId);
+        expect(status.kind).toBe('agent-scan');
+        expect(['running', 'failed']).toContain(status.status);
+
+        const latest = JSON.parse((await client.callTool('securecode.job-status', {})).content[0].text);
+        expect(latest.jobId).toBe(payload.jobId);
+
+        const list = JSON.parse((await client.callTool('securecode.job-list', {})).content[0].text);
+        expect(list.jobs.map((j: any) => j.jobId)).toContain(payload.jobId);
+
+        if (status.status === 'running') {
+            const busy = JSON.parse((await client.callTool('securecode.agent-scan-start', { code: 'eval(x)', language: 'javascript' })).content[0].text);
+            expect(busy.status).toBe('busy');
+            expect(busy.runningJobId).toBe(payload.jobId);
+
+            const again = JSON.parse((await client.callTool('securecode.agent-scan-start', { filePath: 'vuln.js' })).content[0].text);
+            expect(again.jobId).toBe(payload.jobId);
+            expect(again.alreadyRunning).toBe(true);
+        }
+
+        expect(fs.existsSync(path.join(workspace, '.securecode', 'jobs', `${payload.jobId}.json`))).toBe(true);
     });
 
     it('closing stdin shuts the server down cleanly with exit code 0', async () => {

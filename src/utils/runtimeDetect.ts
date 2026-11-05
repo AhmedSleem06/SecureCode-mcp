@@ -267,7 +267,9 @@ export function detectRuntime(workspaceRoot: string, filePath?: string): Runtime
     };
 }
 
-export function computeRelativeImportPath(testFileDir: string, targetFilePath: string): string {
+const EXTENSION_SAFE_RUNNERS = new Set(['node', 'deno', 'tsx', 'pnpm-tsx', 'yarn-tsx', 'bun']);
+
+export function computeRelativeImportPath(testFileDir: string, targetFilePath: string, runner?: string): string {
     const rel = path.relative(testFileDir, targetFilePath);
     const normalized = rel.replace(/\\/g, '/');
 
@@ -276,6 +278,7 @@ export function computeRelativeImportPath(testFileDir: string, targetFilePath: s
         return fromRoot.startsWith('.') ? fromRoot : `./${fromRoot}`;
     }
 
-    const withoutExt = normalized.replace(/\.(ts|tsx|js|jsx|mjs|cjs)$/, '');
-    return withoutExt.startsWith('.') ? withoutExt : `./${withoutExt}`;
+    const keepExt = runner === undefined || EXTENSION_SAFE_RUNNERS.has(runner);
+    const spec = keepExt ? normalized : normalized.replace(/\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/, '');
+    return spec.startsWith('.') ? spec : `./${spec}`;
 }

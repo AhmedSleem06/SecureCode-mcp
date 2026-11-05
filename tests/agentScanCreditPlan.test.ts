@@ -91,16 +91,43 @@ describe('calculateBatchCredits', () => {
         expect(plan.verificationCredits).toBe(30);
     });
 
-    it('default policy is verification-bounded with 10 per file', () => {
+    it('default policy is base-only (verification draws from each scan budget)', () => {
         const plan = calculateBatchCredits({
             depth: 'standard',
             architectureCacheHit: true,
             uncachedFileCount: 2,
             cachedFileCount: 0,
         });
-        expect(plan.verificationCredits).toBe(20);
-        expect(plan.breakdown.policy).toBe('verification-bounded');
-        expect(plan.breakdown.verificationCreditsPerFile).toBe(10);
+        expect(plan.verificationCredits).toBe(0);
+        expect(plan.breakdown.policy).toBe('base-only');
+        expect(plan.total).toBe(10);
+    });
+
+    it('plans 5 credits per file and warns that large files can use up to 15 each', () => {
+        const plan = calculateBatchCredits({
+            depth: 'standard',
+            architectureCacheHit: false,
+            uncachedFileCount: 3,
+            cachedFileCount: 0,
+        });
+        expect(plan.agentRunCredits).toBe(15);
+        expect(plan.total).toBe(10 + 15);
+        expect(plan.maxTotal).toBe(10 + 45);
+        expect(plan.breakdown.creditsPerRun).toBe(5);
+        expect(plan.breakdown.maxCreditsPerRun).toBe(15);
+        expect(plan.warning).toContain('up to 15 credits each');
+        expect(plan.warning).toContain('up to 55 total');
+    });
+
+    it('no warning when nothing needs scanning', () => {
+        const plan = calculateBatchCredits({
+            depth: 'standard',
+            architectureCacheHit: true,
+            uncachedFileCount: 0,
+            cachedFileCount: 2,
+        });
+        expect(plan.warning).toBeUndefined();
+        expect(plan.maxTotal).toBe(0);
     });
 
     it('fix reserve is always zero', () => {
@@ -141,6 +168,7 @@ describe('calculateBatchCredits', () => {
             architectureCacheHit: true,
             uncachedFileCount: 1,
             cachedFileCount: 0,
+            policy: 'verification-bounded',
             verificationCreditsPerFile: 100,
         });
         expect(plan.breakdown.verificationCreditsPerFile).toBe(60);

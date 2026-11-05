@@ -1,6 +1,7 @@
 import * as http from 'http';
 import * as https from 'https';
 import type { ApiError, ApiErrorDetails } from './types';
+import { currentApiRunObserver, notifyApiRunObserver } from '../jobs/runContext';
 
 const DEFAULT_TIMEOUT_MS = 1_200_000;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
@@ -142,6 +143,7 @@ export class ApiClient {
         const payload = JSON.stringify(body);
         const parsed = new URL(url);
         const lib = parsed.protocol === 'https:' ? https : http;
+        const runObserver = currentApiRunObserver();
 
         return new Promise<T>((resolve, reject) => {
             const req = lib.request(
@@ -179,6 +181,7 @@ export class ApiClient {
                         }
                         const status = res.statusCode ?? 0;
                         if (status >= 200 && status < 300) {
+                            if (runObserver) notifyApiRunObserver(runObserver, path, body, data);
                             resolve(data as T);
                         } else {
                             const details: ApiErrorDetails = {

@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runVerifyLoop } from '../src/attack/verifyLoop';
 import type { ApiClient } from '../api/client';
 
+vi.mock('../src/utils/verificationSandbox', () => ({
+    detectSandbox: () => ({ name: 'deno' }),
+}));
+
 vi.mock('../src/utils/localTestRunner', () => ({
     runLocalTest: vi.fn(),
 }));

@@ -12,6 +12,8 @@ import { validateVerifyGenerateResponse, validateVerifyAnalyzeResponse } from '.
 import { parseProofMarker, type ProofRunResult } from './proofTypes';
 import { evaluateProofGate, buildProofEvidence } from './proofGate';
 import { runMutationTest } from './mutationTest';
+import { detectSandbox } from '../utils/verificationSandbox';
+import { isAgentScanBudgetExhausted, VERIFY_BUDGET_EXHAUSTED_REASON } from './agentScanCredits';
 
 export interface VerifyFinding {
     type: string;
@@ -42,6 +44,7 @@ export interface VerifyLoopOptions {
      * Passed to the API so the verifier prompt can be adjusted accordingly.
      */
     verificationPhase?: 'original' | 'fix';
+    runId?: string;
 }
 
 export interface VerifyLoopResult {
@@ -91,6 +94,19 @@ export interface VerifyLoopResult {
 
 const PER_FINDING_MAX_ROUNDS = 12;
 
+function scanBudgetExhaustedResult(roundsUsed: number, testScript: string, testOutput: string, backend?: string): VerifyLoopResult {
+    return {
+        verdict: 'INCONCLUSIVE',
+        reason: VERIFY_BUDGET_EXHAUSTED_REASON,
+        roundsUsed,
+        testScript,
+        testOutput,
+        ...(backend ? { backend } : {}),
+        budgetExhaustedReason: 'scan-budget',
+        subVerdict: 'budget-exhausted',
+    };
+}
+
 export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoopResult> {
     const { finding, filePath, code, relatedFiles, workspaceRoot, language, client, onProgress } = opts;
     const tracker = opts.budgetTracker;
@@ -107,8 +123,9 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
     const runtimeInfo = detectRuntime(workspaceRoot, filePath || undefined);
     const testFileDir = path.join(workspaceRoot, '.securecode');
     const relativeImportPath = filePath
-        ? computeRelativeImportPath(testFileDir, path.isAbsolute(filePath) ? filePath : path.join(workspaceRoot, filePath))
+        ? computeRelativeImportPath(testFileDir, path.isAbsolute(filePath) ? filePath : path.join(workspaceRoot, filePath), runtimeInfo.runner)
         : '';
+    const sandboxBackendName = detectSandbox()?.name;
 
     if (!runtimeInfo.canRunLocally) {
         return {
@@ -165,28 +182,36 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
 
         onProgress?.(round, maxRounds, `Round ${round}: generating test...`);
 
-        const genRespRaw = await client.postJson<VerifyGenerateResponse>('/verify/generate', {
-            code,
-            language,
-            vulnerabilityType: finding.type,
-            line: finding.line,
-            lineEnd: finding.lineEnd,
-            evidence: finding.evidence,
-            why: finding.why,
-            filePath,
-            relatedFiles,
-            previousErrors: previousErrors.length > 0 ? previousErrors : undefined,
-            projectRuntime: runtimeInfo.runtime,
-            suggestedRunner: runtimeInfo.runner,
-            framework: runtimeInfo.framework,
-            frameworkVersion: runtimeInfo.frameworkVersion,
-            testabilityTier: runtimeInfo.testabilityTier,
-            packageManager: runtimeInfo.packageManager,
-            testFileDir: '.securecode',
-            relativeImportPath,
-            depsInstalled: runtimeInfo.depsInstalled,
-            verificationPhase,
-        });
+        let genRespRaw: VerifyGenerateResponse;
+        try {
+            genRespRaw = await client.postJson<VerifyGenerateResponse>('/verify/generate', {
+                code,
+                language,
+                vulnerabilityType: finding.type,
+                line: finding.line,
+                lineEnd: finding.lineEnd,
+                evidence: finding.evidence,
+                why: finding.why,
+                filePath,
+                relatedFiles,
+                previousErrors: previousErrors.length > 0 ? previousErrors : undefined,
+                projectRuntime: runtimeInfo.runtime,
+                suggestedRunner: runtimeInfo.runner,
+                framework: runtimeInfo.framework,
+                frameworkVersion: runtimeInfo.frameworkVersion,
+                testabilityTier: runtimeInfo.testabilityTier,
+                packageManager: runtimeInfo.packageManager,
+                testFileDir: '.securecode',
+                relativeImportPath,
+                depsInstalled: runtimeInfo.depsInstalled,
+                verificationPhase,
+                ...(sandboxBackendName ? { sandboxBackend: sandboxBackendName } : {}),
+                ...(opts.runId ? { runId: opts.runId } : {}),
+            });
+        } catch (err) {
+            if (isAgentScanBudgetExhausted(err)) return scanBudgetExhaustedResult(round - 1, lastTestScript, lastTestOutput);
+            throw err;
+        }
         if (tracker) tracker.recordLlmCall((genRespRaw as any).costUsd ?? 0);
 
         const genValidation = validateVerifyGenerateResponse(genRespRaw);
@@ -252,18 +277,18 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             };
         }
         if (testResult.verdict === 'blocked') {
-            // Static safety check rejected the script. Don't retry — the
-            // LLM would have to emit a less dangerous script, but anything
-            // that trips the blocklist is almost certainly trying to do
-            // something we don't want.
-            return {
-                verdict: 'INCONCLUSIVE',
-                reason: `Test script rejected by safety check: ${testResult.output}`,
-                roundsUsed: round,
-                testScript: lastTestScript,
-                testOutput: lastTestOutput,
-                subVerdict: 'blocked',
-            };
+            previousErrors.push(`Round ${round}: test script rejected by the static safety check — ${testResult.output.slice(0, 300)}. Remove that construct (payload text inside string literals is fine).`);
+            if (round >= maxRounds) {
+                return {
+                    verdict: 'INCONCLUSIVE',
+                    reason: `Test script rejected by safety check: ${testResult.output}`,
+                    roundsUsed: round,
+                    testScript: lastTestScript,
+                    testOutput: lastTestOutput,
+                    subVerdict: 'blocked',
+                };
+            }
+            continue;
         }
         if (testResult.verdict === 'cancelled') {
             // User aborted the scan. Do NOT retry — return immediately so the
@@ -295,19 +320,26 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
 
         onProgress?.(round, maxRounds, `Round ${round}: analyzing result...`);
 
-        const analyzeRespRaw = await client.postJson<VerifyAnalyzeResponse>('/verify/analyze', {
-            vulnerabilityType: finding.type,
-            line: finding.line,
-            evidence: finding.evidence,
-            why: finding.why,
-            testScript: genResp.testScript,
-            stdout: testResult.output,
-            stderr: '',
-            exitCode: testResult.exitCode,
-            round,
-            maxRounds,
-            verificationPhase,
-        });
+        let analyzeRespRaw: VerifyAnalyzeResponse;
+        try {
+            analyzeRespRaw = await client.postJson<VerifyAnalyzeResponse>('/verify/analyze', {
+                vulnerabilityType: finding.type,
+                line: finding.line,
+                evidence: finding.evidence,
+                why: finding.why,
+                testScript: genResp.testScript,
+                stdout: testResult.output,
+                stderr: '',
+                exitCode: testResult.exitCode,
+                round,
+                maxRounds,
+                verificationPhase,
+                ...(opts.runId ? { runId: opts.runId } : {}),
+            });
+        } catch (err) {
+            if (isAgentScanBudgetExhausted(err)) return scanBudgetExhaustedResult(round, lastTestScript, lastTestOutput, testResult.backend || '');
+            throw err;
+        }
         if (tracker) tracker.recordLlmCall((analyzeRespRaw as any).costUsd ?? 0);
 
         const analyzeValidation = validateVerifyAnalyzeResponse(analyzeRespRaw);
@@ -440,12 +472,42 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 const mutationResult = await runMutationTest({
                     vulnerableCode: code,
                     testScript: lastTestScript,
-                    runner: genResp.runner || runtimeInfo.runner || 'node',
+                    runner,
                     workspaceRoot: opts.workspaceRoot,
                     filePath: filePath || '',
                     vulnerabilityType: finding.type,
                     line: finding.line,
+                    relativeImportPath,
+                    setupScript: genResp.setupScript || null,
+                    timeoutMs: tracker ? Math.min(30_000, tracker.remainingWallClockMs()) : 30_000,
+                    signal: opts.signal,
                 });
+
+                if (mutationResult.mutatedVerdict === 'not-run' && mutationResult.skipCause === 'no-operator') {
+                    if (proofEvidence) proofEvidence.assumptions.push(`mutation-unavailable: ${mutationResult.reason}`);
+                    return {
+                        verdict: 'PROVEN',
+                        reason: `${analyzeResp.reason} [mutation-unavailable: ${mutationResult.reason}]`,
+                        roundsUsed: round,
+                        testScript: lastTestScript,
+                        testOutput: lastTestOutput,
+                        backend: testResult.backend || '',
+                        proofEvidence,
+                        proofGateResult: { ...gateResult, warnings: [...gateResult.warnings, 'mutation-unavailable'] },
+                        proofSubVerdict: 'gate-passed',
+                    };
+                }
+
+                if (mutationResult.skipCause === 'cancelled') {
+                    return {
+                        verdict: 'INCONCLUSIVE',
+                        reason: `Verification cancelled by user at round ${round}.`,
+                        roundsUsed: round,
+                        testScript: lastTestScript,
+                        testOutput: lastTestOutput,
+                        subVerdict: 'cancelled',
+                    };
+                }
 
                 if (!mutationResult.discriminating) {
                     console.warn(`[Verify Loop] Mutation test non-discriminating: ${mutationResult.reason}`);

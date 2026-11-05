@@ -7,7 +7,24 @@
  * may run concurrently.
  *
  * Cancellation removes waiting requests. Releasing the lock occurs in finally.
+ * Each operation is force-released after a caller-provided timeout
+ * (default: one agent scan's wall clock + 5 minutes).
  */
+
+import { AGENT_SCAN_DEFAULTS } from './agentScanProtocol';
+import { ARCHITECTURE_SCOUT_DEFAULTS } from './architectureScoutProtocol';
+
+const LOCK_SLACK_MS = 5 * 60 * 1000;
+const BATCH_PER_FILE_MS = 15 * 60 * 1000;
+
+export const SINGLE_SCAN_OPERATION_TIMEOUT_MS = AGENT_SCAN_DEFAULTS.wallClockMs + LOCK_SLACK_MS;
+
+export function batchOperationTimeoutMs(topN?: number, architectureDepth?: string): number {
+    const n = Math.max(1, Math.min(20, Math.floor(Number.isFinite(topN) ? (topN as number) : 3)));
+    const scout = ARCHITECTURE_SCOUT_DEFAULTS[(architectureDepth as keyof typeof ARCHITECTURE_SCOUT_DEFAULTS)]
+        ?? ARCHITECTURE_SCOUT_DEFAULTS.standard;
+    return n * BATCH_PER_FILE_MS + scout.wallClockMs + LOCK_SLACK_MS;
+}
 
 interface QueueEntry {
     resolve: () => void;
@@ -107,6 +124,7 @@ export class AgentScanCoordinator {
         options?: {
             signal?: AbortSignal;
             maxWaitMs?: number;
+            operationTimeoutMs?: number;
         },
     ): Promise<T> {
         const lock = this.getLock(workspaceRoot);
@@ -116,11 +134,11 @@ export class AgentScanCoordinator {
         let operationTimer: ReturnType<typeof setTimeout> | undefined;
         try {
             const operationPromise = operation();
-            const MAX_OPERATION_MS = 15 * 60 * 1000;
+            const timeoutMs = options?.operationTimeoutMs ?? SINGLE_SCAN_OPERATION_TIMEOUT_MS;
             const timeoutPromise = new Promise<never>((_, reject) => {
                 operationTimer = setTimeout(() => {
-                    reject(new Error(`Agent scan operation timed out after ${MAX_OPERATION_MS / 1000}s — releasing lock.`));
-                }, MAX_OPERATION_MS);
+                    reject(new Error(`Agent scan operation timed out after ${Math.round(timeoutMs / 1000)}s — releasing lock.`));
+                }, timeoutMs);
             });
             return await Promise.race([operationPromise, timeoutPromise]);
         } finally {

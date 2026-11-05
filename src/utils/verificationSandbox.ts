@@ -20,11 +20,12 @@
  *     dir as tmpfs, no host env, non-root user. Works for any Node/Python
  *     test script unchanged.
  *   - DenoSandbox: `deno run --allow-read=<workspace> --allow-write=<tmp>
- *     --allow-env=NODE_ENV --no-prompt --no-remote` — real permission
- *     model, no network, no arbitrary fs, no arbitrary env. Only works
- *     for test scripts that don't use `require()` (Deno is ESM-only by
- *     default); the verify-generate prompt must be told to emit
- *     Deno-compatible code when Deno is the backend.
+ *     --allow-env=NODE_ENV --no-prompt --no-remote --unstable-detect-cjs
+ *     --unstable-sloppy-imports` — real permission model, no network, no
+ *     subprocesses, no arbitrary fs, no arbitrary env. Runs ESM (.mts) or
+ *     CommonJS (.cjs, when the script uses require() and no import/export)
+ *     test scripts; the verify-generate prompt is told the backend so it
+ *     emits Deno-compatible code.
  *
  * If neither backend is available, `detectSandbox()` returns null and the
  * caller MUST return INCONCLUSIVE. Never fall back to unrestricted
@@ -465,12 +466,35 @@ class DockerSandbox implements SandboxBackend {
 //   --no-remote                             (no network module fetches)
 //   --no-prompt                             (fail instead of prompting)
 //
-// Caveat: Deno is ESM-only by default and cannot run tests that use require().
-// The verify-generate prompt should detect Deno as the runner and emit
-// ESM-compatible code. If the test uses require(), Deno will error out —
-// which is a safe failure (no code executes).
+// Caveat: Deno resolves modules ESM-style. We pass --unstable-detect-cjs so
+// CommonJS project files (module.exports / require) can be loaded, and
+// --unstable-sloppy-imports so extensionless relative imports resolve. A
+// test script that uses require() and no ESM import/export is written as
+// .cjs so Deno runs it as CommonJS; everything else is written as .mts.
 
-class DenoSandbox implements SandboxBackend {
+const DENO_COMPAT_FLAGS = ['--unstable-detect-cjs', '--unstable-sloppy-imports'];
+
+const ESM_SYNTAX = /^\s*(?:import(?:\s+[\w$*{'"]|\s*[{*'"])|export\s)|\bimport\.meta\b/m;
+const CJS_REQUIRE = /\brequire\s*\(/;
+
+export function denoScriptExt(script: string): '.cjs' | '.mts' {
+    return CJS_REQUIRE.test(script) && !ESM_SYNTAX.test(script) ? '.cjs' : '.mts';
+}
+
+export function denoRunArgs(scriptFile: string, readPaths: string[], writeDir: string): string[] {
+    return [
+        'run',
+        '--allow-read=' + readPaths.join(','),
+        '--allow-write=' + writeDir,
+        '--allow-env=NODE_ENV',
+        '--no-remote',
+        '--no-prompt',
+        ...DENO_COMPAT_FLAGS,
+        scriptFile,
+    ];
+}
+
+export class DenoSandbox implements SandboxBackend {
     readonly name = 'deno';
 
     get available(): boolean {
@@ -500,8 +524,7 @@ class DenoSandbox implements SandboxBackend {
         }
 
         const sandboxDir = ensureSandboxDir(opts.workspaceRoot);
-        const ext = '.mts'; // Deno prefers .mts for ESM TS
-        const testFile = path.join(sandboxDir, `verify-test-${uniqueSuffix()}${ext}`);
+        const testFile = path.join(sandboxDir, `verify-test-${uniqueSuffix()}${denoScriptExt(opts.script || '')}`);
         const tmpDir = path.join(sandboxDir, `verify-tmp-${uniqueSuffix()}`);
 
         try {
@@ -510,20 +533,12 @@ class DenoSandbox implements SandboxBackend {
 
             // Run setup first (if any) in the same sandbox.
             if (opts.setupScript) {
-                const setupFile = path.join(sandboxDir, `verify-setup-${uniqueSuffix()}${ext}`);
+                const setupFile = path.join(sandboxDir, `verify-setup-${uniqueSuffix()}${denoScriptExt(opts.setupScript)}`);
                 try {
                     fs.writeFileSync(setupFile, opts.setupScript, 'utf8');
                     const setupResult = await runSandboxedProcess(
                         'deno',
-                        [
-                            'run',
-                            '--allow-read=' + opts.workspaceRoot,
-                            '--allow-write=' + tmpDir,
-                            '--allow-env=NODE_ENV',
-                            '--no-remote',
-                            '--no-prompt',
-                            setupFile,
-                        ],
+                        denoRunArgs(setupFile, [opts.workspaceRoot], tmpDir),
                         { ...opts, timeoutMs: Math.min(opts.timeoutMs, 10_000) },
                         this.name + '/setup',
                     );
@@ -540,15 +555,7 @@ class DenoSandbox implements SandboxBackend {
                 }
             }
 
-            const denoArgs = [
-                'run',
-                '--allow-read=' + opts.workspaceRoot + ',' + testFile,
-                '--allow-write=' + tmpDir,
-                '--allow-env=NODE_ENV',
-                '--no-remote',
-                '--no-prompt',
-                testFile,
-            ];
+            const denoArgs = denoRunArgs(testFile, [opts.workspaceRoot, testFile], tmpDir);
 
             return await runSandboxedProcess('deno', denoArgs, opts, this.name);
         } finally {

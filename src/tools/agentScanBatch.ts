@@ -20,7 +20,7 @@ import { toolAgentScan } from './agentScan';
 import { ApiClient } from '../api/client';
 import { selectAgentScanBatchFiles } from '../attack/agentScanBatchSelection';
 import { calculateBatchCredits, type CreditPlan } from '../attack/agentScanCreditPlan';
-import { globalScanCoordinator } from '../attack/agentScanCoordinator';
+import { globalScanCoordinator, batchOperationTimeoutMs } from '../attack/agentScanCoordinator';
 import { AGENT_SCAN_DEFAULTS } from '../attack/agentScanProtocol';
 import { scoutDefaultsForDepth } from '../attack/architectureScoutProtocol';
 import {
@@ -51,6 +51,7 @@ interface AgentScanToolResult {
     coverageGaps?: any[];
     stepsUsed: number;
     costSpentUsd: number;
+    creditsUsed?: number;
     terminationReason?: string;
     cached?: boolean;
     error?: string;
@@ -65,6 +66,7 @@ export async function toolAgentScanBatch(
         () => toolAgentScanBatchInner(ctx, args),
         {
             signal: args._signal as AbortSignal | undefined,
+            operationTimeoutMs: batchOperationTimeoutMs(args.topN, args.architectureDepth),
         },
     );
 }
@@ -182,6 +184,7 @@ async function toolAgentScanBatchInner(
         uncachedFileCount: selection.selected.length,
         cachedFileCount: 0,
     });
+    if (progress && creditPlan.warning) progress(2, 3, creditPlan.warning);
 
     try {
         const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
@@ -195,6 +198,10 @@ async function toolAgentScanBatchInner(
                 selection.selected.map((f, i) =>
                     buildNotStartedFileResult(f.filePath, f.rank, f.role, f.importance),
                 ),
+                {
+                    stopDetail: `Insufficient credits: have ${balance.scanCredits}, need ${creditPlan.total}.`,
+                    creditNote: creditPlan.warning,
+                },
             );
         }
     } catch (err: any) {
@@ -253,6 +260,7 @@ async function toolAgentScanBatchInner(
                     stepsGranted: 40,
                     extensionsGranted: 0,
                     costSpentUsd: scanResult.costSpentUsd,
+                    creditsUsed: scanResult.creditsUsed,
                     transcript: [],
                     terminationReason: scanResult.terminationReason as any,
                     error: scanResult.error,
@@ -301,5 +309,5 @@ async function toolAgentScanBatchInner(
         progress(selection.selected.length, selection.selected.length, 'Batch complete.');
     }
 
-    return aggregateBatchResult(stopReason, topN, selectedFiles, fileResults);
+    return aggregateBatchResult(stopReason, topN, selectedFiles, fileResults, { creditNote: creditPlan.warning });
 }

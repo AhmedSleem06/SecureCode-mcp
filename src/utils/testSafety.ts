@@ -141,9 +141,192 @@ const DANGEROUS_BRACKET_NAMES = [
     'env', 'argv', 'execPath', 'mainModule',
 ];
 
+// ── Literal masking ─────────────────────────────────────────────────────────
+//
+// Checks 1–8 run on a copy of the script where the contents of string
+// literals, template-literal text, regex literals and comments are replaced
+// with spaces, so payload strings like "'; eval('x'); //" or
+// "require('child_process')" do not trip the checks. Template `${...}`
+// expressions stay code and are still scanned. String contents are kept when
+// the literal is a module specifier (`require(`, `import(`, `from`, bare
+// `import`) or a bracket-access key (`obj["eval"]`), so those checks still
+// see the real names. When the lexer hits an ambiguous `/` (after `)`, `}`,
+// `++`, `--`) or an unterminated literal, the result is marked unreliable and
+// the checks fall back to the raw script.
+
+const REGEX_PREFIX_KEYWORDS = new Set([
+    'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void',
+    'throw', 'case', 'do', 'else', 'yield', 'await', 'default', 'extends',
+]);
+
+const KEEP_CONTENT_CONTEXT = /(?:\brequire\s*\(|\bimport\s*\(|(?<![.\w$])from|(?<![.\w$])import|[\w$\])]\s*\[)\s*$/;
+const SPECIFIER_CALL_CONTEXT = /(?:\brequire|\bimport)\s*\(\s*$/;
+
+interface MaskedScript {
+    text: string;
+    reliable: boolean;
+    dynamicTemplateSpecifier: boolean;
+}
+
+export function maskLiterals(src: string): MaskedScript {
+    let out = '';
+    let reliable = true;
+    let dynamicTemplateSpecifier = false;
+    const n = src.length;
+    const braceStack: number[] = [];
+    let depth = 0;
+    let mode: 'code' | 'template' = 'code';
+    let templateKeep = false;
+    let i = 0;
+
+    const blank = (ch: string) => (ch === '\n' || ch === '\r' ? ch : ' ');
+    const prevSignificant = (): { ch: string; prev: string; word: string } => {
+        let j = out.length - 1;
+        while (j >= 0 && /\s/.test(out[j])) j--;
+        if (j < 0) return { ch: '', prev: '', word: '' };
+        let k = j;
+        while (k >= 0 && /[A-Za-z0-9_$]/.test(out[k])) k--;
+        return { ch: out[j], prev: j > 0 ? out[j - 1] : '', word: out.slice(k + 1, j + 1) };
+    };
+
+    while (i < n) {
+        const ch = src[i];
+
+        if (mode === 'template') {
+            if (ch === '\\') {
+                out += templateKeep ? src.slice(i, i + 2) : blank(ch) + blank(src[i + 1] ?? '');
+                i += 2;
+                continue;
+            }
+            if (ch === '`') {
+                out += '`';
+                mode = 'code';
+                i++;
+                continue;
+            }
+            if (ch === '$' && src[i + 1] === '{') {
+                out += '${';
+                braceStack.push(depth);
+                depth = 0;
+                mode = 'code';
+                i += 2;
+                continue;
+            }
+            out += templateKeep ? ch : blank(ch);
+            i++;
+            continue;
+        }
+
+        if (ch === '"' || ch === "'") {
+            const keep = KEEP_CONTENT_CONTEXT.test(out.slice(-96));
+            out += ch;
+            i++;
+            let closed = false;
+            while (i < n) {
+                const c = src[i];
+                if (c === '\\') {
+                    out += keep ? src.slice(i, i + 2) : blank(c) + blank(src[i + 1] ?? '');
+                    i += 2;
+                    continue;
+                }
+                if (c === ch) { out += c; i++; closed = true; break; }
+                if (c === '\n') break;
+                out += keep ? c : blank(c);
+                i++;
+            }
+            if (!closed) reliable = false;
+            continue;
+        }
+
+        if (ch === '`') {
+            templateKeep = KEEP_CONTENT_CONTEXT.test(out.slice(-96));
+            if (SPECIFIER_CALL_CONTEXT.test(out.slice(-96))) {
+                const close = src.indexOf('`', i + 1);
+                if (close === -1 || src.slice(i + 1, close).includes('${')) dynamicTemplateSpecifier = true;
+            }
+            out += '`';
+            mode = 'template';
+            i++;
+            continue;
+        }
+
+        if (ch === '/' && src[i + 1] === '/') {
+            while (i < n && src[i] !== '\n') { out += ' '; i++; }
+            continue;
+        }
+
+        if (ch === '/' && src[i + 1] === '*') {
+            const end = src.indexOf('*/', i + 2);
+            const stop = end === -1 ? n : end + 2;
+            if (end === -1) reliable = false;
+            for (; i < stop; i++) out += blank(src[i]);
+            continue;
+        }
+
+        if (ch === '/') {
+            const p = prevSignificant();
+            let isRegex: boolean;
+            if (p.ch === '' || /[(,=:[!&|?{};~^%*<>]/.test(p.ch)) {
+                isRegex = true;
+            } else if ((p.ch === '+' || p.ch === '-') && p.prev !== p.ch) {
+                isRegex = true;
+            } else if (p.ch === '+' || p.ch === '-' || p.ch === ')' || p.ch === '}') {
+                reliable = false;
+                isRegex = false;
+            } else {
+                isRegex = REGEX_PREFIX_KEYWORDS.has(p.word);
+            }
+            if (!isRegex) { out += ch; i++; continue; }
+            out += '/';
+            i++;
+            let inClass = false;
+            let closed = false;
+            while (i < n) {
+                const c = src[i];
+                if (c === '\\') { out += '  '; i += 2; continue; }
+                if (c === '\n') break;
+                if (c === '[') inClass = true;
+                else if (c === ']') inClass = false;
+                else if (c === '/' && !inClass) { out += '/'; i++; closed = true; break; }
+                out += ' ';
+                i++;
+            }
+            if (!closed) reliable = false;
+            continue;
+        }
+
+        if (ch === '{') {
+            depth++;
+        } else if (ch === '}') {
+            if (depth === 0 && braceStack.length > 0) {
+                depth = braceStack.pop()!;
+                out += '}';
+                mode = 'template';
+                templateKeep = false;
+                i++;
+                continue;
+            }
+            depth--;
+        }
+
+        out += ch;
+        i++;
+    }
+
+    if (mode === 'template' || braceStack.length > 0) reliable = false;
+    return { text: out, reliable, dynamicTemplateSpecifier };
+}
+
 // ── Main entry ──────────────────────────────────────────────────────────────
 
-export function checkTestSafety(script: string, _workspaceRoot: string): TestSafetyResult {
+export function checkTestSafety(rawScript: string, _workspaceRoot: string): TestSafetyResult {
+    const masked = maskLiterals(rawScript);
+    const script = masked.reliable ? masked.text : rawScript;
+
+    if (masked.dynamicTemplateSpecifier) {
+        return { allowed: false, reason: 'dynamic import() / require() with an interpolated template specifier cannot be statically analyzed' };
+    }
+
     // 1. Dangerous call patterns (eval, Function, etc.)
     for (const { pattern, reason } of DANGEROUS_GLOBAL_CALLS) {
         if (pattern.test(script)) {

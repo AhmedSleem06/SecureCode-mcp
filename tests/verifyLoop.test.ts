@@ -14,6 +14,10 @@ function makeMockClient(genResp: any, analyzeResp?: any): ApiClient {
     return { postJson } as unknown as ApiClient;
 }
 
+vi.mock('../src/utils/verificationSandbox', () => ({
+    detectSandbox: () => ({ name: 'deno' }),
+}));
+
 vi.mock('../src/utils/localTestRunner', () => ({
     runLocalTest: vi.fn(),
 }));
@@ -226,8 +230,8 @@ describe('runVerifyLoop', () => {
         expect(result.subVerdict).toBe('budget-exhausted');
     });
 
-    it('returns subVerdict=blocked when static safety check rejects the script', async () => {
-        vi.mocked(runLocalTest).mockResolvedValueOnce({
+    it('retries a blocked script and returns subVerdict=blocked after the last round', async () => {
+        vi.mocked(runLocalTest).mockResolvedValue({
             verdict: 'blocked',
             output: 'Test script blocked: eval() executes arbitrary strings as code',
             exitCode: -1,
@@ -235,7 +239,6 @@ describe('runVerifyLoop', () => {
 
         const client = makeMockClient(
             { canTest: true, testScript: 'eval("x")', runner: 'node', description: 'test' },
-            { verdict: 'UNPROVEN', reason: 'guard held', shouldRetry: false },
         );
 
         const result = await runVerifyLoop({
@@ -251,6 +254,9 @@ describe('runVerifyLoop', () => {
         expect(result.verdict).toBe('INCONCLUSIVE');
         expect(result.subVerdict).toBe('blocked');
         expect(result.reason).toContain('blocked');
+        expect(vi.mocked(runLocalTest).mock.calls.length).toBeGreaterThan(1);
+        const lastGenerateBody = vi.mocked(client.postJson).mock.calls.at(-1)?.[1] as any;
+        expect(lastGenerateBody.previousErrors.join(' ')).toContain('static safety check');
     });
 
     it('returns subVerdict=aborted when AbortSignal fires', async () => {
@@ -316,5 +322,84 @@ describe('runVerifyLoop', () => {
         expect(result.verdict).toBe('INCONCLUSIVE');
         expect(result.roundsUsed).toBeGreaterThanOrEqual(2);
         expect(result.reason.toLowerCase()).toContain('timed out');
+    });
+});
+
+describe('runVerifyLoop — scan budget (runId)', () => {
+    beforeEach(() => {
+        vi.mocked(runLocalTest).mockReset();
+    });
+
+    const baseOpts = {
+        finding: { type: 'command_injection', line: 10, evidence: 'exec(input)', why: 'user input', severity: 'high' },
+        filePath: 'src/foo.ts',
+        code: 'const x = 1;',
+        relatedFiles: [],
+        workspaceRoot: '/tmp/workspace',
+        language: 'javascript',
+    };
+
+    function budgetError() {
+        const err: any = new Error('Scan budget exhausted');
+        err.status = 402;
+        err.apiCode = 'AGENT_SCAN_BUDGET_EXHAUSTED';
+        err.capReason = 'insufficient_credits';
+        return err;
+    }
+
+    it('sends runId to /verify/generate and /verify/analyze', async () => {
+        vi.mocked(runLocalTest).mockResolvedValue({ verdict: 'fail', output: 'FAIL: guard blocked', exitCode: 0 });
+        const postJson = vi.fn()
+            .mockResolvedValueOnce({ canTest: true, testScript: 'console.log(1)', runner: 'node', description: 't' })
+            .mockResolvedValueOnce({ verdict: 'UNPROVEN', reason: 'guard held', shouldRetry: false });
+
+        await runVerifyLoop({ ...baseOpts, client: { postJson } as unknown as ApiClient, runId: 'run-9' });
+
+        expect(postJson.mock.calls[0][0]).toBe('/verify/generate');
+        expect(postJson.mock.calls[0][1].runId).toBe('run-9');
+        expect(postJson.mock.calls[1][0]).toBe('/verify/analyze');
+        expect(postJson.mock.calls[1][1].runId).toBe('run-9');
+    });
+
+    it('omits runId when none is given (old behaviour)', async () => {
+        const postJson = vi.fn().mockResolvedValue({ canTest: false, skipReason: 'n/a' });
+
+        await runVerifyLoop({ ...baseOpts, client: { postJson } as unknown as ApiClient });
+
+        expect(postJson.mock.calls[0][1]).not.toHaveProperty('runId');
+    });
+
+    it('returns INCONCLUSIVE budget-exhausted on a 402 from /verify/generate instead of throwing', async () => {
+        const postJson = vi.fn().mockRejectedValue(budgetError());
+
+        const result = await runVerifyLoop({ ...baseOpts, client: { postJson } as unknown as ApiClient, runId: 'run-9' });
+
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.subVerdict).toBe('budget-exhausted');
+        expect(result.budgetExhaustedReason).toBe('scan-budget');
+        expect(result.reason).toContain('top up credits');
+        expect(result.roundsUsed).toBe(0);
+    });
+
+    it('returns INCONCLUSIVE budget-exhausted on a 402 from /verify/analyze', async () => {
+        vi.mocked(runLocalTest).mockResolvedValue({ verdict: 'pass', output: 'PASS', exitCode: 0 });
+        const postJson = vi.fn()
+            .mockResolvedValueOnce({ canTest: true, testScript: 'console.log(1)', runner: 'node', description: 't' })
+            .mockRejectedValueOnce(budgetError());
+
+        const result = await runVerifyLoop({ ...baseOpts, client: { postJson } as unknown as ApiClient, runId: 'run-9' });
+
+        expect(result.subVerdict).toBe('budget-exhausted');
+        expect(result.budgetExhaustedReason).toBe('scan-budget');
+        expect(result.roundsUsed).toBe(1);
+        expect(result.testScript).toBe('console.log(1)');
+    });
+
+    it('still throws other API errors', async () => {
+        const err: any = new Error('server down');
+        err.status = 503;
+        const postJson = vi.fn().mockRejectedValue(err);
+
+        await expect(runVerifyLoop({ ...baseOpts, client: { postJson } as unknown as ApiClient, runId: 'run-9' })).rejects.toThrow('server down');
     });
 });

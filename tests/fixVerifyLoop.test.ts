@@ -4,6 +4,10 @@ import { runFixVerifyLoop } from '../src/attack/fixVerifyLoop';
 import type { ApiClient } from '../api/client';
 
 // Mock localTestRunner — same pattern as verifyLoop.test.ts
+vi.mock('../src/utils/verificationSandbox', () => ({
+    detectSandbox: () => ({ name: 'deno' }),
+}));
+
 vi.mock('../src/utils/localTestRunner', () => ({
     runLocalTest: vi.fn(),
 }));

@@ -168,4 +168,102 @@ describe('checkTestSafety', () => {
         const result = checkTestSafety(script, '/workspace');
         expect(result.allowed).toBe(true);
     });
+
+    // ── False positives on payload strings (must be allowed) ──────────
+
+    it('allows eval( inside a payload string', () => {
+        const script = `const payload = "1; eval('process.exit(1)')";\nconsole.log("PASS: " + payload);`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed, result.reason).toBe(true);
+    });
+
+    it('allows import( and require("child_process") inside payload strings', () => {
+        const script = [
+            `const p1 = "x'); import(attacker); //";`,
+            `const p2 = 'require("child_process").exec("id")';`,
+            `const p3 = \`; require('child_process').execSync('id') //\`;`,
+            `console.log("PASS: " + p1 + p2 + p3);`,
+        ].join('\n');
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed, result.reason).toBe(true);
+    });
+
+    it('allows process.env / fetch( / new Function( text inside payload strings and comments', () => {
+        const script = [
+            `// The handler should not do fetch("http://x") or read process.env`,
+            `/* new Function("x") would be bad */`,
+            `const payloads = ["process.env.SECRET", "fetch('//evil')", "new Function('a')"];`,
+            `console.log("PASS: " + payloads.length);`,
+        ].join('\n');
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed, result.reason).toBe(true);
+    });
+
+    it('allows dangerous text inside regex literals', () => {
+        const script = `const re = /eval\\(|require\\(['"]child_process/;\nconsole.log(re.test("x") ? "FAIL: no" : "PASS: ok");`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed, result.reason).toBe(true);
+    });
+
+    it('allows a command injection payload passed to the handler', () => {
+        const script = [
+            `import { createRequire } from "node:module";`,
+            `const require = createRequire(import.meta.url);`,
+            `const { app } = require("../src/app.js");`,
+            `const payload = "docs; require('child_process').exec('id'); eval(1)";`,
+            `app.routes["GET /run"]({ query: { dir: payload } }, { send() {} });`,
+            `console.log("PASS: injected");`,
+        ].join('\n');
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed, result.reason).toBe(true);
+    });
+
+    // ── True positives that must survive literal masking ──────────────
+
+    it('still blocks eval inside a template expression', () => {
+        const script = 'const s = `value: ${eval("1+1")}`;';
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('eval');
+    });
+
+    it('still blocks require with a template-literal child_process specifier', () => {
+        const script = 'const cp = require(`child_process`);';
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('child_process');
+    });
+
+    it('blocks import() with an interpolated template specifier', () => {
+        const script = 'const name = "child_" + "process"; const m = await import(`node:${name}`);';
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('dynamic');
+    });
+
+    it('still blocks bracket access with a template-literal key', () => {
+        const script = 'globalThis[`eval`]("1");';
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+    });
+
+    it('does not let a regex literal containing a quote hide code', () => {
+        const script = `const a = 1;\nconst r = /'/; eval("x"); const q = /'/;`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('eval');
+    });
+
+    it('falls back to the raw script when a slash is ambiguous', () => {
+        const script = `if (true) {} /'/; eval("x"); /'/`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+    });
+
+    it('still blocks real code after a string that contains a quote of the other kind', () => {
+        const script = `const s = "it's fine"; process.exit(0);`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('process.exit');
+    });
 });

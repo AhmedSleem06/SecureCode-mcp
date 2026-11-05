@@ -61,6 +61,7 @@ export interface AgentScanBatchFileResult {
     coverageGaps: CoverageGap[];
     stepsUsed: number;
     costSpentUsd: number;
+    creditsUsed?: number;
     error?: AgentScanBatchFileError;
 }
 
@@ -81,6 +82,7 @@ export interface AgentScanBatchResult {
     stopReason: AgentScanBatchStopReason;
     /** Human-readable explanation of why the batch stopped (preflight failures in particular). */
     stopDetail?: string;
+    creditNote?: string;
     /** Completed scans currently available in the cache — retrievable without consuming a run. */
     cachedScans?: { filePath: string; findings: number; scannedAt: string }[];
     requestedTopN: number;
@@ -98,6 +100,7 @@ export interface AgentScanBatchResult {
         findings: number;
         stepsUsed: number;
         costSpentUsd: number;
+        creditsUsed: number;
     };
 }
 
@@ -144,6 +147,7 @@ export function buildBatchFileResult(
         coverageGaps: result.coverageGaps || [],
         stepsUsed: result.stepsUsed,
         costSpentUsd: result.costSpentUsd,
+        ...(typeof result.creditsUsed === 'number' ? { creditsUsed: result.creditsUsed } : {}),
         error: result.error ? { message: result.error } : undefined,
     };
 }
@@ -173,6 +177,7 @@ export function buildNotStartedFileResult(
 
 export interface AggregateBatchExtras {
     stopDetail?: string;
+    creditNote?: string;
     cachedScans?: { filePath: string; findings: number; scannedAt: string }[];
 }
 
@@ -196,6 +201,7 @@ export function aggregateBatchResult(
         : 0;
     const totalSteps = fileResults.reduce((sum, f) => sum + f.stepsUsed, 0);
     const totalCost = fileResults.reduce((sum, f) => sum + f.costSpentUsd, 0);
+    const totalCredits = fileResults.reduce((sum, f) => sum + (f.creditsUsed ?? 0), 0);
 
     let status: AgentScanBatchResult['status'];
     if (stopReason === 'completed') {
@@ -234,8 +240,10 @@ export function aggregateBatchResult(
             findings: totalFindings,
             stepsUsed: totalSteps,
             costSpentUsd: totalCost,
+            creditsUsed: totalCredits,
         },
         stopDetail: extras?.stopDetail,
+        ...(extras?.creditNote ? { creditNote: extras.creditNote } : {}),
         cachedScans: extras?.cachedScans,
     };
 }

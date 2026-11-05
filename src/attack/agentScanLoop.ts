@@ -55,21 +55,25 @@ import {
     type AgentActionConstraint,
     type AgentScanAction,
     type AgentScanBudget,
+    type AgentScanCapReason,
     type AgentScanFinding,
     type AgentScanFinishAction,
     type AgentScanResult,
     type AgentScanRunStatus,
+    type AgentScanServerBudget,
     type AgentScanStartResponse,
     type AgentScanStepRequest,
     type AgentScanStepResponse,
     type AgentScanTarget,
     type AgentScanTranscriptStep,
 } from './agentScanProtocol';
+import { closeAgentScanRun, capReasonSummary } from './agentScanCredits';
 
 export interface AgentScanOptions {
     budget?: Partial<AgentScanBudget>;
     signal?: AbortSignal;
     onProgress?: (stepsTaken: number, maxSteps: number, message: string) => void;
+    deferClose?: boolean;
 }
 
 export async function runAgentScan(
@@ -95,6 +99,20 @@ export async function runAgentScan(
         let extensionsGranted = budget.extensionsGranted;
         let meaningfulProgressSinceLastExtension = false;
     let activeRunId: string | null = null;
+    let serverBudget: AgentScanServerBudget | undefined;
+    let capReason: AgentScanCapReason | undefined;
+
+    const attachCredits = (result: AgentScanResult): AgentScanResult => {
+        if (activeRunId && options.deferClose) result.runId = activeRunId;
+        if (capReason) result.capReason = capReason;
+        if (serverBudget) {
+            result.creditsUsed = serverBudget.creditsUsed;
+            result.maxCredits = serverBudget.maxCredits;
+            result.creditExtensionsGranted = serverBudget.extensionsGranted;
+            if (typeof serverBudget.baseCredits === 'number') result.baseCredits = serverBudget.baseCredits;
+        }
+        return result;
+    };
 
     // Best-effort run close: called on EVERY exit with an active run.
     // Accepted finishes send status 'completed' + terminationReason
@@ -104,20 +122,16 @@ export async function runAgentScan(
     // stepping). Every other exit sends an abnormal terminationReason
     // so the row expires immediately instead of waiting up to 30
     // minutes for the janitor. The janitor remains the fallback
-    // (refund happens there, not here).
+    // (refund happens there, not here). With deferClose the caller owns
+    // the close (it keeps the run open for verification).
     const closeRun = async (result: AgentScanResult): Promise<AgentScanResult> => {
-        if (activeRunId) {
-            try {
-                await client.postJson(
-                    '/agent/scan/close',
-                    {
-                        runId: activeRunId,
-                        status: result.status,
-                        terminationReason: result.terminationReason,
-                    },
-                    options.signal,
-                );
-            } catch { /* best-effort — janitor will expire the run */ }
+        attachCredits(result);
+        if (activeRunId && !options.deferClose) {
+            const settlement = await closeAgentScanRun(client, activeRunId, result.status, result.terminationReason, options.signal);
+            if (settlement) {
+                result.creditsUsed = settlement.creditsUsed;
+                result.creditsRefunded = settlement.creditsRefunded;
+            }
         }
         return result;
     };
@@ -787,10 +801,29 @@ export async function runAgentScan(
                 continue;
             }
             costSpentUsd += stepResp.costUsd || 0;
+            if (stepResp.serverBudget && typeof stepResp.serverBudget.costSpentUsd === 'number' && typeof stepResp.serverBudget.costCapUsd === 'number') {
+                serverBudget = stepResp.serverBudget;
+                costSpentUsd = serverBudget.costSpentUsd;
+                budget.costCapUsd = serverBudget.costCapUsd;
+                scanState.budget.costCapUsd = serverBudget.costCapUsd;
+            }
             scanState.budget.costSpentUsd = costSpentUsd;
             consecutiveErrors = 0;
             llmHealth.recordStepTelemetry(!!stepResp.degraded || !!stepResp.fallbackFired);
             trace.logStepRequested(stepResp.model, stepResp.tokens, stepResp.costUsd, stepResp.latencyMs);
+
+            if (stepResp.paidExtension) {
+                const paid = stepResp.paidExtension;
+                if (!stepResp.serverBudget && typeof paid.newCostCapUsd === 'number') {
+                    budget.costCapUsd = paid.newCostCapUsd;
+                    scanState.budget.costCapUsd = paid.newCostCapUsd;
+                }
+                console.log(`[Agent Scan Loop] Extended scan budget: +${paid.creditsDrawn} credits (${paid.creditsUsed}/${paid.maxCredits} used)`);
+                meaningfulProgressSinceLastExtension = false;
+                if (options.onProgress) {
+                    options.onProgress(stepsTaken, stepsGranted, `Extended scan budget: +${paid.creditsDrawn} credits (${paid.creditsUsed}/${paid.maxCredits} used)`);
+                }
+            }
 
             // Transition from planning to surveying on first successful step
             if (scanState.phase === 'planning') {
@@ -842,18 +875,20 @@ export async function runAgentScan(
 
             // Null next = done (cost capped or steps exhausted)
             if (!stepResp.next) {
-                const hardReason = stepResp.costCapped ? 'cost_cap' : 'budget_exhausted';
-                terminateScan(scanState, stepResp.costCapped ? 'cost_cap' : 'budget_exhausted', stepResp.costCapped
-                    ? `Cost cap ($${budget.costCapUsd.toFixed(2)}) reached.`
+                if (stepResp.capReason) capReason = stepResp.capReason;
+                const capped = stepResp.costCapped || !!stepResp.capReason;
+                const costCapSummary = capReasonSummary(stepResp.capReason, serverBudget?.maxCredits ?? stepResp.paidExtension?.maxCredits)
+                    ?? `Cost cap ($${budget.costCapUsd.toFixed(2)}) reached.`;
+                const hardReason = capped ? (stepResp.capReason ?? 'cost_cap') : 'budget_exhausted';
+                terminateScan(scanState, capped ? 'cost_cap' : 'budget_exhausted', capped
+                    ? costCapSummary
                     : 'Agent completed without explicit finish.');
                 const salvaged = await salvageHardTermination(
                     hardReason,
-                    stepResp.costCapped
-                        ? `Cost cap ($${budget.costCapUsd.toFixed(2)}) reached.`
-                        : 'Step budget exhausted.',
+                    capped ? costCapSummary : 'Step budget exhausted.',
                 );
                 if (salvaged) return salvaged;
-                const status: AgentScanRunStatus = stepResp.costCapped
+                const status: AgentScanRunStatus = capped
                     ? 'incomplete'
                     : (stepResp.degraded ? 'incomplete' : 'completed');
                 trace.logRunCompleted(status);
@@ -865,9 +900,9 @@ export async function runAgentScan(
                     stepsGranted,
                     extensionsGranted,
                     costSpentUsd,
-                    terminationReason: stepResp.costCapped ? 'cost_cap' : 'budget_exhausted',
-                    summary: stepResp.costCapped
-                        ? `Cost cap ($${budget.costCapUsd.toFixed(2)}) reached.`
+                    terminationReason: capped ? 'cost_cap' : 'budget_exhausted',
+                    summary: capped
+                        ? costCapSummary
                         : 'Agent completed without explicit finish.',
                     investigationNotes: [],
                     coverageGaps: [],
@@ -1752,18 +1787,8 @@ export async function runAgentScan(
             }
         }
     } catch (err: any) {
-        if (activeRunId) {
-            try {
-                await client.postJson(
-                    '/agent/scan/close',
-                    {
-                        runId: activeRunId,
-                        status: 'failed',
-                        terminationReason: 'api_error',
-                    },
-                    options.signal,
-                );
-            } catch { /* best-effort — janitor will expire the run */ }
+        if (activeRunId && !options.deferClose) {
+            await closeAgentScanRun(client, activeRunId, 'failed', 'api_error', options.signal);
         }
         // Auth (401), credit (402) and limit (429) failures get a plain-language
         // sentence with a concrete remedy — a bare "Unauthorized" tells the
@@ -1772,7 +1797,7 @@ export async function runAgentScan(
         const errorMessage = described.remedy
             ? `${err.message || String(err)} — ${described.remedy}`
             : (err.message || String(err));
-        return {
+        return attachCredits({
             status: 'failed',
             findings: [],
             transcript: [],
@@ -1784,7 +1809,7 @@ export async function runAgentScan(
             error: errorMessage,
             investigationNotes: [],
             coverageGaps: [],
-        };
+        });
     }
 }
 

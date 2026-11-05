@@ -102,7 +102,7 @@ Or if installed globally:
 claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/your/project
 ```
 
-## Tools (17)
+## Tools (22)
 
 ### Scanning
 
@@ -114,6 +114,24 @@ claude mcp add securecode -s user -- securecode-mcp serve --workspace /path/to/y
 | `securecode.scan-batch` | Scan multiple files in one call | No |
 | `securecode.scan-secrets` | Scan for hardcoded secrets and PII (local, no AI) | No |
 | `securecode.scan-dependencies` | Scan lockfiles for known vulnerabilities (OSV/NVD) | No |
+
+### Background Scan Jobs
+
+| Tool | Description | Approval |
+|------|-------------|----------|
+| `securecode.agent-scan-start` | Start an agent scan in the background; returns `{ jobId, status, estimatedMinutes }` immediately | No |
+| `securecode.agent-scan-batch-start` | Start an agent-scan batch in the background; returns `{ jobId, status, estimatedMinutes }` immediately | No |
+| `securecode.job-status` | Status and progress of a job (latest job if `jobId` is omitted); includes the full result when completed | No |
+| `securecode.job-cancel` | Cancel a running job (findings so far are kept) | No |
+| `securecode.job-list` | Recent jobs in this workspace (last 50, up to 7 days) | No |
+
+Long scans run in the background, so your AI client never hits its tool-call timeout. `securecode.agent-scan` and
+`securecode.agent-scan-batch` still return the normal result when the scan finishes within ~50 seconds
+(`SECURECODE_TOOL_WAIT_MS`); otherwise they return `{ "status": "running", "jobId": "..." }` and the agent checks back
+with `securecode.job-status` about every 60 seconds. Only one agent scan runs per workspace at a time: starting the same
+file again returns the running job, and starting a different scan returns `busy` with the running job's id. Job records
+are kept in `.securecode/jobs/`; a job whose MCP process stopped (client restart, crash) is marked `interrupted` the next
+time the server starts, and its API run is closed.
 
 ### Project Analysis
 
@@ -216,7 +234,8 @@ up automatically in clients that support it.
 **Cancelling works.** The server honors MCP `notifications/cancelled` — aborting
 a tool call in your client fires an AbortSignal through the running scan, which
 closes the run server-side (cancelled) and salvages findings found so far,
-instead of orphaning a 30-45 minute scan.
+instead of orphaning a 30-45 minute scan. Background jobs are cancelled with
+`securecode.job-cancel`.
 
 ## Runtime Verification
 
@@ -253,6 +272,7 @@ Disable entirely with `SECURECODE_DISABLE_RUNTIME_PROBE=1`.
 | `SECURECODE_ATTACK_ENABLED` | — | Set to `1` to enable the attack tool |
 | `SECURECODE_DEV_SERVER_PORT` | auto | Local dev server port for runtime verification |
 | `SECURECODE_DISABLE_RUNTIME_PROBE` | — | Set to `1` to disable runtime verification probes |
+| `SECURECODE_TOOL_WAIT_MS` | `50000` | How long `agent-scan` / `agent-scan-batch` wait for a result before returning `{ status: "running", jobId }` |
 
 ## Security
 

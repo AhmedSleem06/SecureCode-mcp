@@ -44,6 +44,32 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
         category: 'read-only',
         requiresApproval: false,
     },
+    'securecode.agent-scan-start': {
+        name: 'securecode.agent-scan-start',
+        category: 'read-only',
+        requiresApproval: false,
+        approvalNote: 'Starts securecode.agent-scan as a background job. Fix generation inside the job still requires its own approval prompt.',
+    },
+    'securecode.agent-scan-batch-start': {
+        name: 'securecode.agent-scan-batch-start',
+        category: 'read-only',
+        requiresApproval: false,
+    },
+    'securecode.job-status': {
+        name: 'securecode.job-status',
+        category: 'read-only',
+        requiresApproval: false,
+    },
+    'securecode.job-cancel': {
+        name: 'securecode.job-cancel',
+        category: 'read-only',
+        requiresApproval: false,
+    },
+    'securecode.job-list': {
+        name: 'securecode.job-list',
+        category: 'read-only',
+        requiresApproval: false,
+    },
     'securecode.record-false-positive': {
         name: 'securecode.record-false-positive',
         category: 'read-only',

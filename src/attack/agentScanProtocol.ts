@@ -14,6 +14,8 @@ export const AGENT_SCAN_DEFAULTS = {
     wallClockMs: 2_700_000,
     perStepEstimateUsd: 0.08,
     creditsPerRun: 5,
+    extensionCredits: 2,
+    maxCreditsPerRun: 15,
     dailyRunLimit: 20,
     blockedReadRecoveryLimit: 5,
 } as const;
@@ -612,6 +614,35 @@ export interface BudgetExtensionEvent {
     reason: string;
 }
 
+export interface AgentScanServerBudget {
+    costSpentUsd: number;
+    costCapUsd: number;
+    creditsUsed: number;
+    baseCredits?: number;
+    maxCredits: number;
+    extensionsGranted: number;
+    extensionCreditsDrawn?: number;
+}
+
+export interface AgentScanPaidExtension {
+    creditsDrawn: number;
+    creditsUsed: number;
+    maxCredits: number;
+    newCostCapUsd?: number;
+}
+
+export type AgentScanCapReason = 'insufficient_credits' | 'max_credits' | 'cost_cap';
+
+export interface AgentScanSettlement {
+    creditsRefunded: number;
+    creditsUsed: number;
+    costSpentUsd?: number;
+}
+
+export interface AgentScanCloseResponse {
+    settlement?: AgentScanSettlement;
+}
+
 export interface AgentScanStepResponse {
     next: AgentScanAction | null;
     costUsd: number;
@@ -621,6 +652,9 @@ export interface AgentScanStepResponse {
     stepsRemaining: number;
     systemEvent?: AgentScanSystemEventAction;
     budgetExtension?: BudgetExtensionEvent;
+    serverBudget?: AgentScanServerBudget;
+    paidExtension?: AgentScanPaidExtension;
+    capReason?: AgentScanCapReason;
     /** Protocol v5: server-side finish gate evaluation result. */
     finishGate?: {
         status: 'accepted' | 'rejected' | 'not_evaluated';
@@ -685,6 +719,13 @@ export interface AgentScanResult {
     terminationReason?: TerminationReason;
     error?: string;
     qualityMetrics?: import('./qualityMetrics').ScanQualityMetrics;
+    runId?: string;
+    capReason?: AgentScanCapReason;
+    creditsUsed?: number;
+    baseCredits?: number;
+    maxCredits?: number;
+    creditExtensionsGranted?: number;
+    creditsRefunded?: number;
 }
 
 // ── Verify budget ───────────────────────────────────────────────────────────

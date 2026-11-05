@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { AgentScanCoordinator } from '../src/attack/agentScanCoordinator';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { AgentScanCoordinator, SINGLE_SCAN_OPERATION_TIMEOUT_MS, batchOperationTimeoutMs } from '../src/attack/agentScanCoordinator';
 
 describe('AgentScanCoordinator', () => {
     let coordinator: AgentScanCoordinator;
@@ -158,5 +158,53 @@ describe('AgentScanCoordinator', () => {
         await coordinator.runExclusive('/ws', async () => 'done');
         expect(coordinator.isRunning('/ws')).toBe(false);
         expect(coordinator.queueDepth('/ws')).toBe(0);
+    });
+
+    it('honours a per-operation timeout and releases the lock', async () => {
+        const p = coordinator.runExclusive('/ws', () => new Promise(r => setTimeout(r, 200)), { operationTimeoutMs: 20 });
+        await expect(p).rejects.toThrow('timed out');
+        expect(coordinator.isRunning('/ws')).toBe(false);
+    });
+
+    it('single scan default timeout is the 45 min wall clock + 5 min', () => {
+        expect(SINGLE_SCAN_OPERATION_TIMEOUT_MS).toBe(50 * 60 * 1000);
+    });
+
+    it('batch timeout scales with topN and architecture depth', () => {
+        expect(batchOperationTimeoutMs(5, 'standard')).toBe(5 * 15 * 60_000 + 240_000 + 5 * 60_000);
+        expect(batchOperationTimeoutMs(1, 'deep')).toBe(15 * 60_000 + 480_000 + 5 * 60_000);
+        expect(batchOperationTimeoutMs(undefined, undefined)).toBe(3 * 15 * 60_000 + 240_000 + 5 * 60_000);
+        expect(batchOperationTimeoutMs(100, 'quick')).toBe(20 * 15 * 60_000 + 120_000 + 5 * 60_000);
+    });
+
+    describe('with fake timers', () => {
+        beforeEach(() => { vi.useFakeTimers(); });
+        afterEach(() => { vi.useRealTimers(); });
+
+        it('a 30-minute batch is not cut at 15 minutes', async () => {
+            let finished = false;
+            const p = coordinator.runExclusive('/ws', async () => {
+                await new Promise(r => setTimeout(r, 30 * 60_000));
+                finished = true;
+                return 'batch-done';
+            }, { operationTimeoutMs: batchOperationTimeoutMs(5, 'standard') });
+
+            await vi.advanceTimersByTimeAsync(16 * 60_000);
+            expect(coordinator.isRunning('/ws')).toBe(true);
+            await vi.advanceTimersByTimeAsync(15 * 60_000);
+            await expect(p).resolves.toBe('batch-done');
+            expect(finished).toBe(true);
+        });
+
+        it('a single scan is not cut before 50 minutes but is released after', async () => {
+            const p = coordinator.runExclusive('/ws', () => new Promise(() => undefined));
+            const settled = p.catch(err => err as Error);
+            await vi.advanceTimersByTimeAsync(49 * 60_000);
+            expect(coordinator.isRunning('/ws')).toBe(true);
+            await vi.advanceTimersByTimeAsync(2 * 60_000);
+            const err = await settled;
+            expect((err as Error).message).toMatch(/timed out after 3000s/);
+            expect(coordinator.isRunning('/ws')).toBe(false);
+        });
     });
 });

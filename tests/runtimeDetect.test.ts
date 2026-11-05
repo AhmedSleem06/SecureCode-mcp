@@ -187,13 +187,19 @@ describe('detectRuntime — Python', () => {
 });
 
 describe('computeRelativeImportPath', () => {
-    it('returns ../-prefixed path for JS/TS', () => {
+    it('returns ../-prefixed path for JS/TS and keeps the extension by default', () => {
         const p = computeRelativeImportPath('/ws/.securecode', '/ws/src/lib/auth.ts');
-        expect(p).toBe('../src/lib/auth');
+        expect(p).toBe('../src/lib/auth.ts');
     });
 
-    it('strips extension for JS/TS', () => {
-        const p = computeRelativeImportPath('/ws/.securecode', '/ws/src/foo.js');
+    it('keeps the extension for node/deno/tsx/bun runners', () => {
+        for (const runner of ['node', 'deno', 'tsx', 'pnpm-tsx', 'yarn-tsx', 'bun']) {
+            expect(computeRelativeImportPath('/ws/.securecode', '/ws/src/foo.js', runner)).toBe('../src/foo.js');
+        }
+    });
+
+    it('strips the extension for runners not known to resolve explicit extensions', () => {
+        const p = computeRelativeImportPath('/ws/.securecode', '/ws/src/foo.js', 'some-other-runner');
         expect(p).toBe('../src/foo');
     });
 

@@ -53,7 +53,13 @@ import {
     type ProbeEndpointCandidate,
 } from '../attack/runtimeProbe';
 import { detectRuntime } from '../utils/runtimeDetect';
-import { VerifyBudgetTracker, defaultVerifyBudget, defaultFixVerifyBudget, type VerifyBudget, type AgentScanScope, type FixVerificationStatus } from '../attack/agentScanProtocol';
+import { VerifyBudgetTracker, defaultVerifyBudget, defaultFixVerifyBudget, AGENT_SCAN_DEFAULTS, type VerifyBudget, type AgentScanScope, type FixVerificationStatus } from '../attack/agentScanProtocol';
+import {
+    AgentScanRunCloser,
+    isAgentScanBudgetExhausted,
+    formatCreditUsage,
+    VERIFY_BUDGET_EXHAUSTED_REASON,
+} from '../attack/agentScanCredits';
 import type { AgentScanFinding, AgentScanTarget, VerificationLevel } from '../attack/agentScanProtocol';
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
 import { ApprovalBroker } from '../approval/broker';
@@ -118,8 +124,10 @@ function shouldProve(finding: AgentScanFinding): boolean {
     return finding.severity === 'critical' || finding.severity === 'high' || finding.severity === 'medium';
 }
 
-/** Max runtime-probe verifications per scan — each probe plan draws an API credit. */
+/** Max runtime-probe verifications per scan — each probe plan draws from the scan's credit budget. */
 const MAX_PROBE_FINDINGS_PER_SCAN = 3;
+
+const RUN_CLOSE_TIMEOUT_MS = 30_000;
 
 /**
  * Map a verification verdict to a precision verification level.
@@ -224,6 +232,15 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
 }
 
 async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknown> {
+    const runCloser = new AgentScanRunCloser();
+    try {
+        return await toolAgentScanBody(ctx, args, runCloser);
+    } finally {
+        await runCloser.close();
+    }
+}
+
+async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: AgentScanRunCloser): Promise<unknown> {
     const progress = args._progress as ((progress: number, total: number, message: string) => void) | undefined;
     const skipFix = !!args._skipFix;
 
@@ -401,6 +418,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                     stepsGranted: cached.stepsGranted ?? 40,
                     extensionsGranted: cached.extensionsGranted ?? 0,
                     costSpentUsd: 0,
+                    creditsUsed: 0,
                     transcript: [],
                     cached: true,
                     provenCount: (filteredFindings as any[]).filter((f: any) => f.proven === 'PROVEN').length,
@@ -464,19 +482,28 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
         architectureContext: architectureContextStr,
     };
 
+    const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
     const agentResult = await runAgentScan(ctx, target, {
         signal: (args as any)._signal as AbortSignal | undefined,
         onProgress: (steps, max, msg) => {
             if (progress) progress(steps, max, msg);
         },
+        deferClose: true,
     });
+    const scanRunId = agentResult.runId;
+    runCloser.attach(
+        new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken, timeoutMs: RUN_CLOSE_TIMEOUT_MS }),
+        scanRunId,
+        agentResult.status,
+        agentResult.terminationReason,
+    );
+    const runIdField = scanRunId ? { runId: scanRunId } : {};
 
     if (agentResult.status === 'failed') {
         throw new Error(agentResult.error || 'Agent scan failed to start.');
     }
 
     // 4. Verify each finding via the verify subagent (replaces sandbox prove + juror)
-    const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
     const provenFindings: ProvenFinding[] = [];
 
     // Aggregate verify budget — prevents Phase 2 from spawning unbounded
@@ -493,6 +520,8 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     // at the top of the result, rather than buried in finding.reason.
     let sandboxUnavailableCount = 0;
     let budgetExhaustedCount = 0;
+    let scanBudgetExhausted = false;
+    let scanBudgetExhaustedCount = 0;
     const runtimeProbeDisabled = process.env.SECURECODE_DISABLE_RUNTIME_PROBE === '1';
     const probeCandidates: Array<{ finding: ProvenFinding; endpoint: ProbeEndpointCandidate }> = [];
 
@@ -505,6 +534,18 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     for (const finding of agentResult.findings) {
         if (!shouldProve(finding)) {
             provenFindings.push({ ...finding, proven: 'SKIPPED', provenReason: 'Low severity — not verified' });
+            continue;
+        }
+
+        if (scanBudgetExhausted) {
+            scanBudgetExhaustedCount++;
+            provenFindings.push({
+                ...finding,
+                proven: 'INCONCLUSIVE',
+                provenReason: VERIFY_BUDGET_EXHAUSTED_REASON,
+                verifySubVerdict: 'budget-exhausted',
+                verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
+            });
             continue;
         }
 
@@ -550,10 +591,24 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                 client,
                 budgetTracker: verifyTracker,
                 signal: abortSignal,
+                ...runIdField,
                 onProgress: (round, maxR, msg) => {
                     if (progress) progress(proveIdx, proveable.length, `Verify round ${round}/${maxR}: ${msg}`);
                 },
             });
+
+            if (result.budgetExhaustedReason === 'scan-budget') {
+                scanBudgetExhausted = true;
+                scanBudgetExhaustedCount++;
+                provenFindings.push({
+                    ...finding,
+                    proven: 'INCONCLUSIVE',
+                    provenReason: result.reason,
+                    verifySubVerdict: result.subVerdict,
+                    verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
+                });
+                continue;
+            }
 
             if (result.subVerdict === 'budget-exhausted') budgetExhaustedCount++;
 
@@ -589,6 +644,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                         lineEnd: finding.lineEnd,
                         evidence: finding.evidence,
                         why: finding.why,
+                        ...runIdField,
                     });
                     provenFindings.push({
                         ...finding,
@@ -600,6 +656,18 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                         proofGateResult: proveResp.proofGateResult,
                     });
                 } catch (proveErr: any) {
+                    if (isAgentScanBudgetExhausted(proveErr)) {
+                        scanBudgetExhausted = true;
+                        scanBudgetExhaustedCount++;
+                        provenFindings.push({
+                            ...finding,
+                            proven: 'INCONCLUSIVE',
+                            provenReason: VERIFY_BUDGET_EXHAUSTED_REASON,
+                            verifySubVerdict: 'budget-exhausted',
+                            verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
+                        });
+                        continue;
+                    }
                     sandboxUnavailableCount++;
                     provenFindings.push({
                         ...finding,
@@ -655,6 +723,18 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                 proofGateResult: result.proofGateResult,
             });
         } catch (err: any) {
+            if (isAgentScanBudgetExhausted(err)) {
+                scanBudgetExhausted = true;
+                scanBudgetExhaustedCount++;
+                provenFindings.push({
+                    ...finding,
+                    proven: 'INCONCLUSIVE',
+                    provenReason: VERIFY_BUDGET_EXHAUSTED_REASON,
+                    verifySubVerdict: 'budget-exhausted',
+                    verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
+                });
+                continue;
+            }
             console.warn(`[Agent Scan] Verify loop failed: ${err.message}. Falling back to sandbox prove.`);
             try {
                 const proveResp = await client.postJson<SandboxProveResponse>('/sandbox/prove', {
@@ -665,6 +745,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                     lineEnd: finding.lineEnd,
                     evidence: finding.evidence,
                     why: finding.why,
+                    ...runIdField,
                 });
                 provenFindings.push({
                     ...finding,
@@ -675,10 +756,18 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                     proofGateResult: proveResp.proofGateResult,
                 });
             } catch (err2: any) {
+                const exhausted = isAgentScanBudgetExhausted(err2);
+                if (exhausted) {
+                    scanBudgetExhausted = true;
+                    scanBudgetExhaustedCount++;
+                }
                 provenFindings.push({
                     ...finding,
                     proven: 'INCONCLUSIVE',
-                    provenReason: `Verify failed: ${err.message}; Sandbox fallback also failed: ${err2.message}`,
+                    provenReason: exhausted
+                        ? VERIFY_BUDGET_EXHAUSTED_REASON
+                        : `Verify failed: ${err.message}; Sandbox fallback also failed: ${err2.message}`,
+                    ...(exhausted ? { verifySubVerdict: 'budget-exhausted' } : {}),
                     verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
                 });
             }
@@ -739,6 +828,12 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                     let probedCount = 0;
                     const runtimeInfo = filePath ? detectRuntime(ctx.workspaceRoot, filePath) : null;
                     for (const candidate of orderedCandidates) {
+                        if (scanBudgetExhausted) {
+                            probeBlockedCount++;
+                            candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Runtime probe skipped: ${VERIFY_BUDGET_EXHAUSTED_REASON}`;
+                            candidate.finding.probePending = true;
+                            continue;
+                        }
                         if (probedCount >= MAX_PROBE_FINDINGS_PER_SCAN) {
                             probeBlockedCount++;
                             candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Live-server probe budget reached (${MAX_PROBE_FINDINGS_PER_SCAN} per scan) — re-scan to attempt runtime proof of this finding.`;
@@ -765,6 +860,7 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                                 },
                                 framework: runtimeInfo?.framework ?? undefined,
                                 devServerPort: devServer.port,
+                                ...runIdField,
                             });
                             if (!planResp.canProbe || !planResp.plan) {
                                 probeBlockedCount++;
@@ -795,6 +891,13 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                                 candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Runtime probe inconclusive: ${probeResult.reason}`;
                             }
                         } catch (probeErr: any) {
+                            if (isAgentScanBudgetExhausted(probeErr)) {
+                                scanBudgetExhausted = true;
+                                probeBlockedCount++;
+                                candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Runtime probe skipped: ${VERIFY_BUDGET_EXHAUSTED_REASON}`;
+                                candidate.finding.probePending = true;
+                                continue;
+                            }
                             candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Runtime probe failed: ${probeErr?.message || probeErr}`;
                             candidate.finding.probePending = true;
                         }
@@ -993,6 +1096,17 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                     // this runs inside the existing sandbox without modifying
                     // any workspace files.
                     try {
+                        if (scanBudgetExhausted) {
+                            finding.fixVerification = {
+                                status: 'inconclusive',
+                                reason: VERIFY_BUDGET_EXHAUSTED_REASON,
+                                originalVerdict: finding.proven as 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'SKIPPED',
+                                roundsUsed: 0,
+                                fixedCodeHash: require('crypto').createHash('sha256').update(fixResp.fixed_code).digest('hex').slice(0, 16),
+                            };
+                            finding.fixStatus = 'fix-verification-inconclusive';
+                            break;
+                        }
                         if (progress) {
                             progress(fixIdx, fixableFindings.length, `Verifying fix for ${finding.type} at line ${finding.line} (attempt ${attempt})...`);
                         }
@@ -1022,11 +1136,13 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
                             originalVerdict: finding.proven as 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'SKIPPED',
                             budgetTracker: fixVerifyTracker,
                             signal: abortSignal,
+                            ...runIdField,
                             onProgress: (round, maxR, msg) => {
                                 if (progress) progress(fixIdx, fixableFindings.length, `Fix verify round ${round}/${maxR}: ${msg}`);
                             },
                         });
 
+                        if (fixVerifyResult.scanBudgetExhausted) scanBudgetExhausted = true;
                         finding.fixVerification = fixVerifyResult;
                         // Map the fix verification status to the fixStatus field.
                         switch (fixVerifyResult.status) {
@@ -1107,6 +1223,10 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
     } else if (budgetExhaustedCount > 0) {
         verifyHint = `Exploit verification was skipped for ${budgetExhaustedCount} finding(s) because the per-scan verification budget (${verifyBudget.maxFindings} findings, ${verifyBudget.maxLlmCalls} LLM calls, ${Math.round(verifyBudget.maxWallClockMs / 1000)}s) was exhausted. Re-run the scan to verify the remaining findings, or raise the budget via the VerifyBudget config.`;
     }
+    if (scanBudgetExhaustedCount > 0) {
+        const creditHint = `Exploit verification stopped for ${scanBudgetExhaustedCount} finding(s): this scan's credit budget ran out. Top up credits and re-scan to verify them.`;
+        verifyHint = verifyHint ? `${verifyHint}\n${creditHint}` : creditHint;
+    }
     if (probeBlockedCount > 0) {
         const probeHint = `${probeBlockedCount} finding(s) could be runtime-probe verified — start your dev server (detected port hints: 3000/5173/8080) and re-scan, or set SECURECODE_DEV_SERVER_PORT.`;
         verifyHint = verifyHint ? `${verifyHint}\n${probeHint}` : probeHint;
@@ -1168,9 +1288,30 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
         // best-effort — memory persistence failure must not block results
     }
 
+    const settlement = await runCloser.close();
+    const baseCredits = agentResult.baseCredits ?? AGENT_SCAN_DEFAULTS.creditsPerRun;
+    const creditsUsed = settlement?.creditsUsed ?? agentResult.creditsUsed;
+    const creditsRefunded = settlement?.creditsRefunded ?? agentResult.creditsRefunded;
+    let creditExtensionsGranted = agentResult.creditExtensionsGranted;
+    if (settlement) {
+        const drawnExtensions = Math.round((settlement.creditsUsed + settlement.creditsRefunded - baseCredits) / AGENT_SCAN_DEFAULTS.extensionCredits);
+        creditExtensionsGranted = Math.max(creditExtensionsGranted ?? 0, drawnExtensions, 0);
+    }
+    const creditFields = typeof creditsUsed === 'number'
+        ? {
+            creditsUsed,
+            baseCredits,
+            creditExtensionsGranted: creditExtensionsGranted ?? 0,
+            creditsRefunded: creditsRefunded ?? 0,
+            ...(agentResult.maxCredits !== undefined ? { maxCredits: agentResult.maxCredits } : {}),
+        }
+        : {};
+    const creditText = formatCreditUsage(creditFields);
+    const summary = [agentResult.summary, creditText].filter(Boolean).join(' ') || agentResult.summary;
+
     return {
         status: agentResult.status,
-        summary: agentResult.summary,
+        summary,
         agentFindings: provenFindings,
         verifiedFindings: provenFindings.filter(f => f.proven === 'PROVEN'),
         allFindings: [],
@@ -1180,7 +1321,9 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
         stepsGranted: agentResult.stepsGranted,
         extensionsGranted: agentResult.extensionsGranted,
         terminationReason: agentResult.terminationReason,
+        ...(agentResult.capReason ? { capReason: agentResult.capReason } : {}),
         costSpentUsd: agentResult.costSpentUsd,
+        ...creditFields,
         transcript: agentResult.transcript,
         provenCount: provenFindings.filter(f => f.proven === 'PROVEN').length,
         unprovenCount: provenFindings.filter(f => f.proven === 'UNPROVEN').length,

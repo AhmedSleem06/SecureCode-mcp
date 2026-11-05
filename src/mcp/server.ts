@@ -11,8 +11,16 @@ import { toolAttack } from '../tools/attack';
 import { toolScanDependencies } from '../tools/scanDependencies';
 import { toolScanBatch } from '../tools/scanBatch';
 import { toolScanSecrets } from '../tools/scanSecrets';
-import { toolAgentScan } from '../tools/agentScan';
-import { toolAgentScanBatch } from '../tools/agentScanBatch';
+import {
+    toolAgentScanViaJob,
+    toolAgentScanBatchViaJob,
+    toolAgentScanStart,
+    toolAgentScanBatchStart,
+    toolJobStatus,
+    toolJobCancel,
+    toolJobList,
+} from '../tools/jobTools';
+import { getGlobalJobRunner } from '../jobs/jobRunner';
 import { toolRunTests } from '../tools/runTests';
 import { toolRecordFalsePositive, toolGetAgentMemory, toolClearAgentMemory, toolAddKnownFact } from '../tools/agentMemoryTools';
 import { toolReviewFindings, toolDecideFinding, toolClearFindingReviews } from '../tools/findingReviewTools';
@@ -63,8 +71,13 @@ const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<u
     'securecode.scan-dependencies': toolScanDependencies,
     'securecode.scan-batch': toolScanBatch,
     'securecode.scan-secrets': toolScanSecrets,
-    'securecode.agent-scan': toolAgentScan,
-    'securecode.agent-scan-batch': toolAgentScanBatch,
+    'securecode.agent-scan': toolAgentScanViaJob,
+    'securecode.agent-scan-batch': toolAgentScanBatchViaJob,
+    'securecode.agent-scan-start': toolAgentScanStart,
+    'securecode.agent-scan-batch-start': toolAgentScanBatchStart,
+    'securecode.job-status': toolJobStatus,
+    'securecode.job-cancel': toolJobCancel,
+    'securecode.job-list': toolJobList,
     'securecode.run-tests': toolRunTests,
     'securecode.record-false-positive': toolRecordFalsePositive,
     'securecode.get-agent-memory': toolGetAgentMemory,
@@ -287,6 +300,8 @@ function handleRootsResponse(ctx: ServerContext, response: any): void {
 }
 
 export function startServer(ctx: ServerContext): void {
+    getGlobalJobRunner().recover(ctx).catch(() => undefined);
+
     const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
     rl.on('line', (line: string) => {
@@ -338,6 +353,6 @@ export function startServer(ctx: ServerContext): void {
     });
 
     rl.on('close', () => {
-        process.exit(0);
+        getGlobalJobRunner().shutdown().catch(() => undefined).finally(() => process.exit(0));
     });
 }

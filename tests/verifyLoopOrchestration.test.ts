@@ -6,6 +6,10 @@ import {
     defaultVerifyBudget,
 } from '../src/attack/agentScanProtocol';
 
+vi.mock('../src/utils/verificationSandbox', () => ({
+    detectSandbox: () => ({ name: 'deno' }),
+}));
+
 vi.mock('../src/utils/localTestRunner', () => ({
     runLocalTest: vi.fn(),
 }));

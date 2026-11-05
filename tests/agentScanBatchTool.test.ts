@@ -290,4 +290,42 @@ describe('toolAgentScanBatch — sequential orchestration', () => {
             getJson: vi.fn().mockResolvedValue({ scanCredits: 1000, attackerCredits: 100 }),
         })) as any);
     });
+
+    it('preflight plans 5 credits per file (architecture cached) and warns about the 15-credit ceiling', async () => {
+        vi.mocked(ApiClient).mockImplementation((() => ({
+            getJson: vi.fn().mockResolvedValue({ scanCredits: 15, attackerCredits: 0 }),
+        })) as any);
+        mockArchResult(makeArch(), true);
+        mockSelection(['src/a.ts', 'src/b.ts', 'src/c.ts']);
+        (toolAgentScan as any).mockResolvedValue(mockScanResult('completed', { creditsUsed: 5 }));
+
+        const result = await toolAgentScanBatch(ctx, { topN: 3 });
+
+        expect(result.status).toBe('completed');
+        expect((toolAgentScan as any).mock.calls).toHaveLength(3);
+        expect(result.creditNote).toContain('Large files can use up to 15 credits each');
+        expect(result.totals.creditsUsed).toBe(15);
+
+        vi.mocked(ApiClient).mockImplementation((() => ({
+            getJson: vi.fn().mockResolvedValue({ scanCredits: 1000, attackerCredits: 100 }),
+        })) as any);
+    });
+
+    it('insufficient-credits preflight explains the shortfall', async () => {
+        vi.mocked(ApiClient).mockImplementation((() => ({
+            getJson: vi.fn().mockResolvedValue({ scanCredits: 14, attackerCredits: 0 }),
+        })) as any);
+        mockArchResult(makeArch(), true);
+        mockSelection(['src/a.ts', 'src/b.ts', 'src/c.ts']);
+
+        const result = await toolAgentScanBatch(ctx, { topN: 3 });
+
+        expect(result.stopReason).toBe('insufficient-credits');
+        expect(result.stopDetail).toBe('Insufficient credits: have 14, need 15.');
+        expect(result.creditNote).toContain('up to 45 total');
+
+        vi.mocked(ApiClient).mockImplementation((() => ({
+            getJson: vi.fn().mockResolvedValue({ scanCredits: 1000, attackerCredits: 100 }),
+        })) as any);
+    });
 });
