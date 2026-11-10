@@ -709,6 +709,12 @@ export async function executeFlowAction(
                     source,
                     sink,
                     hops,
+                    flows: results.map(r => ({
+                        source: { filePath: action.filePath, symbol: r.source, line: r.sourceLine },
+                        sink: { filePath: action.filePath, symbol: r.sink, line: r.sinkLine },
+                        hops: r.propagationPath.map(p => ({ filePath: action.filePath, symbol: p.variable, line: p.line, description: p.description })),
+                        sanitized: !r.isTainted,
+                    })),
                     truncated: false,
                 },
             };
@@ -762,6 +768,11 @@ export async function executeFlowAction(
                     source,
                     sink,
                     hops,
+                    flows: results.map(r => ({
+                        source: { filePath: r.sourceFile, symbol: r.source, line: r.sourceLine },
+                        sink: { filePath: r.sinkFile, symbol: r.sink, line: r.sinkLine },
+                        hops: r.crossFileSteps.map(s => ({ filePath: s.file, symbol: s.variable, line: s.line, description: s.description })),
+                    })),
                     truncated,
                 },
             };

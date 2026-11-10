@@ -25,6 +25,7 @@ import type { EvidenceLedger } from './evidenceLedger';
 import type { WorkItemQueue } from './workItem';
 import type { HandlerInventory } from '../project-map/handlerInventory';
 import type { CandidateStore } from './candidateStore';
+import { missingGateDimensions } from './candidateStore';
 import type { InvestigationState } from './investigationState';
 import type { ScheduleDecision } from './scanScheduler';
 
@@ -47,6 +48,13 @@ export const FINISH_LOOP_ESCAPE_THRESHOLD = 4;
  * checklist that may not apply to the file wastes the budget.
  */
 export const FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD = 2;
+
+/**
+ * Candidate-only rejections (every reason is `non-terminal-candidate`) also
+ * escape after two identical rejections: the open dimensions are recorded
+ * as the finding's required evidence and the verifier runs after finish.
+ */
+export const FINISH_LOOP_CANDIDATE_ESCAPE_THRESHOLD = 2;
 
 const CHECKLIST_ONLY_REASON_CODES = new Set(['unsatisfied-evidence-requirement', 'incomplete-checklist']);
 
@@ -76,6 +84,7 @@ export function newFinishLoopTracker(): FinishLoopTracker {
 
 export function finishLoopEscapeThreshold(reasons: FinishGateReason[], activeCandidateCount = 0): number {
     if (reasons.length === 0) return FINISH_LOOP_ESCAPE_THRESHOLD;
+    if (reasons.every(r => r.code === 'non-terminal-candidate')) return FINISH_LOOP_CANDIDATE_ESCAPE_THRESHOLD;
     const checklistOnly = reasons.every(r => CHECKLIST_ONLY_REASON_CODES.has(r.code));
     return checklistOnly && activeCandidateCount === 0
         ? FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD
@@ -225,24 +234,29 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
         }
     }
 
-    // Check 3: Non-terminal candidates — unsupported candidates block finish
-    // when budget remains. When budget is exhausted, they become coverage gaps.
+    // Check 3: Candidates not ready for the Juror block finish when budget
+    // remains; when budget is exhausted they become coverage gaps. A
+    // candidate is ready when its gate dimensions are satisfied, or when a
+    // traced source-to-sink flow touches its location and no effective guard
+    // was found. `verification` is never a pre-finish requirement: the
+    // verifier runs after finish.
     if (!candidates.allReadyForJuror()) {
-        const underInvestigation = candidates.getUnderInvestigation();
-        for (const candidate of underInvestigation) {
-            const missingDims = candidate.requiredProofDimensions?.filter(d =>
-                !candidate.satisfiedDimensions?.includes(d),
-            ) || [];
+        for (const candidate of candidates.getBlocking()) {
+            const missingDims = missingGateDimensions(candidate);
+            const location = candidate.locations.map(l => `${l.filePath}:${l.line}`).join(', ') || target.filePath;
+            const blocker = candidate.guardFound
+                ? `an effective guard was found (${candidate.guardReason}) — show why it does not apply or drop the finding`
+                : `no traced source-to-sink flow reaches ${location} — run trace_flow or trace_flow_cross_file on that file`;
             const dimInfo = missingDims.length > 0
-                ? ` (missing proof dimensions: ${missingDims.join(', ')})`
-                : ` (${candidate.evidenceRefs.length} evidence ref(s))`;
+                ? ` (missing proof dimensions: ${missingDims.join(', ')}; ${blocker})`
+                : ` (${candidate.evidenceRefs.length} evidence ref(s); ${blocker})`;
             reasons.push({
                 code: 'non-terminal-candidate',
                 description: `Candidate needs more evidence: ${candidate.claim} (status: ${candidate.status}${dimInfo})`,
             });
             coverageGaps.push({
                 title: `Candidate needs more evidence: ${candidate.claim}`,
-                detail: `This vulnerability candidate at ${candidate.locations.map(l => `${l.filePath}:${l.line}`).join(', ')} has status "${candidate.status}" with ${candidate.evidenceRefs.length} evidence reference(s). Missing proof dimensions: ${missingDims.join(', ') || 'none'}. Run trace_flow, check_guard, or check_policy on the finding location to gather more evidence before finishing.`,
+                detail: `This vulnerability candidate at ${location} has status "${candidate.status}" with ${candidate.evidenceRefs.length} evidence reference(s). Missing proof dimensions: ${missingDims.join(', ') || 'none'}. ${blocker[0].toUpperCase()}${blocker.slice(1)}.`,
                 file: candidate.locations[0]?.filePath || target.filePath,
                 requiredEvidence: candidate.requiredEvidence.map(e => `${e.description} (tools: ${(e.requiredTools || []).join(', ')})`),
                 suggestedNextAction: (candidate.requiredEvidence[0]?.requiredTools || ['trace_flow_cross_file'])[0],

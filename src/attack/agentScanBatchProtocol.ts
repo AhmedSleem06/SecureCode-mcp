@@ -61,6 +61,16 @@ export interface AgentScanBatchReplacement {
     reason: string;
 }
 
+export interface AgentScanBatchAffectedLocation {
+    filePath: string;
+    line: number;
+}
+
+export type AgentScanBatchFinding = AgentScanFinding & {
+    /** Other files where the same root cause was reported; merged into this entry. */
+    alsoAffects?: AgentScanBatchAffectedLocation[];
+};
+
 export interface AgentScanBatchFileResult {
     filePath: string;
     rank: number;
@@ -70,7 +80,7 @@ export interface AgentScanBatchFileResult {
     scanStatus?: string;
     terminationReason?: TerminationReason;
     cached?: boolean;
-    findings: AgentScanFinding[];
+    findings: AgentScanBatchFinding[];
     investigationNotes: InvestigationNote[];
     coverageGaps: CoverageGap[];
     stepsUsed: number;
@@ -120,7 +130,10 @@ export interface AgentScanBatchResult {
         incomplete: number;
         failed: number;
         notStarted: number;
+        /** Findings as reported by the per-file scans, before cross-file merging. */
         findings: number;
+        /** Distinct root causes after merging the same finding reported in several files. */
+        distinctFindings: number;
         stepsUsed: number;
         costSpentUsd: number;
         creditsUsed: number;
@@ -220,6 +233,73 @@ export function formatBatchSelectionNote(
     return parts.length > 0 ? parts.join(' ') : undefined;
 }
 
+export const BATCH_FINDING_SIMILARITY = 0.8;
+
+const FINDING_STOPWORDS = new Set([
+    'the', 'and', 'for', 'with', 'that', 'this', 'are', 'was', 'from', 'can', 'any', 'not',
+    'into', 'when', 'which', 'its', 'has', 'have', 'been', 'will', 'all', 'but', 'than',
+]);
+
+export function findingTokens(finding: AgentScanFinding): Set<string> {
+    const text = `${(finding as { title?: string }).title ?? ''} ${finding.why ?? ''}`.toLowerCase();
+    const tokens = new Set<string>();
+    for (const token of text.split(/[^a-z0-9_]+/)) {
+        if (token.length < 3 || /^\d+$/.test(token) || FINDING_STOPWORDS.has(token)) continue;
+        tokens.add(token);
+    }
+    return tokens;
+}
+
+export function tokenJaccard(a: Set<string>, b: Set<string>): number {
+    if (a.size === 0 && b.size === 0) return 0;
+    let intersection = 0;
+    for (const t of a) if (b.has(t)) intersection++;
+    return intersection / (a.size + b.size - intersection);
+}
+
+function normalizeFindingType(type: string | undefined): string {
+    return String(type ?? '').toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+export function sameRootCauseFinding(a: AgentScanFinding, b: AgentScanFinding): boolean {
+    const idA = a.rootCause?.rootCauseId;
+    const idB = b.rootCause?.rootCauseId;
+    if (idA && idB && idA === idB) return true;
+    if (normalizeFindingType(a.type) !== normalizeFindingType(b.type)) return false;
+    return tokenJaccard(findingTokens(a), findingTokens(b)) >= BATCH_FINDING_SIMILARITY;
+}
+
+/**
+ * Merge findings reported in different files that share a root cause (same
+ * rootCauseId, or same type and title/why token-set similarity ≥ 0.8). The
+ * first report (in scan order) stays; later ones are removed from their file
+ * and listed in its `alsoAffects`.
+ */
+export function mergeCrossFileFindings(fileResults: AgentScanBatchFileResult[]): {
+    fileResults: AgentScanBatchFileResult[];
+    distinctFindings: number;
+} {
+    const primaries: Array<{ filePath: string; finding: AgentScanBatchFinding }> = [];
+    const merged = fileResults.map(file => {
+        const kept: AgentScanBatchFinding[] = [];
+        for (const finding of file.findings ?? []) {
+            const primary = primaries.find(p => p.filePath !== file.filePath && sameRootCauseFinding(p.finding, finding));
+            if (primary) {
+                const also = primary.finding.alsoAffects ?? (primary.finding.alsoAffects = []);
+                if (!also.some(l => l.filePath === file.filePath && l.line === finding.line)) {
+                    also.push({ filePath: file.filePath, line: finding.line });
+                }
+                continue;
+            }
+            const copy: AgentScanBatchFinding = { ...finding, ...(finding.alsoAffects ? { alsoAffects: [...finding.alsoAffects] } : {}) };
+            kept.push(copy);
+            primaries.push({ filePath: file.filePath, finding: copy });
+        }
+        return { ...file, findings: kept };
+    });
+    return { fileResults: merged, distinctFindings: primaries.length };
+}
+
 /**
  * Aggregate per-file results into a batch result with totals.
  */
@@ -227,17 +307,21 @@ export function aggregateBatchResult(
     stopReason: AgentScanBatchStopReason,
     requestedTopN: number,
     selectedFiles: string[],
-    fileResults: AgentScanBatchFileResult[],
+    rawFileResults: AgentScanBatchFileResult[],
     extras?: AggregateBatchExtras,
 ): AgentScanBatchResult {
+    const merged = mergeCrossFileFindings(rawFileResults);
+    const fileResults = merged.fileResults;
     const completed = fileResults.filter(f => f.status === 'completed');
     const incomplete = fileResults.filter(f => f.status === 'incomplete');
     const failed = fileResults.filter(f => f.status === 'failed');
     const notStarted = fileResults.filter(f => f.status === 'not-started');
 
-    const totalFindings = completed.length + incomplete.length > 0
-        ? fileResults.reduce((sum, f) => sum + (f.findings?.length || 0), 0)
+    const hasScans = completed.length + incomplete.length > 0;
+    const totalFindings = hasScans
+        ? rawFileResults.reduce((sum, f) => sum + (f.findings?.length || 0), 0)
         : 0;
+    const distinctFindings = hasScans ? merged.distinctFindings : 0;
     const totalSteps = fileResults.reduce((sum, f) => sum + f.stepsUsed, 0);
     const totalCost = fileResults.reduce((sum, f) => sum + f.costSpentUsd, 0);
     const totalCredits = fileResults.reduce((sum, f) => sum + (f.creditsUsed ?? 0), 0);
@@ -279,6 +363,7 @@ export function aggregateBatchResult(
             failed: failed.length,
             notStarted: notStarted.length,
             findings: totalFindings,
+            distinctFindings,
             stepsUsed: totalSteps,
             costSpentUsd: totalCost,
             creditsUsed: totalCredits,

@@ -1,4 +1,4 @@
-﻿// Vitest suite for the scan agent loop — large-file read recovery.
+// Vitest suite for the scan agent loop — large-file read recovery.
 //
 // Regression coverage for the production blocked_read_recovery death
 // spiral on a >300-line file:
@@ -100,6 +100,92 @@ beforeEach(() => {
 afterEach(() => {
     vi.restoreAllMocks();
     fs.rmSync(workspaceRoot, { recursive: true, force: true });
+});
+
+describe('runAgentScan — visible read window', () => {
+    it('blocks re-reads only while the range is in the last FULL_READ_WINDOW reads, with an accurate message, and sends clientFinishGate', async () => {
+        const content = Array.from({ length: 600 }, (_, i) => `export const step${i + 1} = '${i + 1}';`).join('\n');
+        fs.writeFileSync(path.join(workspaceRoot, 'w.ts'), content);
+        const target = { filePath: 'w.ts', language: 'typescript', fileContent: content };
+        const ctx = { workspaceRoot, apiUrl: 'http://localhost:3000', apiToken: 'test' };
+        const read = (startLine: number, endLine: number, n: number) =>
+            stepResponse({ type: 'read_file', path: 'w.ts', startLine, endLine, rationale: 'r' }, n);
+
+        const mockFn = mockPostJson([
+            startResponse(),
+            read(1, 200, 39),
+            read(1, 200, 38),
+            read(201, 400, 37),
+            read(401, 600, 36),
+            read(1, 200, 35),
+            stepResponse({ type: 'trace_flow_cross_file', filePath: 'w.ts', rationale: 'trace' }, 34),
+            stepResponse({ type: 'read_config', configKind: 'all', rationale: 'config' }, 33),
+            stepResponse({ type: 'find_tests', filePath: 'w.ts', rationale: 'tests' }, 32),
+            stepResponse({ type: 'finish', findings: [], summary: 'done', selfCritique: 'done' }, 31),
+        ]);
+
+        const result = await runAgentScan(ctx, target, {});
+
+        expect((mockFn.mock.calls[1][1] as any).clientCapabilities.clientFinishGate).toBe(true);
+
+        const reads = result.transcript.filter(s => s.action.type === 'read_file' && !s.observation.startsWith('['));
+        expect(reads[0].observation).not.toContain('BLOCKED');
+        expect(reads[1].observation).toContain('BLOCKED');
+        expect(reads[1].observation).toContain('still shown in full in the transcript above');
+        expect(reads[1].observation).toContain('last 2 reads');
+        expect(reads[4].observation).not.toContain('BLOCKED');
+        expect(reads[4].observation).toContain('lines 1-200 of 600');
+
+        expect(result.qualityMetrics?.reads.reRead).toBe(1);
+        expect(result.qualityMetrics?.reads.blocked).toBe(1);
+        expect(result.qualityMetrics?.coverage.coveragePercentage).toBe(100);
+    });
+});
+
+describe('runAgentScan — traced flow makes a finding ready', () => {
+    it('accepts the 5-bug shape on the first finish: SQLi with a traced flow and no guard', async () => {
+        const lines = Array.from({ length: 40 }, (_, i) => `export function helper${i + 1}(input: string): string { return input + '-${i + 1}'; }`);
+        lines[11] = 'export function getUser(req: any, db: any) { return db.query("SELECT * FROM users WHERE id = " + req.query.id); }';
+        const content = lines.join('\n');
+        fs.writeFileSync(path.join(workspaceRoot, 'bugs.ts'), content);
+        const target = { filePath: 'bugs.ts', language: 'typescript', fileContent: content };
+        const ctx = { workspaceRoot, apiUrl: 'http://localhost:3000', apiToken: 'test' };
+
+        const executor = await import('../src/attack/agentScanExecutor');
+        (executor.executeFlowAction as any).mockImplementationOnce(async () => ({
+            observation: 'req.query.id (L12) → db.query (L12) [sql_injection] TAINTED',
+            flowResult: {
+                status: 'confirmed',
+                source: { filePath: 'bugs.ts', symbol: 'req.query.id', line: 12 },
+                sink: { filePath: 'bugs.ts', symbol: 'db.query', line: 12 },
+                hops: [],
+                flows: [{ source: { filePath: 'bugs.ts', line: 12 }, sink: { filePath: 'bugs.ts', line: 12 }, hops: [] }],
+                truncated: false,
+            },
+        }));
+
+        mockPostJson([
+            startResponse(),
+            stepResponse({ type: 'read_file', path: 'bugs.ts', rationale: 'read' }, 39),
+            stepResponse({ type: 'trace_flow', filePath: 'bugs.ts', rationale: 'trace' }, 38),
+            stepResponse({ type: 'trace_flow_cross_file', filePath: 'bugs.ts', rationale: 'trace' }, 37),
+            stepResponse({ type: 'read_config', configKind: 'all', rationale: 'config' }, 36),
+            stepResponse({ type: 'find_tests', filePath: 'bugs.ts', rationale: 'tests' }, 35),
+            stepResponse({
+                type: 'finish',
+                findings: [{ line: 12, type: 'sql_injection', severity: 'critical', confidence: 90, evidence: 'db.query("..." + req.query.id)', why: 'User input concatenated into SQL' }],
+                summary: 'SQLi', selfCritique: 'checked',
+            }, 34),
+        ]);
+
+        const result = await runAgentScan(ctx, target, {});
+
+        expect(result.status).toBe('completed');
+        expect(result.terminationReason).toBe('agent_finish');
+        expect(result.qualityMetrics?.finish.rejections).toBe(0);
+        expect(result.findings).toHaveLength(1);
+        expect(result.transcript.some(s => s.observation.startsWith('FINISH REJECTED'))).toBe(false);
+    });
 });
 
 describe('runAgentScan — large-file read recovery', () => {

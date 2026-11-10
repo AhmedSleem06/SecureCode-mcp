@@ -51,6 +51,7 @@ import {
 } from './protocolValidator';
 import {
     AGENT_SCAN_DEFAULTS,
+    FULL_READ_WINDOW,
     defaultClientCapabilities,
     type AgentActionConstraint,
     type AgentScanAction,
@@ -1227,6 +1228,10 @@ export async function runAgentScan(
                         }
                     }
                 }
+                candidateStore.applyFlowEvidence(investigationState.getTracedFlowPaths(), investigationState.getGuardResults());
+                if (candidateStore.allReadyForJuror()) {
+                    investigationState.markCandidatesVerified();
+                }
 
                 // Evaluate the finish proposal through the hard finish gate
                 const schedDecision = schedulerDecision({
@@ -1427,7 +1432,7 @@ export async function runAgentScan(
                     const nextHint = readValue.nextUnreadRange
                         ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
                         : '';
-                    observation = `BLOCKED: Lines ${action.startLine || 'all'}-${action.endLine || 'all'} of "${action.path}" were already read. The content is in the transcript above.${nextHint}\n\n${checklist}`;
+                    observation = `BLOCKED: Lines ${action.startLine || 'all'}-${action.endLine || 'all'} of "${action.path}" are one of your last ${FULL_READ_WINDOW} reads and are still shown in full in the transcript above. Use that content, or analyze it with trace_flow/check_guard/check_policy.${nextHint}\n\n${checklist}`;
                     wasBlocked = true;
                 } else if (readValue.classification === 'high-overlap') {
                     qualityTracker.recordRead('high-overlap', false);
@@ -1435,7 +1440,8 @@ export async function runAgentScan(
                     const nextHint = readValue.nextUnreadRange
                         ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
                         : '';
-                    observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" substantially overlap already-read ranges (${readValue.newLines} new lines of ${(action.endLine || 0) - (action.startLine || 1) + 1} requested). The content is in the transcript above. Read a DIFFERENT section or use trace_flow/check_guard/check_policy to analyze what you've already read.${nextHint}\n\n${checklist}`;
+                    const visibleList = investigationState.getVisibleRanges(action.path).map(r => `${r.start}-${r.end}`).join(', ');
+                    observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" mostly overlap lines ${visibleList}, which are among your last ${FULL_READ_WINDOW} reads and still shown in full in the transcript above. Read a DIFFERENT section or use trace_flow/check_guard/check_policy to analyze that content.${nextHint}\n\n${checklist}`;
                     wasBlocked = true;
                 } else if (readValue.classification === 'invalid') {
                     qualityTracker.recordRead('invalid', false);
@@ -1451,7 +1457,6 @@ export async function runAgentScan(
                     observation = `BLOCKED: The function map for "${action.path}" is already in the transcript above — it delivers no source coverage. Use read_file with explicit startLine/endLine to read the actual code.${nextHint}\n\n${checklist}`;
                     wasBlocked = true;
                 } else {
-                    qualityTracker.recordRead(readValue.classification, false);
                     const readResult = await executeReadFileAction(action, ctx);
                     observation = readResult.observation;
                     qualityTracker.recordRead(readValue.classification, readResult.truncated);
@@ -1757,12 +1762,31 @@ export async function runAgentScan(
                             source: flowResult.source,
                             sink: flowResult.sink,
                             hops: flowResult.hops,
+                            flows: flowResult.flows,
                             truncated: flowResult.truncated,
                             error: flowResult.error,
                         },
                     );
                 } else {
                     investigationState.recordFlowVerification(flowFile, action.type, 'inconclusive', 0, 'No structured flow result available');
+                }
+            }
+            if (!wasBlocked && action.type === 'check_guard') {
+                const guardMatch = /^Guard "[^"]*" vs \S+: (EFFECTIVE|NOT EFFECTIVE)\nReason: ([^\n]*)/.exec(observation);
+                if (guardMatch) {
+                    investigationState.recordGuardResult({
+                        filePath: String((action as any).filePath || target.filePath),
+                        guardName: String((action as any).guardName || ''),
+                        attackType: (action as any).attackType,
+                        effective: guardMatch[1] === 'EFFECTIVE',
+                        reason: guardMatch[2],
+                    });
+                }
+            }
+            if (!wasBlocked && candidateStore.size() > 0 && (action.type === 'trace_flow' || action.type === 'trace_flow_cross_file' || action.type === 'check_guard')) {
+                candidateStore.applyFlowEvidence(investigationState.getTracedFlowPaths(), investigationState.getGuardResults());
+                if (candidateStore.allReadyForJuror()) {
+                    investigationState.markCandidatesVerified();
                 }
             }
             // handlers and populate the handler inventory. Create handler

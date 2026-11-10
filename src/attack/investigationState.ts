@@ -17,6 +17,7 @@
  */
 
 import { MAX_OBSERVATION_CHARS } from './observationLimits';
+import { FULL_READ_WINDOW } from './agentScanProtocol';
 
 export interface LineRange {
     start: number;
@@ -61,8 +62,24 @@ export interface FlowVerification {
     source?: { filePath: string; symbol?: string; line?: number };
     sink?: { filePath: string; symbol?: string; line?: number };
     hops?: Array<{ filePath: string; symbol?: string; line?: number; description?: string }>;
+    flows?: TracedFlow[];
     truncated?: boolean;
     error?: string;
+}
+
+export interface TracedFlow {
+    source?: { filePath: string; symbol?: string; line?: number };
+    sink?: { filePath: string; symbol?: string; line?: number };
+    hops: Array<{ filePath: string; symbol?: string; line?: number; description?: string }>;
+    sanitized?: boolean;
+}
+
+export interface GuardResult {
+    filePath: string;
+    guardName: string;
+    attackType?: string;
+    effective: boolean;
+    reason?: string;
 }
 
 export type ReadValueClassification =
@@ -70,6 +87,7 @@ export type ReadValueClassification =
     | 'partial-new-coverage'
     | 'duplicate'
     | 'high-overlap'
+    | 're-read'
     | 'invalid'
     | 'function-map';
 
@@ -139,6 +157,8 @@ export class InvestigationState {
     private tasks = new Map<string, InvestigationTask>();
     private flowVerifications: FlowVerification[] = [];
     private scopes = new Map<string, LineRange>();
+    private visibleReads: Array<{ filePath: string; range: LineRange }> = [];
+    private guardResults: GuardResult[] = [];
 
     constructor() {
         this.checklist = {
@@ -270,11 +290,33 @@ export class InvestigationState {
             };
         }
 
-        if (this.duplicateReadKeys.has(rangeKey)) {
+        const requestedLines = range.end - range.start + 1;
+        const mergedCoverage = coverage ? coverage.ranges : [];
+        const overlapLines = InvestigationState.coveredLinesInRange(mergedCoverage, range);
+        const newLines = requestedLines - overlapLines;
+
+        const visible = this.visibleRangesFor(normalized);
+        const isVisibleDuplicate = visible.some(v => v.start === range.start && v.end === range.end);
+        let visibleOverlap = 0;
+        for (const v of visible) {
+            const frac = InvestigationState.overlapFraction(v, range);
+            if (frac > visibleOverlap) visibleOverlap = frac;
+        }
+
+        if (isVisibleDuplicate) {
             return {
                 classification: 'duplicate',
                 overlapFraction: 1,
                 newLines: 0,
+                coverageAfter: coverage ? [...coverage.ranges] : [],
+                nextUnreadRange: this.getNextUnreadRange(filePath),
+            };
+        }
+        if (visibleOverlap > 0.5) {
+            return {
+                classification: 'high-overlap',
+                overlapFraction: visibleOverlap,
+                newLines,
                 coverageAfter: coverage ? [...coverage.ranges] : [],
                 nextUnreadRange: this.getNextUnreadRange(filePath),
             };
@@ -288,16 +330,11 @@ export class InvestigationState {
             }
         }
 
-        const requestedLines = range.end - range.start + 1;
-        const mergedCoverage = coverage ? coverage.ranges : [];
-        const overlapLines = InvestigationState.coveredLinesInRange(mergedCoverage, range);
-        const newLines = requestedLines - overlapLines;
-
         let classification: ReadValueClassification;
         if (maxOverlap === 0) {
             classification = 'new-coverage';
-        } else if (maxOverlap > 0.5) {
-            classification = 'high-overlap';
+        } else if (maxOverlap > 0.5 || this.duplicateReadKeys.has(rangeKey)) {
+            classification = 're-read';
         } else {
             classification = 'partial-new-coverage';
         }
@@ -309,6 +346,22 @@ export class InvestigationState {
             coverageAfter: coverage ? [...coverage.ranges] : [],
             nextUnreadRange: this.getNextUnreadRange(filePath),
         };
+    }
+
+    private recordVisibleRead(normalized: string, range: LineRange): void {
+        this.visibleReads.push({ filePath: normalized, range: { ...range } });
+        if (this.visibleReads.length > FULL_READ_WINDOW) {
+            this.visibleReads.splice(0, this.visibleReads.length - FULL_READ_WINDOW);
+        }
+    }
+
+    private visibleRangesFor(normalized: string): LineRange[] {
+        return this.visibleReads.filter(v => v.filePath === normalized).map(v => v.range);
+    }
+
+    /** Ranges of a file still shown in full in the API transcript (the last FULL_READ_WINDOW successful reads). */
+    getVisibleRanges(filePath: string): LineRange[] {
+        return this.visibleRangesFor(InvestigationState.normalizePath(filePath)).map(r => ({ ...r }));
     }
 
     /**
@@ -366,6 +419,7 @@ export class InvestigationState {
         }
 
         coverage.ranges = InvestigationState.mergeRanges([...coverage.ranges, range]);
+        this.recordVisibleRead(normalized, range);
         this.filesRead.add(normalized);
         const rangeKey = `${normalized}:${startLine || 0}:${endLine || 0}`;
         this.duplicateReadKeys.add(rangeKey);
@@ -464,6 +518,7 @@ export class InvestigationState {
         }
 
         coverage.ranges = InvestigationState.mergeRanges([...coverage.ranges, range]);
+        this.recordVisibleRead(normalized, range);
         this.filesRead.add(normalized);
         const rangeKey = `${normalized}:${actualStart || 0}:${actualEnd || 0}`;
         this.duplicateReadKeys.add(rangeKey);
@@ -771,6 +826,7 @@ export class InvestigationState {
             source?: { filePath: string; symbol?: string; line?: number };
             sink?: { filePath: string; symbol?: string; line?: number };
             hops?: Array<{ filePath: string; symbol?: string; line?: number; description?: string }>;
+            flows?: TracedFlow[];
             truncated?: boolean;
             error?: string;
         },
@@ -787,12 +843,43 @@ export class InvestigationState {
             source: structured?.source,
             sink: structured?.sink,
             hops: structured?.hops,
+            flows: structured?.flows,
             truncated: structured?.truncated,
             error: structured?.error,
         });
         if (status === 'confirmed' || status === 'refuted') {
             this.markStepComplete('cross-file-flow');
         }
+    }
+
+    /**
+     * Confirmed, unsanitized source-to-sink paths with every line they touch.
+     * Feeds candidate readiness (a traced flow at the candidate location).
+     */
+    getTracedFlowPaths(): Array<{ tool: string; points: Array<{ filePath: string; line?: number }> }> {
+        const paths: Array<{ tool: string; points: Array<{ filePath: string; line?: number }> }> = [];
+        for (const v of this.flowVerifications) {
+            if (v.status !== 'confirmed') continue;
+            const flows: TracedFlow[] = v.flows && v.flows.length > 0
+                ? v.flows
+                : [{ source: v.source, sink: v.sink, hops: v.hops ?? [] }];
+            for (const flow of flows) {
+                if (flow.sanitized) continue;
+                const points = [flow.source, flow.sink, ...flow.hops]
+                    .filter((p): p is { filePath: string; line?: number } => !!p && !!p.filePath)
+                    .map(p => ({ filePath: p.filePath, line: p.line }));
+                if (points.length > 0) paths.push({ tool: v.tool, points });
+            }
+        }
+        return paths;
+    }
+
+    recordGuardResult(result: GuardResult): void {
+        this.guardResults.push({ ...result });
+    }
+
+    getGuardResults(): GuardResult[] {
+        return this.guardResults.map(g => ({ ...g }));
     }
 
     getFlowVerifications(): FlowVerification[] {

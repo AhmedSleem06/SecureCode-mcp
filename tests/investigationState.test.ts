@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { InvestigationState } from '../src/attack/investigationState';
+import { FULL_READ_WINDOW } from '../src/attack/agentScanProtocol';
 
 describe('InvestigationState', () => {
     it('detects exact duplicate reads', () => {
@@ -589,15 +590,15 @@ describe('InvestigationState', () => {
         });
 
         it('accepts an explicit density override', () => {
-            // floor(16000*0.9 / (200+8)) = 69 lines
-            expect(InvestigationState.chunkSizeForContent(1000, undefined, 200)).toBe(69);
+            // floor(13500*0.9 / (200+8)) = 58 lines, clamped to the 60-line minimum
+            expect(InvestigationState.chunkSizeForContent(1000, undefined, 200)).toBe(60);
         });
 
         it('uses recorded line density for getNextUnreadRange chunks', () => {
             const state = new InvestigationState();
             state.recordActualRead('src/dense.ts', 1, 50, 1000, false);
             state.recordLineDensity('src/dense.ts', Array.from({ length: 1000 }, () => 'q'.repeat(200)).join('\n'));
-            expect(state.getNextUnreadRange('src/dense.ts')).toEqual({ start: 51, end: 119 });
+            expect(state.getNextUnreadRange('src/dense.ts')).toEqual({ start: 51, end: 110 });
         });
     });
 
@@ -746,6 +747,57 @@ describe('InvestigationState', () => {
             }]);
             const unresolved = state.getUnresolvedTasks();
             expect(unresolved.length).toBeGreaterThan(0);
+        });
+    });
+
+    describe('visible read window (FULL_READ_WINDOW)', () => {
+        it('the window size matches the API contract', () => {
+            expect(FULL_READ_WINDOW).toBe(2);
+        });
+
+        it('blocks an exact or high-overlap re-read of a range still shown in full', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 200, 1000, false);
+            state.recordActualRead('src/big.ts', 201, 400, 1000, false);
+            expect(state.classifyRead('src/big.ts', 1, 200, 1000).classification).toBe('duplicate');
+            expect(state.classifyRead('src/big.ts', 210, 390, 1000).classification).toBe('high-overlap');
+            expect(state.getVisibleRanges('src/big.ts')).toEqual([{ start: 1, end: 200 }, { start: 201, end: 400 }]);
+        });
+
+        it('allows a re-read once the range has left the window, as re-read (not blocked)', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 200, 1000, false);
+            state.recordActualRead('src/big.ts', 201, 400, 1000, false);
+            state.recordActualRead('src/other.ts', 1, 50, 50, false);
+            const result = state.classifyRead('src/big.ts', 1, 200, 1000);
+            expect(result.classification).toBe('re-read');
+            expect(state.classifyRead('src/big.ts', 201, 400, 1000).classification).toBe('duplicate');
+            expect(state.getVisibleRanges('src/big.ts')).toEqual([{ start: 201, end: 400 }]);
+        });
+
+        it('the window counts the last successful reads across all files; function maps do not count', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('a.ts', 1, 100, 100, false);
+            state.recordActualRead('huge.ts', 0, 0, 5000, true);
+            state.recordActualRead('b.ts', 1, 100, 100, false);
+            expect(state.classifyRead('a.ts', 1, 100, 100).classification).toBe('duplicate');
+            state.recordActualRead('c.ts', 1, 100, 100, false);
+            expect(state.classifyRead('a.ts', 1, 100, 100).classification).toBe('re-read');
+        });
+
+        it('coverage keeps every range delivered once, even after it leaves the window', () => {
+            const state = new InvestigationState();
+            state.recordActualRead('src/big.ts', 1, 300, 900, false);
+            state.recordActualRead('src/big.ts', 301, 600, 900, false);
+            state.recordActualRead('src/big.ts', 601, 900, 900, false);
+            const summary = state.getCoverageSummary('src/big.ts');
+            expect(summary.coveredLines).toBe(900);
+            expect(summary.coveragePercentage).toBe(100);
+            expect(state.getUncoveredRanges('src/big.ts')).toEqual([]);
+            expect(state.classifyRead('src/big.ts', 1, 300, 900).classification).toBe('re-read');
+            state.recordActualRead('src/big.ts', 1, 300, 900, false);
+            expect(state.getCoverageSummary('src/big.ts').coveredLines).toBe(900);
+            expect(state.getReadCount('src/big.ts')).toBe(4);
         });
     });
 

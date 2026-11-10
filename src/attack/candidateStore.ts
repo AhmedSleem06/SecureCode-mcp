@@ -65,6 +65,9 @@ export interface Candidate {
     requiredProofDimensions?: ProofDimension[];
     satisfiedDimensions?: ProofDimension[];
     verification?: CandidateVerification;
+    flowTraced?: boolean;
+    guardFound?: boolean;
+    guardReason?: string;
     mergedInto?: string;
     blockedReason?: string;
     createdAt: number;
@@ -92,6 +95,72 @@ export type EvidenceCategory =
     | 'test'
     | 'negative'
     | 'cross-file';
+
+export const FLOW_LINE_TOLERANCE = 3;
+
+const POST_FINISH_DIMENSIONS: ReadonlySet<ProofDimension> = new Set(['verification']);
+
+export interface TracedFlowPath {
+    tool: string;
+    points: Array<{ filePath: string; line?: number }>;
+}
+
+export interface GuardObservation {
+    filePath: string;
+    guardName: string;
+    attackType?: string;
+    effective: boolean;
+    reason?: string;
+}
+
+const ATTACK_TYPE_KEYWORDS: Record<string, string[]> = {
+    sql_injection: ['sql'],
+    nosql_injection: ['nosql', 'mongo'],
+    command_injection: ['command', 'exec', 'shell', 'rce', 'os_injection'],
+    xss: ['xss', 'cross_site_scripting'],
+    ssrf: ['ssrf', 'request_forgery'],
+    path_traversal: ['path', 'traversal', 'directory', 'lfi'],
+    open_redirect: ['redirect'],
+    prototype_pollution: ['prototype'],
+    insecure_deserialization: ['deserial'],
+    broken_access_control: ['access', 'authz', 'authoriz', 'idor', 'auth', 'permission', 'privilege'],
+};
+
+function normalizeCandidatePath(p: string): string {
+    return p.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+}
+
+function samePath(a: string, b: string): boolean {
+    const na = normalizeCandidatePath(a);
+    const nb = normalizeCandidatePath(b);
+    return na === nb || na.endsWith(`/${nb}`) || nb.endsWith(`/${na}`);
+}
+
+function guardAppliesTo(guard: GuardObservation, candidate: Candidate): boolean {
+    if (!guard.attackType) {
+        return candidate.locations.some(l => samePath(l.filePath, guard.filePath));
+    }
+    const type = candidate.type.toLowerCase().replace(/[\s-]+/g, '_');
+    const attack = guard.attackType.toLowerCase();
+    if (type === attack) return true;
+    if (attack === 'sql_injection' && type.includes('nosql')) return false;
+    return (ATTACK_TYPE_KEYWORDS[attack] || [attack]).some(k => type.includes(k));
+}
+
+/** Proof dimensions the finish gate checks: everything except those only the post-finish verifier can satisfy. */
+export function gateDimensions(candidate: Candidate): ProofDimension[] {
+    return (candidate.requiredProofDimensions || []).filter(d => !POST_FINISH_DIMENSIONS.has(d));
+}
+
+export function missingGateDimensions(candidate: Candidate): ProofDimension[] {
+    const satisfied = candidate.satisfiedDimensions || [];
+    return gateDimensions(candidate).filter(d => !satisfied.includes(d));
+}
+
+export function missingProofDimensions(candidate: Candidate): ProofDimension[] {
+    const satisfied = candidate.satisfiedDimensions || [];
+    return (candidate.requiredProofDimensions || []).filter(d => !satisfied.includes(d));
+}
 
 export class CandidateStore {
     private candidates = new Map<string, Candidate>();
@@ -215,7 +284,7 @@ export class CandidateStore {
             if (candidate.status === 'discovered') {
                 candidate.status = 'investigating';
             }
-            const required = candidate.requiredProofDimensions || [];
+            const required = gateDimensions(candidate);
             const satisfied = candidate.satisfiedDimensions || [];
             if (candidate.status === 'investigating' && required.length > 0) {
                 const allDimensionsSatisfied = required.every(d => satisfied.includes(d));
@@ -239,11 +308,43 @@ export class CandidateStore {
     isReadyForJuror(id: string): boolean {
         const candidate = this.candidates.get(id);
         if (!candidate) return false;
-        if (candidate.status !== 'supported') return false;
-        const required = candidate.requiredProofDimensions || [];
-        if (required.length === 0) return true;
-        const satisfied = candidate.satisfiedDimensions || [];
-        return required.every(d => satisfied.includes(d));
+        return this.candidateReady(candidate);
+    }
+
+    private candidateReady(candidate: Candidate): boolean {
+        if (candidate.status === 'supported') return true;
+        if (candidate.status === 'discovered' || candidate.status === 'investigating') {
+            return candidate.flowTraced === true && candidate.guardFound !== true;
+        }
+        return false;
+    }
+
+    /**
+     * Credit traced source-to-sink flows and effective guards to candidates.
+     * A confirmed flow touching a candidate location (±FLOW_LINE_TOLERANCE
+     * lines) with no effective guard makes the candidate ready for finish.
+     */
+    applyFlowEvidence(flows: TracedFlowPath[], guards: GuardObservation[]): void {
+        for (const candidate of this.getActive()) {
+            if (!candidate.flowTraced) {
+                const flow = flows.find(f => f.points.some(p =>
+                    typeof p.line === 'number' &&
+                    candidate.locations.some(l =>
+                        samePath(l.filePath, p.filePath) && Math.abs(l.line - p.line!) <= FLOW_LINE_TOLERANCE,
+                    ),
+                ));
+                if (flow) {
+                    candidate.flowTraced = true;
+                    this.addEvidence(candidate.id, `traced-flow:${flow.tool}:${candidate.id}`, 'flow', 'reachability');
+                }
+            }
+            const guard = guards.find(g => g.effective && guardAppliesTo(g, candidate));
+            if (guard && !candidate.guardFound) {
+                candidate.guardFound = true;
+                candidate.guardReason = `${guard.guardName}${guard.attackType ? ` vs ${guard.attackType}` : ''}${guard.reason ? `: ${guard.reason}` : ''}`;
+                candidate.updatedAt = Date.now();
+            }
+        }
     }
 
     getCandidatesByRootCause(rootCauseId: string): Candidate[] {
@@ -285,10 +386,15 @@ export class CandidateStore {
         const all = this.getAll();
         if (all.length === 0) return true;
         return all.every(c =>
-            c.status === 'supported' || c.status === 'verified' ||
-            c.status === 'unproven' || c.status === 'rejected' ||
-            c.status === 'merged' || c.status === 'blocked',
+            c.status === 'verified' || c.status === 'unproven' ||
+            c.status === 'rejected' || c.status === 'merged' || c.status === 'blocked' ||
+            this.candidateReady(c),
         );
+    }
+
+    /** Active candidates that still block finish: not ready for the Juror. */
+    getBlocking(): Candidate[] {
+        return this.getActive().filter(c => !this.candidateReady(c));
     }
 
     getUnderInvestigation(): Candidate[] {

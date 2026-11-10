@@ -65,7 +65,16 @@ export interface AgentScanClientCapabilities {
     protocolVersion: number;
     /** Action types the MCP can execute locally. */
     supportedActions: AgentScanActionType[];
+    /** The MCP runs its own finish gate; the API skips its duplicate server-side gate. */
+    clientFinishGate?: boolean;
 }
+
+/**
+ * Number of most recent successful read_file observations the API shows in
+ * full. Older reads become a digest, so the MCP only blocks re-reads of
+ * ranges still inside this window. Must match the API constant.
+ */
+export const FULL_READ_WINDOW = 2;
 
 /**
  * Action constraint sent by the MCP to restrict which actions the API's LLM
@@ -93,6 +102,7 @@ export function defaultClientCapabilities(): AgentScanClientCapabilities {
     return {
         protocolVersion: AGENT_SCAN_PROTOCOL_VERSION,
         supportedActions: AGENT_SCAN_SUPPORTED_ACTIONS,
+        clientFinishGate: true,
     };
 }
 
@@ -335,6 +345,8 @@ export interface StructuredFlowResult {
     source?: FlowEndpoint;
     sink?: FlowEndpoint;
     hops: FlowHop[];
+    /** Every flow the tracer found (source, sink and hops); `source`/`sink`/`hops` above describe the first. */
+    flows?: Array<{ source?: FlowEndpoint; sink?: FlowEndpoint; hops: FlowHop[]; sanitized?: boolean }>;
     truncated: boolean;
     error?: string;
     riskId?: string;

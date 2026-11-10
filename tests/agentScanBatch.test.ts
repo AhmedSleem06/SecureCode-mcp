@@ -188,6 +188,54 @@ describe('aggregateBatchResult', () => {
         ];
         const batch = aggregateBatchResult('scan-incomplete', 2, ['a.ts', 'b.ts'], files);
         expect(batch.totals.findings).toBe(3);
+        expect(batch.totals.distinctFindings).toBe(3);
+    });
+
+    it('merges the same root cause reported in two files into one finding with alsoAffects', () => {
+        const failOpen = 'Legacy token check fails open when no auth token is configured, letting any local client call privileged RPC methods';
+        const files: AgentScanBatchFileResult[] = [
+            buildBatchFileResult('src/http.ts', 1, undefined, undefined, makeScanResult('completed', {
+                findings: [
+                    { line: 42, type: 'broken_access_control', severity: 'medium', confidence: 70, evidence: 'e', why: failOpen },
+                    { line: 90, type: 'cors_misconfiguration', severity: 'medium', confidence: 70, evidence: 'e', why: 'Wildcard host CORS', rootCause: { rootCauseId: 'cors-wildcard-host', description: 'd', affectedSurfaces: [] } },
+                ],
+            })),
+            buildBatchFileResult('src/wsRpc.ts', 2, undefined, undefined, makeScanResult('completed', {
+                findings: [
+                    { line: 310, type: 'broken-access-control', severity: 'medium', confidence: 65, evidence: 'e', why: `${failOpen}.` },
+                    { line: 12, type: 'cors', severity: 'low', confidence: 50, evidence: 'e', why: 'Origin check reuses the CORS host list', rootCause: { rootCauseId: 'cors-wildcard-host', description: 'd', affectedSurfaces: [] } },
+                    { line: 500, type: 'command_injection', severity: 'high', confidence: 80, evidence: 'e', why: 'Shell command built from RPC params' },
+                ],
+            })),
+        ];
+        const batch = aggregateBatchResult('completed', 2, ['src/http.ts', 'src/wsRpc.ts'], files);
+        const http = batch.completed.find(f => f.filePath === 'src/http.ts')!;
+        const ws = batch.completed.find(f => f.filePath === 'src/wsRpc.ts')!;
+        expect(http.findings).toHaveLength(2);
+        expect(http.findings[0].alsoAffects).toEqual([{ filePath: 'src/wsRpc.ts', line: 310 }]);
+        expect(http.findings[1].alsoAffects).toEqual([{ filePath: 'src/wsRpc.ts', line: 12 }]);
+        expect(ws.findings).toHaveLength(1);
+        expect(ws.findings[0].type).toBe('command_injection');
+        expect(batch.totals.findings).toBe(5);
+        expect(batch.totals.distinctFindings).toBe(3);
+        expect((files[0].findings[0] as any).alsoAffects).toBeUndefined();
+    });
+
+    it('does not merge findings whose text differs or that sit in the same file', () => {
+        const files: AgentScanBatchFileResult[] = [
+            buildBatchFileResult('a.ts', 1, undefined, undefined, makeScanResult('completed', {
+                findings: [
+                    { line: 1, type: 'sql_injection', severity: 'high', confidence: 80, evidence: 'e', why: 'User id concatenated into the users query' },
+                    { line: 9, type: 'sql_injection', severity: 'high', confidence: 80, evidence: 'e', why: 'User id concatenated into the users query' },
+                ],
+            })),
+            buildBatchFileResult('b.ts', 2, undefined, undefined, makeScanResult('completed', {
+                findings: [{ line: 3, type: 'sql_injection', severity: 'high', confidence: 80, evidence: 'e', why: 'Order filter interpolated into a raw report query string' }],
+            })),
+        ];
+        const batch = aggregateBatchResult('completed', 2, ['a.ts', 'b.ts'], files);
+        expect(batch.totals.distinctFindings).toBe(3);
+        expect(batch.completed.every(f => f.findings.every(x => !x.alsoAffects))).toBe(true);
     });
 
     it('sums steps and cost across all files', () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { CandidateStore } from '../src/attack/candidateStore';
+import { CandidateStore, missingGateDimensions, missingProofDimensions } from '../src/attack/candidateStore';
 
 describe('Candidate Store', () => {
     let store: CandidateStore;
@@ -162,7 +162,7 @@ describe('Candidate Store', () => {
         expect(rc2Candidates).toHaveLength(1);
     });
 
-    it('high-severity candidate requires all proof dimensions before supported', () => {
+    it('high-severity candidate requires all gate dimensions (not verification) before supported', () => {
         const id = store.register({
             rootCauseId: 'rc-shell', type: 'command_injection', severity: 'high',
             locations: [{ filePath: 'wsRpc.ts', line: 42 }], claim: 'Shell exec',
@@ -176,9 +176,41 @@ describe('Candidate Store', () => {
         store.addEvidence(id, 'ev4', 'policy', 'threat-model');
         expect(store.get(id)!.status).toBe('investigating');
         store.addEvidence(id, 'ev5', 'impact', 'impact');
-        expect(store.get(id)!.status).toBe('investigating');
-        store.addEvidence(id, 'ev6', 'test', 'verification');
         expect(store.get(id)!.status).toBe('supported');
+        expect(store.get(id)!.requiredProofDimensions).toContain('verification');
+        expect(missingGateDimensions(store.get(id)!)).toEqual([]);
+        expect(missingProofDimensions(store.get(id)!)).toEqual(['verification']);
+    });
+
+    it('a traced flow at the candidate line (±3) with no guard makes it ready even with open dimensions', () => {
+        const id = store.register({
+            rootCauseId: 'rc-sqli', type: 'sql-injection', severity: 'critical',
+            locations: [{ filePath: 'src/app.js', line: 20 }], claim: 'SQLi',
+        });
+        expect(store.allReadyForJuror()).toBe(false);
+        store.applyFlowEvidence([{ tool: 'trace_flow', points: [{ filePath: 'src/app.js', line: 40 }] }], []);
+        expect(store.allReadyForJuror()).toBe(false);
+        store.applyFlowEvidence([{ tool: 'trace_flow', points: [{ filePath: './src/app.js', line: 18 }, { filePath: 'src/app.js', line: 23 }] }], []);
+        expect(store.isReadyForJuror(id)).toBe(true);
+        expect(store.allReadyForJuror()).toBe(true);
+        expect(store.getBlocking()).toHaveLength(0);
+        expect(store.get(id)!.satisfiedDimensions).toContain('reachability');
+        expect(missingProofDimensions(store.get(id)!).length).toBeGreaterThan(0);
+    });
+
+    it('an effective guard for the attack type keeps a traced candidate blocking', () => {
+        const id = store.register({
+            rootCauseId: 'rc-sqli', type: 'sql_injection', severity: 'high',
+            locations: [{ filePath: 'src/app.js', line: 20 }], claim: 'SQLi',
+        });
+        const flows = [{ tool: 'trace_flow', points: [{ filePath: 'src/app.js', line: 20 }] }];
+        store.applyFlowEvidence(flows, [{ filePath: 'src/app.js', guardName: 'escapeHtml', attackType: 'xss', effective: true }]);
+        expect(store.isReadyForJuror(id)).toBe(true);
+        store.applyFlowEvidence(flows, [{ filePath: 'src/app.js', guardName: 'sanitizeSql', attackType: 'sql_injection', effective: false }]);
+        expect(store.isReadyForJuror(id)).toBe(true);
+        store.applyFlowEvidence(flows, [{ filePath: 'src/db.js', guardName: 'paramQuery', attackType: 'sql_injection', effective: true, reason: 'parameterized' }]);
+        expect(store.isReadyForJuror(id)).toBe(false);
+        expect(store.getBlocking().map(c => c.id)).toEqual([id]);
     });
 
     it('two source reads do NOT support a high-severity candidate', () => {

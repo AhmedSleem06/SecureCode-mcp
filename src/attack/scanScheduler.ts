@@ -60,7 +60,7 @@ export function schedule(input: SchedulerInput): ScheduleDecision {
     // 1. Active high/critical candidate missing critical evidence
     const activeCandidates = candidates.getActive();
     for (const candidate of activeCandidates) {
-        if (candidate.severity === 'critical' || candidate.severity === 'high') {
+        if ((candidate.severity === 'critical' || candidate.severity === 'high') && !candidates.isReadyForJuror(candidate.id)) {
             const action = actionForCandidateEvidence(candidate, target, investigation);
             if (action) {
                 return {

@@ -15,6 +15,7 @@ export interface ScanQualityMetrics {
         highOverlap: number;
         partialNew: number;
         newCoverage: number;
+        reRead: number;
         blocked: number;
         truncated: number;
         invalid: number;
@@ -93,6 +94,7 @@ export function createQualityMetrics(): ScanQualityMetrics {
             highOverlap: 0,
             partialNew: 0,
             newCoverage: 0,
+            reRead: 0,
             blocked: 0,
             truncated: 0,
             invalid: 0,
@@ -181,6 +183,7 @@ export class QualityMetricsTracker {
         switch (classification) {
             case 'new-coverage': this.metrics.reads.newCoverage++; this.metrics.reads.successful++; break;
             case 'partial-new-coverage': this.metrics.reads.partialNew++; this.metrics.reads.successful++; break;
+            case 're-read': this.metrics.reads.reRead++; this.metrics.reads.successful++; break;
             case 'duplicate': this.metrics.reads.duplicate++; this.metrics.reads.blocked++; break;
             case 'high-overlap': this.metrics.reads.highOverlap++; this.metrics.reads.blocked++; break;
             case 'invalid': this.metrics.reads.invalid++; this.metrics.reads.blocked++; break;

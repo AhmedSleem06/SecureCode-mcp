@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, FINISH_LOOP_ESCAPE_THRESHOLD, FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD, finishLoopEscapeThreshold, isLandingBudget } from '../src/attack/finishGate';
+import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, FINISH_LOOP_ESCAPE_THRESHOLD, FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD, FINISH_LOOP_CANDIDATE_ESCAPE_THRESHOLD, finishLoopEscapeThreshold, isLandingBudget } from '../src/attack/finishGate';
 import { AGENT_SCAN_DEFAULTS } from '../src/attack/agentScanProtocol';
 import { createScanRunState } from '../src/attack/scanState';
 import { EvidenceLedger } from '../src/attack/evidenceLedger';
@@ -204,11 +204,22 @@ describe('Finish Loop Tracker', () => {
 
     it('the same reason-code signature climbs to the escape threshold at exactly 4', () => {
         const t = newFinishLoopTracker();
-        trackFinishRejection(t, reasons(['non-terminal-candidate']));
-        trackFinishRejection(t, reasons(['non-terminal-candidate']));
-        trackFinishRejection(t, reasons(['non-terminal-candidate']));
+        trackFinishRejection(t, reasons(['non-terminal-candidate', 'unreviewed-handlers']));
+        trackFinishRejection(t, reasons(['non-terminal-candidate', 'unreviewed-handlers']));
+        trackFinishRejection(t, reasons(['non-terminal-candidate', 'unreviewed-handlers']));
         expect(finishLoopEscaped(t)).toBe(false);
-        trackFinishRejection(t, reasons(['non-terminal-candidate']));
+        trackFinishRejection(t, reasons(['non-terminal-candidate', 'unreviewed-handlers']));
+        expect(finishLoopEscaped(t)).toBe(true);
+    });
+
+    it('candidate-only rejections escape after 2 identical rejections', () => {
+        expect(FINISH_LOOP_CANDIDATE_ESCAPE_THRESHOLD).toBe(2);
+        const t = newFinishLoopTracker();
+        trackFinishRejection(t, reasons(['non-terminal-candidate']), 1);
+        expect(finishLoopEscaped(t)).toBe(false);
+        trackFinishRejection(t, reasons(['non-terminal-candidate', 'non-terminal-candidate']), 2);
+        expect(finishLoopEscaped(t)).toBe(false);
+        trackFinishRejection(t, reasons(['non-terminal-candidate', 'non-terminal-candidate']), 2);
         expect(finishLoopEscaped(t)).toBe(true);
     });
 
@@ -307,6 +318,96 @@ describe('Finish Gate — segment scope', () => {
         }));
         expect(result.accepted).toBe(false);
         expect(result.reasons.map(r => r.code)).toEqual(expect.arrayContaining(['unreviewed-handlers', 'high-priority-unread-range']));
+    });
+});
+
+describe('Finish Gate — traced flow readiness (verification is post-finish)', () => {
+    function completedInvestigation(): InvestigationState {
+        const investigation = new InvestigationState();
+        investigation.recordActualRead('test.ts', 1, 50, 50, false);
+        investigation.recordToolUse('check_policy');
+        investigation.recordToolUse('search_code');
+        investigation.recordToolUse('get_endpoints');
+        investigation.recordToolUse('read_config');
+        investigation.recordFlowVerification('test.ts', 'trace_flow_cross_file', 'refuted', 0, 'no cross-file flows');
+        investigation.markAllHandlersReviewed();
+        investigation.markCandidatesVerified();
+        return investigation;
+    }
+
+    it('accepts the 5-bug shape on the first finish: SQLi by string concat with a traced flow and no guard', () => {
+        const investigation = completedInvestigation();
+        investigation.recordToolUse('trace_flow');
+        investigation.recordFlowVerification('test.ts', 'trace_flow', 'confirmed', 2, '2 hop(s)', {
+            source: { filePath: 'test.ts', symbol: 'req.query.cmd', line: 30 },
+            sink: { filePath: 'test.ts', symbol: 'exec', line: 31 },
+            hops: [],
+            flows: [
+                { source: { filePath: 'test.ts', symbol: 'req.query.cmd', line: 30 }, sink: { filePath: 'test.ts', symbol: 'exec', line: 31 }, hops: [] },
+                { source: { filePath: 'test.ts', symbol: 'req.query.id', line: 10 }, sink: { filePath: 'test.ts', symbol: 'db.query', line: 12 }, hops: [{ filePath: 'test.ts', line: 11, description: 'concat' }] },
+            ],
+        });
+        const candidates = new CandidateStore();
+        const sqli = candidates.register({
+            rootCauseId: 'sqli-concat', type: 'sql_injection', severity: 'critical',
+            locations: [{ filePath: 'test.ts', line: 12 }], claim: 'SQL injection via string concatenation',
+        });
+        candidates.addEvidence(sqli, 'backfill:source', 'source', 'source');
+        candidates.applyFlowEvidence(investigation.getTracedFlowPaths(), investigation.getGuardResults());
+        const result = evaluateFinishGate(makeInput({
+            investigation, candidates,
+            proposal: { type: 'finish', findings: [{ line: 12, type: 'sql_injection', severity: 'critical', confidence: 90, evidence: 'db.query("..." + id)', why: 'concat' }], summary: 's', selfCritique: 'c' },
+        }));
+        expect(result.reasons).toEqual([]);
+        expect(result.accepted).toBe(true);
+        expect(result.mode).toBe('complete');
+    });
+
+    it('high/critical candidates are not blocked by the verification dimension', () => {
+        const investigation = completedInvestigation();
+        const candidates = new CandidateStore();
+        const id = candidates.register({
+            rootCauseId: 'rc-exec', type: 'command_injection', severity: 'high',
+            locations: [{ filePath: 'test.ts', line: 31 }], claim: 'Command injection',
+        });
+        for (const dim of ['source', 'reachability', 'control', 'threat-model', 'impact'] as const) {
+            candidates.addEvidence(id, `ev-${dim}`, undefined, dim);
+        }
+        expect(candidates.get(id)!.satisfiedDimensions).not.toContain('verification');
+        const result = evaluateFinishGate(makeInput({ investigation, candidates }));
+        expect(result.reasons.some(r => r.code === 'non-terminal-candidate')).toBe(false);
+        expect(result.accepted).toBe(true);
+    });
+
+    it('a candidate without a traced flow still blocks, and the reason names the missing flow (not verification)', () => {
+        const investigation = completedInvestigation();
+        const candidates = new CandidateStore();
+        candidates.register({
+            rootCauseId: 'rc-x', type: 'sql_injection', severity: 'critical',
+            locations: [{ filePath: 'test.ts', line: 12 }], claim: 'SQLi',
+        });
+        const result = evaluateFinishGate(makeInput({ investigation, candidates }));
+        expect(result.accepted).toBe(false);
+        const reason = result.reasons.find(r => r.code === 'non-terminal-candidate')!;
+        expect(reason.description).toContain('no traced source-to-sink flow');
+        expect(reason.description).not.toContain('verification');
+    });
+
+    it('a traced candidate with an effective guard still blocks', () => {
+        const investigation = completedInvestigation();
+        investigation.recordFlowVerification('test.ts', 'trace_flow', 'confirmed', 1, '1 hop(s)', {
+            source: { filePath: 'test.ts', line: 10 }, sink: { filePath: 'test.ts', line: 12 }, hops: [],
+        });
+        investigation.recordGuardResult({ filePath: 'test.ts', guardName: 'escapeSql', attackType: 'sql_injection', effective: true, reason: 'escapes quotes' });
+        const candidates = new CandidateStore();
+        candidates.register({
+            rootCauseId: 'rc-x', type: 'sql_injection', severity: 'critical',
+            locations: [{ filePath: 'test.ts', line: 12 }], claim: 'SQLi',
+        });
+        candidates.applyFlowEvidence(investigation.getTracedFlowPaths(), investigation.getGuardResults());
+        const result = evaluateFinishGate(makeInput({ investigation, candidates }));
+        expect(result.accepted).toBe(false);
+        expect(result.reasons.find(r => r.code === 'non-terminal-candidate')!.description).toContain('effective guard');
     });
 });
 
