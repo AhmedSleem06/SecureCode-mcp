@@ -14,12 +14,15 @@
  *   - Does NOT include full transcripts in batch output.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import type { ServerContext } from '../mcp/types';
 import { toolMap } from './map';
 import { toolAgentScan } from './agentScan';
 import { ApiClient } from '../api/client';
 import { selectAgentScanBatchFiles } from '../attack/agentScanBatchSelection';
 import { calculateBatchCredits, type CreditPlan } from '../attack/agentScanCreditPlan';
+import { planFileSegmentsForPath } from '../attack/fileSegments';
 import { globalScanCoordinator, batchOperationTimeoutMs } from '../attack/agentScanCoordinator';
 import { AGENT_SCAN_DEFAULTS } from '../attack/agentScanProtocol';
 import { scoutDefaultsForDepth } from '../attack/architectureScoutProtocol';
@@ -31,6 +34,8 @@ import {
     type AgentScanBatchArgs,
     type AgentScanBatchResult,
     type AgentScanBatchFileResult,
+    type AgentScanBatchFileSegment,
+    type AgentScanBatchReplacement,
     type AgentScanBatchStopReason,
 } from '../attack/agentScanBatchProtocol';
 import type { CreditBalanceResponse } from '../api/types';
@@ -55,6 +60,7 @@ interface AgentScanToolResult {
     terminationReason?: string;
     cached?: boolean;
     error?: string;
+    segments?: AgentScanBatchFileSegment[];
 }
 
 export async function toolAgentScanBatch(
@@ -165,24 +171,36 @@ async function toolAgentScanBatchInner(
 
     if (progress) progress(1, 3, 'Selecting files for sequential scanning...');
 
-    const selection = selectAgentScanBatchFiles(ctx.workspaceRoot, architecture, {
+    const selection = await selectAgentScanBatchFiles(ctx.workspaceRoot, architecture, {
         topN,
         fileSelection,
     });
 
+    const replacedOf = (file: object): AgentScanBatchReplacement | undefined =>
+        (file as { replaced?: AgentScanBatchReplacement }).replaced;
+    const replaced = selection.selected.map(replacedOf).filter((r): r is AgentScanBatchReplacement => !!r);
+    const selectionExtras = { replaced, skipped: selection.skipped };
+
     if (selection.selected.length === 0) {
-        return aggregateBatchResult('completed', topN, [], []);
+        return aggregateBatchResult('completed', topN, [], [], selectionExtras);
     }
 
     const selectedFiles = selection.selected.map(f => f.filePath);
 
     if (progress) progress(2, 3, `Preflight credit check for ${selectedFiles.length} file(s)...`);
 
+    const fileParts = await Promise.all(selection.selected.map(async f => ({
+        filePath: f.filePath,
+        parts: await countFileParts(ctx.workspaceRoot, f.filePath),
+    })));
+    const partsByFile = new Map(fileParts.map(f => [f.filePath, f.parts]));
+
     const creditPlan = calculateBatchCredits({
         depth: architectureDepth,
         architectureCacheHit: archCached,
         uncachedFileCount: selection.selected.length,
         cachedFileCount: 0,
+        fileParts,
     });
     if (progress && creditPlan.warning) progress(2, 3, creditPlan.warning);
 
@@ -191,16 +209,24 @@ async function toolAgentScanBatchInner(
         const balance = await client.getJson<CreditBalanceResponse>('/credits/balance', signal);
 
         if (balance.scanCredits < creditPlan.total) {
-            if (progress) progress(3, 3, `Insufficient credits: have ${balance.scanCredits}, need ${creditPlan.total}.`);
+            const totalParts = creditPlan.breakdown.totalParts;
+            const need = `Insufficient credits: have ${balance.scanCredits}, need ${creditPlan.total}`
+                + (totalParts > selection.selected.length
+                    ? ` (${totalParts} file parts × ${AGENT_SCAN_DEFAULTS.creditsPerRun}${creditPlan.architectureCredits > 0 ? ` + ${creditPlan.architectureCredits} architecture` : ''}).`
+                    : '.');
+            if (progress) progress(3, 3, need);
             return aggregateBatchResult(
                 'insufficient-credits' as AgentScanBatchStopReason,
                 topN, selectedFiles,
-                selection.selected.map((f, i) =>
-                    buildNotStartedFileResult(f.filePath, f.rank, f.role, f.importance),
-                ),
+                selection.selected.map((f) => ({
+                    ...buildNotStartedFileResult(f.filePath, f.rank, f.role, f.importance),
+                    parts: partsByFile.get(f.filePath) ?? 1,
+                    ...(replacedOf(f) ? { replaced: replacedOf(f) } : {}),
+                })),
                 {
-                    stopDetail: `Insufficient credits: have ${balance.scanCredits}, need ${creditPlan.total}.`,
+                    stopDetail: `${need} Top up at https://usesecurecode.tech and retry.`,
                     creditNote: creditPlan.warning,
+                    ...selectionExtras,
                 },
             );
         }
@@ -215,25 +241,31 @@ async function toolAgentScanBatchInner(
     let shouldStop = false;
 
     for (const file of selection.selected) {
+        const fileExtras = {
+            parts: partsByFile.get(file.filePath) ?? 1,
+            ...(replacedOf(file) ? { replaced: replacedOf(file) } : {}),
+        };
+
         if (shouldStop) {
-            fileResults.push(buildNotStartedFileResult(
+            fileResults.push({ ...buildNotStartedFileResult(
                 file.filePath, file.rank, file.role, file.importance,
-            ));
+            ), ...fileExtras });
             continue;
         }
 
         if (signal?.aborted) {
-            fileResults.push(buildNotStartedFileResult(
+            fileResults.push({ ...buildNotStartedFileResult(
                 file.filePath, file.rank, file.role, file.importance,
-            ));
+            ), ...fileExtras });
             stopReason = 'cancelled';
             shouldStop = true;
             continue;
         }
 
         if (progress) {
+            const partsNote = fileExtras.parts > 1 ? `, ${fileExtras.parts} parts` : '';
             progress(file.rank, selection.selected.length,
-                `Scanning ${file.filePath} (${file.rank}/${selection.selected.length})...`);
+                `Scanning ${file.filePath} (${file.rank}/${selection.selected.length}${partsNote})...`);
         }
 
         try {
@@ -243,6 +275,7 @@ async function toolAgentScanBatchInner(
                 _skipCoordinator: true,
                 _noCache: noCache,
                 _signal: signal,
+                ...(file.role ? { _role: file.role } : {}),
                 _progress: progress ? (p: number, t: number, m: string) => {
                     progress(file.rank, selection.selected.length,
                         `${file.filePath}: ${m}`);
@@ -267,6 +300,13 @@ async function toolAgentScanBatchInner(
                 } as any,
                 scanResult.cached,
             );
+            if (scanResult.segments && scanResult.segments.length > 0) {
+                batchFile.segments = scanResult.segments;
+                batchFile.parts = scanResult.segments.length;
+            } else {
+                batchFile.parts = fileExtras.parts;
+            }
+            if (fileExtras.replaced) batchFile.replaced = fileExtras.replaced;
 
             fileResults.push(batchFile);
 
@@ -294,6 +334,7 @@ async function toolAgentScanBatchInner(
                 coverageGaps: [],
                 stepsUsed: 0,
                 costSpentUsd: 0,
+                ...fileExtras,
                 error: { message: err?.message || String(err) },
             };
             fileResults.push(batchFile);
@@ -309,5 +350,15 @@ async function toolAgentScanBatchInner(
         progress(selection.selected.length, selection.selected.length, 'Batch complete.');
     }
 
-    return aggregateBatchResult(stopReason, topN, selectedFiles, fileResults, { creditNote: creditPlan.warning });
+    return aggregateBatchResult(stopReason, topN, selectedFiles, fileResults, { creditNote: creditPlan.warning, ...selectionExtras });
+}
+
+async function countFileParts(workspaceRoot: string, filePath: string): Promise<number> {
+    try {
+        const abs = path.isAbsolute(filePath) ? filePath : path.join(workspaceRoot, filePath);
+        const content = fs.readFileSync(abs, 'utf8');
+        return (await planFileSegmentsForPath(content, filePath)).length;
+    } catch {
+        return 1;
+    }
 }

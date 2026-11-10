@@ -171,10 +171,10 @@ describe('AgentScanCoordinator', () => {
     });
 
     it('batch timeout scales with topN and architecture depth', () => {
-        expect(batchOperationTimeoutMs(5, 'standard')).toBe(5 * 15 * 60_000 + 240_000 + 5 * 60_000);
-        expect(batchOperationTimeoutMs(1, 'deep')).toBe(15 * 60_000 + 480_000 + 5 * 60_000);
-        expect(batchOperationTimeoutMs(undefined, undefined)).toBe(3 * 15 * 60_000 + 240_000 + 5 * 60_000);
-        expect(batchOperationTimeoutMs(100, 'quick')).toBe(20 * 15 * 60_000 + 120_000 + 5 * 60_000);
+        expect(batchOperationTimeoutMs(5, 'standard')).toBe(5 * 40 * 60_000 + 240_000 + 5 * 60_000);
+        expect(batchOperationTimeoutMs(1, 'deep')).toBe(40 * 60_000 + 480_000 + 5 * 60_000);
+        expect(batchOperationTimeoutMs(undefined, undefined)).toBe(3 * 40 * 60_000 + 240_000 + 5 * 60_000);
+        expect(batchOperationTimeoutMs(100, 'quick')).toBe(20 * 40 * 60_000 + 120_000 + 5 * 60_000);
     });
 
     describe('with fake timers', () => {

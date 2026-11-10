@@ -30,7 +30,7 @@ export type EvidenceKind =
     | 'ownership-result'
     | 'capability-result';
 
-export type EvidenceOutcome = 'positive' | 'negative' | 'empty' | 'blocked' | 'error';
+export type EvidenceOutcome = 'positive' | 'negative' | 'empty' | 'not-applicable' | 'blocked' | 'error';
 
 export interface EvidenceRef {
     id: string;
@@ -52,6 +52,7 @@ export interface EvidenceRequirement {
     requiredTools?: AgentScanActionType[];
     minimumCount: number;
     acceptsNegative?: boolean;
+    satisfiedByEmptyInventory?: boolean;
 }
 
 export interface ProgressDelta {
@@ -141,7 +142,7 @@ export class EvidenceLedger {
                 !req.targetFiles.some(f => this.pathMatches(f, input.filePath!))) continue;
             if (req.requiredTools && !req.requiredTools.includes(input.tool)) continue;
             if (input.outcome === 'blocked' || input.outcome === 'error') continue;
-            if (input.outcome === 'empty' && !req.acceptsNegative) continue;
+            if ((input.outcome === 'empty' || input.outcome === 'not-applicable') && !req.acceptsNegative) continue;
 
             state.count++;
             if (state.count >= req.minimumCount) {
@@ -171,6 +172,22 @@ export class EvidenceLedger {
         const state = this.requirementStates.get(requirementId);
         if (!state) return false;
         return state.count >= state.requirement.minimumCount;
+    }
+
+    /**
+     * Handler-inventory requirements cannot apply to a file with no
+     * handlers. Once a discovery tool ran and the inventory stayed empty,
+     * those requirements are satisfied instead of blocking finish.
+     */
+    markInventoryEmpty(): string[] {
+        const completed: string[] = [];
+        for (const [reqId, state] of this.requirementStates) {
+            if (!state.requirement.satisfiedByEmptyInventory) continue;
+            if (state.count >= state.requirement.minimumCount) continue;
+            state.count = state.requirement.minimumCount;
+            completed.push(reqId);
+        }
+        return completed;
     }
 
     getUnsatisfiedRequirements(): EvidenceRequirement[] {

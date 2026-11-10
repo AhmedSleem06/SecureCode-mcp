@@ -4,7 +4,8 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, FINISH_LOOP_ESCAPE_THRESHOLD } from '../src/attack/finishGate';
+import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, FINISH_LOOP_ESCAPE_THRESHOLD, FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD, finishLoopEscapeThreshold, isLandingBudget } from '../src/attack/finishGate';
+import { AGENT_SCAN_DEFAULTS } from '../src/attack/agentScanProtocol';
 import { createScanRunState } from '../src/attack/scanState';
 import { EvidenceLedger } from '../src/attack/evidenceLedger';
 import { WorkItemQueue, createProfileWorkItem } from '../src/attack/workItem';
@@ -236,5 +237,102 @@ describe('Finish Loop Tracker', () => {
         trackFinishRejection(t, reasons(['non-terminal-candidate'])); // one blocker resolved
         expect(t.rejections).toBe(1);
         expect(finishLoopEscaped(t)).toBe(false);
+    });
+});
+
+describe('Finish Gate — landing mode', () => {
+    it('accepts a finish as forced-incomplete when landing, with gate reasons as coverage gaps', () => {
+        const investigation = new InvestigationState();
+        const state = createScanRunState('run-1', target, { ...budget, stepsRemaining: 40 });
+        (state.budget as any).startedAt = Date.now() - 60 * 1000;
+        (state.budget as any).wallClockMs = 45 * 60 * 1000;
+        const rejected = evaluateFinishGate(makeInput({ investigation, state }));
+        expect(rejected.accepted).toBe(false);
+        const landed = evaluateFinishGate(makeInput({ investigation, state, landing: true }));
+        expect(landed.accepted).toBe(true);
+        expect(landed.mode).toBe('forced-incomplete');
+        expect(landed.reasons.length).toBeGreaterThan(0);
+        expect(landed.coverageGaps?.length).toBeGreaterThan(0);
+    });
+
+    it('isLandingBudget: only when no extension fits AND under 3 steps of cost remain', () => {
+        const est = AGENT_SCAN_DEFAULTS.perStepEstimateUsd;
+        expect(est).toBe(0.06);
+        expect(isLandingBudget({ creditsUsed: 15, maxCredits: 15, costSpentUsd: 3.9, costCapUsd: 4.0 })).toBe(true);
+        expect(isLandingBudget({ creditsUsed: 14, maxCredits: 15, costSpentUsd: 3.9, costCapUsd: 4.0 })).toBe(true);
+        expect(isLandingBudget({ creditsUsed: 13, maxCredits: 15, costSpentUsd: 3.9, costCapUsd: 4.0 })).toBe(false);
+        expect(isLandingBudget({ creditsUsed: 15, maxCredits: 15, costSpentUsd: 3.0, costCapUsd: 4.0 })).toBe(false);
+        expect(isLandingBudget(undefined)).toBe(false);
+    });
+});
+
+describe('Finish Gate — segment scope', () => {
+    const content = Array.from({ length: 3000 }, (_, i) => (i >= 2499 && i < 2510 ? 'const token = session.authenticate(req)' : `line ${i + 1}`)).join('\n');
+
+    it('ignores unread high-priority ranges and unreviewed handlers outside the part', () => {
+        const investigation = new InvestigationState();
+        investigation.setRequiredSteps(['initial-read']);
+        investigation.setScope('big.ts', { start: 1, end: 1500 });
+        investigation.recordActualRead('big.ts', 1, 1500, 3000, false);
+        const handlers = new HandlerInventory();
+        handlers.add({ filePath: 'big.ts', symbol: 'post', range: { start: 2600, end: 2600 }, kind: 'http-handler', securitySensitive: true });
+        const scoped = evaluateFinishGate(makeInput({
+            investigation, handlers,
+            target: { filePath: 'big.ts', fileContent: content, segment: { startLine: 1, endLine: 1500 } },
+        }));
+        expect(scoped.accepted).toBe(true);
+        expect(scoped.mode).toBe('complete');
+
+        const unscopedState = new InvestigationState();
+        unscopedState.setRequiredSteps(['initial-read']);
+        unscopedState.recordActualRead('big.ts', 1, 1500, 3000, false);
+        const unscoped = evaluateFinishGate(makeInput({
+            investigation: unscopedState, handlers,
+            target: { filePath: 'big.ts', fileContent: content },
+        }));
+        expect(unscoped.accepted).toBe(false);
+        expect(unscoped.reasons.map(r => r.code)).toEqual(expect.arrayContaining(['unreviewed-handlers', 'high-priority-unread-range']));
+    });
+
+    it('still blocks on unread high-priority code and handlers inside the part', () => {
+        const investigation = new InvestigationState();
+        investigation.setRequiredSteps(['initial-read']);
+        investigation.setScope('big.ts', { start: 1501, end: 3000 });
+        investigation.recordActualRead('big.ts', 1501, 2000, 3000, false);
+        const handlers = new HandlerInventory();
+        handlers.add({ filePath: 'big.ts', symbol: 'post', range: { start: 2600, end: 2600 }, kind: 'http-handler', securitySensitive: true });
+        const result = evaluateFinishGate(makeInput({
+            investigation, handlers,
+            target: { filePath: 'big.ts', fileContent: content, segment: { startLine: 1501, endLine: 3000 } },
+        }));
+        expect(result.accepted).toBe(false);
+        expect(result.reasons.map(r => r.code)).toEqual(expect.arrayContaining(['unreviewed-handlers', 'high-priority-unread-range']));
+    });
+});
+
+describe('Finish Loop Tracker — checklist-only escape', () => {
+    const reasons = (codes: string[]) => codes.map(code => ({ code, description: 'x' }));
+
+    it('escapes at 2 when only checklist reasons block and there are no candidates', () => {
+        expect(FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD).toBe(2);
+        const t = newFinishLoopTracker();
+        trackFinishRejection(t, reasons(['unsatisfied-evidence-requirement', 'incomplete-checklist']), 0);
+        expect(finishLoopEscaped(t)).toBe(false);
+        trackFinishRejection(t, reasons(['unsatisfied-evidence-requirement', 'incomplete-checklist']), 0);
+        expect(finishLoopEscaped(t)).toBe(true);
+    });
+
+    it('stays at 4 when a candidate is active', () => {
+        const t = newFinishLoopTracker();
+        for (let i = 0; i < 3; i++) trackFinishRejection(t, reasons(['unsatisfied-evidence-requirement']), 1);
+        expect(finishLoopEscaped(t)).toBe(false);
+        trackFinishRejection(t, reasons(['unsatisfied-evidence-requirement']), 1);
+        expect(finishLoopEscaped(t)).toBe(true);
+    });
+
+    it('stays at 4 when a high-priority unread range or other blocker is present', () => {
+        expect(finishLoopEscapeThreshold(reasons(['unsatisfied-evidence-requirement', 'high-priority-unread-range']), 0)).toBe(FINISH_LOOP_ESCAPE_THRESHOLD);
+        expect(finishLoopEscapeThreshold(reasons(['incomplete-checklist', 'executable-work-remaining']), 0)).toBe(FINISH_LOOP_ESCAPE_THRESHOLD);
+        expect(finishLoopEscapeThreshold(reasons(['incomplete-checklist']), 0)).toBe(FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD);
     });
 });

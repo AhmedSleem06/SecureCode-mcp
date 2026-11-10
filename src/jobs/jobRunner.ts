@@ -1,5 +1,8 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import type { ServerContext } from '../mcp/types';
 import { ApiClient } from '../api/client';
+import { planFileSegments } from '../attack/fileSegments';
 import { runWithApiRunObserver } from './runContext';
 import {
     createJobId,
@@ -44,14 +47,30 @@ interface ActiveJob {
 
 const RECENT_LIMIT = 50;
 
-export function estimateJobMinutes(kind: JobKind, args: Record<string, unknown> | undefined): number {
+export function estimateJobMinutes(kind: JobKind, args: Record<string, unknown> | undefined, workspaceRoot?: string): number {
     if (kind === 'agent-scan-batch') {
         const topN = typeof args?.topN === 'number' && Number.isFinite(args.topN)
             ? Math.max(1, Math.min(20, Math.floor(args.topN)))
             : 3;
         return 5 + topN * 6;
     }
-    return 8;
+    return 8 * estimateFileParts(args, workspaceRoot);
+}
+
+function estimateFileParts(args: Record<string, unknown> | undefined, workspaceRoot?: string): number {
+    try {
+        let content: string | undefined;
+        if (typeof args?.filePath === 'string' && args.filePath && workspaceRoot) {
+            const abs = path.isAbsolute(args.filePath) ? args.filePath : path.join(workspaceRoot, args.filePath);
+            if (fs.statSync(abs).size > 1_500_000) return 1;
+            content = fs.readFileSync(abs, 'utf8');
+        } else if (typeof args?.code === 'string') {
+            content = args.code;
+        }
+        return content ? planFileSegments(content).length : 1;
+    } catch {
+        return 1;
+    }
 }
 
 async function defaultCloseApiRun(ctx: ServerContext, runId: string): Promise<void> {
@@ -142,7 +161,7 @@ export class JobRunner {
         for (const job of this.active.values()) {
             if (job.workspaceRoot !== ws) continue;
             if (job.record.kind === kind && job.record.targetKey === targetKey && !job.record.cancelRequested) {
-                return { status: 'existing', job: { ...job.record }, estimatedMinutes: estimateJobMinutes(kind, args) };
+                return { status: 'existing', job: { ...job.record }, estimatedMinutes: estimateJobMinutes(kind, args, ws) };
             }
             return { status: 'busy', runningJobId: job.record.id, runningJob: { ...job.record } };
         }
@@ -151,7 +170,7 @@ export class JobRunner {
             if (rec.status !== 'running') continue;
             if (isOrphanedRunningJob(rec, { ownedByThisProcess: (id) => this.active.has(id) })) continue;
             if (rec.kind === kind && rec.targetKey === targetKey) {
-                return { status: 'existing', job: rec, estimatedMinutes: estimateJobMinutes(kind, args) };
+                return { status: 'existing', job: rec, estimatedMinutes: estimateJobMinutes(kind, args, ws) };
             }
             return { status: 'busy', runningJobId: rec.id, runningJob: rec };
         }
@@ -217,7 +236,7 @@ export class JobRunner {
             )
             .then(() => ({ ...active.record }));
 
-        return { status: 'started', job: { ...record }, estimatedMinutes: estimateJobMinutes(kind, args) };
+        return { status: 'started', job: { ...record }, estimatedMinutes: estimateJobMinutes(kind, args, ws) };
     }
 
     get(ctx: ServerContext, jobId?: string): JobRecord | null {

@@ -15,7 +15,7 @@ import { AGENT_SCAN_DEFAULTS } from './agentScanProtocol';
 import { ARCHITECTURE_SCOUT_DEFAULTS } from './architectureScoutProtocol';
 
 const LOCK_SLACK_MS = 5 * 60 * 1000;
-const BATCH_PER_FILE_MS = 15 * 60 * 1000;
+const BATCH_PER_FILE_MS = 40 * 60 * 1000;
 
 export const SINGLE_SCAN_OPERATION_TIMEOUT_MS = AGENT_SCAN_DEFAULTS.wallClockMs + LOCK_SLACK_MS;
 

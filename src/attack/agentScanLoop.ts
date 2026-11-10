@@ -21,8 +21,8 @@ import { ApiClient, describeApiError } from '../api/client';
 import type { ServerContext } from '../mcp/types';
 import { executeAction, executeReadFileAction, executeFlowAction } from './agentScanExecutor';
 import { AgentTraceLogger } from './agentTrace';
-import { InvestigationState } from './investigationState';
-import { selectInvestigationProfile } from './investigationProfiles';
+import { InvestigationState, type LineRange } from './investigationState';
+import { selectInvestigationProfile, extractRoleFromArchitectureContext } from './investigationProfiles';
 import { createInvestigationTasksFromRisks } from '../project-map/architectureContext';
 import { discoverEndpoints } from '../project-map/endpointDiscovery';
 import { looksLikeContractOnly, resolveImplementation, formatImplementationResolution } from '../project-map/implementationResolver';
@@ -41,7 +41,7 @@ import { HandlerInventory } from '../project-map/handlerInventory';
 import { CandidateStore } from './candidateStore';
 import { schedule as schedulerDecision, actionFingerprint } from './scanScheduler';
 import { createLlmHealthMonitor } from './llmHealth';
-import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped } from './finishGate';
+import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, isLandingBudget, rangeHasHighPriorityCode } from './finishGate';
 import { QualityMetricsTracker } from './qualityMetrics';
 import { extractFunctionBoundaries } from './agentScanExecutor';
 import {
@@ -58,14 +58,18 @@ import {
     type AgentScanCapReason,
     type AgentScanFinding,
     type AgentScanFinishAction,
+    type AgentScanFunctionMapEntry,
     type AgentScanResult,
     type AgentScanRunStatus,
+    type AgentScanSegment,
     type AgentScanServerBudget,
     type AgentScanStartResponse,
     type AgentScanStepRequest,
     type AgentScanStepResponse,
     type AgentScanTarget,
     type AgentScanTranscriptStep,
+    type InvestigationNote,
+    type TerminationReason,
 } from './agentScanProtocol';
 import { closeAgentScanRun, capReasonSummary } from './agentScanCredits';
 
@@ -74,6 +78,65 @@ export interface AgentScanOptions {
     signal?: AbortSignal;
     onProgress?: (stepsTaken: number, maxSteps: number, message: string) => void;
     deferClose?: boolean;
+    segment?: AgentScanSegment;
+    role?: string;
+}
+
+const SEGMENT_EDGE_TOLERANCE_LINES = 5;
+const FUNCTION_MAP_MAX_ENTRIES = 200;
+
+export function buildFunctionMap(boundaries: { name: string; startLine: number; endLine: number }[] | undefined): AgentScanFunctionMapEntry[] {
+    if (!boundaries || boundaries.length === 0) return [];
+    const sorted = [...boundaries].sort((a, b) => a.startLine - b.startLine || b.endLine - a.endLine);
+    const outermost: AgentScanFunctionMapEntry[] = [];
+    let coverEnd = 0;
+    for (const fn of sorted) {
+        if (fn.startLine > coverEnd) {
+            outermost.push({ name: fn.name, startLine: fn.startLine, endLine: fn.endLine });
+            coverEnd = fn.endLine;
+        }
+    }
+    return outermost.slice(0, FUNCTION_MAP_MAX_ENTRIES);
+}
+
+/**
+ * Split findings for a part of a split file: findings inside the part (or
+ * within a few lines of its edges) stay findings; the rest become notes
+ * naming the part, since another part's scan owns them.
+ */
+export function partitionSegmentFindings(
+    findings: AgentScanFinding[],
+    segment: AgentScanSegment | undefined,
+    filePath: string,
+): { inRange: AgentScanFinding[]; notes: InvestigationNote[] } {
+    if (!segment) return { inRange: findings, notes: [] };
+    const lo = segment.startLine - SEGMENT_EDGE_TOLERANCE_LINES;
+    const hi = segment.endLine + SEGMENT_EDGE_TOLERANCE_LINES;
+    const inRange: AgentScanFinding[] = [];
+    const notes: InvestigationNote[] = [];
+    for (const finding of findings) {
+        const line = typeof finding.line === 'number' ? finding.line : NaN;
+        if (!Number.isFinite(line) || (line >= lo && line <= hi)) {
+            inRange.push(finding);
+            continue;
+        }
+        notes.push({
+            title: `Outside this part (lines ${segment.startLine}–${segment.endLine}): ${finding.type} at line ${line}`,
+            detail: [finding.why, finding.evidence].filter(Boolean).join(' — '),
+            file: filePath,
+            line,
+            lineEnd: finding.lineEnd,
+            verificationLevel: finding.verificationLevel ?? 'logic-confirmed',
+            rootCauseId: finding.rootCause?.rootCauseId,
+            requiredEvidence: [`Confirm in the scan of the part that contains line ${line}`],
+            priority: finding.severity === 'critical' || finding.severity === 'high' ? 'high' : 'medium',
+        });
+    }
+    return { inRange, notes };
+}
+
+function formatLineRanges(ranges: LineRange[]): string {
+    return ranges.map(r => r.start === r.end ? `${r.start}` : `${r.start}–${r.end}`).join(', ');
 }
 
 export async function runAgentScan(
@@ -101,10 +164,14 @@ export async function runAgentScan(
     let activeRunId: string | null = null;
     let serverBudget: AgentScanServerBudget | undefined;
     let capReason: AgentScanCapReason | undefined;
+    let landing = false;
+    let stepsDelivered = 0;
+    const segment = options.segment;
 
     const attachCredits = (result: AgentScanResult): AgentScanResult => {
         if (activeRunId && options.deferClose) result.runId = activeRunId;
         if (capReason) result.capReason = capReason;
+        if (segment) result.segment = { ...segment };
         if (serverBudget) {
             result.creditsUsed = serverBudget.creditsUsed;
             result.maxCredits = serverBudget.maxCredits;
@@ -137,10 +204,13 @@ export async function runAgentScan(
     };
 
     try {
-        const startRespRaw = await client.postJson<AgentScanStartResponse>('/agent/scan/start', {}, options.signal);
+        const startBody = segment
+            ? { segment: { groupId: segment.groupId, index: segment.index, total: segment.total } }
+            : {};
+        const startRespRaw = await client.postJson<AgentScanStartResponse>('/agent/scan/start', startBody, options.signal);
         const startValidation = validateStartResponse(startRespRaw);
         if (!startValidation.ok) {
-            return {
+            return attachCredits({
                 status: 'failed',
                 findings: [],
                 transcript: [],
@@ -152,7 +222,7 @@ export async function runAgentScan(
                 error: `API returned an invalid start response: ${startValidation.error}`,
                 investigationNotes: [],
                 coverageGaps: [],
-            };
+            });
         }
         const startResp = startValidation.value;
         activeRunId = startResp.runId;
@@ -171,6 +241,17 @@ export async function runAgentScan(
 
         const transcript: AgentScanTranscriptStep[] = [];
         const investigationState = new InvestigationState();
+        if (segment) {
+            investigationState.setScope(target.filePath, { start: segment.startLine, end: segment.endLine });
+        }
+        // Pre-compute function boundaries for chunk alignment, profile
+        // selection (types-only detection) and the split-file function map.
+        let functionBoundaries: { name: string; startLine: number; endLine: number }[] | undefined;
+        try {
+            const fb = await extractFunctionBoundaries(target.fileContent, target.filePath);
+            if (fb) functionBoundaries = fb;
+        } catch { /* best-effort */ }
+        const functionMap = segment ? buildFunctionMap(functionBoundaries) : undefined;
         // Select a target-specific investigation profile to set the required
         // checklist steps. This prevents the agent from wasting steps on
         // irrelevant tools (e.g., get_endpoints on a utility file) and ensures
@@ -179,6 +260,9 @@ export async function runAgentScan(
             filePath: target.filePath,
             architectureContext: (target as any).architectureContext,
             endpointContext: (target as any).endpointContext,
+            role: options.role ?? extractRoleFromArchitectureContext(target.architectureContext, target.filePath),
+            fileContent: target.fileContent,
+            functionBoundaries,
         });
         investigationState.setRequiredSteps(profile.requiredSteps);
         scanState.profileId = profile.name;
@@ -295,31 +379,42 @@ export async function runAgentScan(
         }
         const readFiles = new Set<string>();
         const readFileCounts = new Map<string, number>();
-        // Pre-compute function boundaries for chunk alignment
-        let functionBoundaries: { name: string; startLine: number; endLine: number }[] | undefined;
-        try {
-            const fb = await extractFunctionBoundaries(target.fileContent, target.filePath);
-            if (fb) functionBoundaries = fb;
-        } catch { /* best-effort */ }
-        // Dynamic read cap based on file size:
+        let segmentReadCount = 0;
+        const targetPathNorm = target.filePath.replace(/\\/g, '/').toLowerCase();
+        const isTargetPath = (p: string | undefined): boolean => {
+            if (!p) return false;
+            const n = String(p).replace(/\\/g, '/').toLowerCase();
+            return n === targetPathNorm || n.endsWith(`/${targetPathNorm}`);
+        };
+        const handlersInScope = () => segment
+            ? handlerInventory.getAll().filter(h =>
+                !isTargetPath(h.filePath) || (h.range.end >= segment.startLine && h.range.start <= segment.endLine))
+            : handlerInventory.getAll();
+        // Dynamic read cap based on file size (a part's line count for a
+        // split file):
         //   < 200 lines  → 5 reads (small file, 5 chunks is enough)
         //   < 1000 lines  → 8 reads (medium file)
         //   < 5000 lines  → 12 reads (large file — use search_code/trace_flow, not brute reading)
         //   >= 5000 lines → 15 reads (very large — still capped; the agent must use
         //                  search_code and trace_flow for pattern discovery, not
         //                  read the entire file section by section)
+        function readCapForLines(lines: number): number {
+            if (lines < 200) return 5;
+            if (lines < 1000) return 8;
+            if (lines < 5000) return 12;
+            return 15;
+        }
         function maxReadsForFile(filePath: string): number {
+            if (segment && isTargetPath(filePath)) {
+                return readCapForLines(segment.endLine - segment.startLine + 1);
+            }
             try {
                 const fs = require('fs');
                 const abs = require('path').resolve(ctx.workspaceRoot, filePath);
                 const stat = fs.statSync(abs);
                 if (stat.size > 200_000) return 15;
                 const content = fs.readFileSync(abs, 'utf8');
-                const lines = content.split('\n').length;
-                if (lines < 200) return 5;
-                if (lines < 1000) return 8;
-                if (lines < 5000) return 12;
-                return 15;
+                return readCapForLines(content.split('\n').length);
             } catch {
                 return 8;
             }
@@ -416,6 +511,7 @@ export async function runAgentScan(
         let meaningfulProgressSinceRecovery = true;
         let aggressiveCompaction = false;
         let lastFinishAction: AgentScanFinishAction | null = null;
+        let finalFinishRequested = false;
         let lastFinishRejectionReasons: string[] = [];
         const finishLoop = newFinishLoopTracker();
         const attemptedRecoveryFingerprints = new Set<string>();
@@ -466,16 +562,89 @@ export async function runAgentScan(
         // finish gate's forced-incomplete acceptance. When the model has
         // proposed a finish at any point (even a rejected one), surface
         // its findings; convert unproven candidates into investigation
-        // notes; record what was never covered. Returns null when there
-        // is nothing worth salvaging (no finish, no candidates).
-        const salvageHardTermination = async (terminationReason: string, summary: string): Promise<AgentScanResult | null> => {
+        // notes; record what was never covered. With no finish and no
+        // candidates, any run that got at least one step back still returns
+        // an incomplete result (recent reasoning as notes, unread ranges as
+        // gaps, the ranges read in the summary). Returns null only when no
+        // step was delivered.
+        const unreadTargetRanges = (): LineRange[] => {
+            if (investigationState.getCoverage(target.filePath)?.totalLines) {
+                return investigationState.getUncoveredRanges(target.filePath);
+            }
+            const totalLines = (target.fileContent || '').split('\n').length;
+            return segment
+                ? [{ start: segment.startLine, end: segment.endLine }]
+                : (target.fileContent ? [{ start: 1, end: totalLines }] : []);
+        };
+
+        const salvageWithoutFinish = async (terminationReason: string, summary: string, fallbackTermination: TerminationReason): Promise<AgentScanResult> => {
+            const rationaleSteps = transcript.filter(t =>
+                t.action.type !== 'system_event' && t.action.type !== 'finish' &&
+                typeof (t.action as any).rationale === 'string' && (t.action as any).rationale.trim().length > 0,
+            ).slice(-3);
+            const investigationNotes: InvestigationNote[] = rationaleSteps.map(t => {
+                const a = t.action as any;
+                const line = a.type === 'read_file' && isTargetPath(a.path) && typeof a.startLine === 'number' ? a.startLine : undefined;
+                return {
+                    title: `Last reasoning before the run ended: ${describeAction(t.action)}`,
+                    detail: String(a.rationale).trim(),
+                    file: target.filePath,
+                    line,
+                    verificationLevel: 'logic-confirmed',
+                    requiredEvidence: ['Re-run the scan to follow up on this line of investigation'],
+                    priority: 'low',
+                };
+            });
+
+            const nonRangeGaps = buildCoverageGaps().filter(g => !g.title.startsWith('Unread range:'));
+            const rangeGaps = unreadTargetRanges().map(r => ({
+                title: `Unread range: lines ${r.start}-${r.end} of ${target.filePath}`,
+                detail: `This range was never read before the run ended (${terminationReason}). Vulnerabilities in this range were not checked.`,
+                file: target.filePath,
+                line: r.start,
+                lineEnd: r.end,
+                requiredEvidence: [`Read lines ${r.start}-${r.end} and analyze for vulnerabilities`],
+                suggestedNextAction: 'read_file',
+                priority: rangeHasHighPriorityCode(target.fileContent, r) ? 'high' as const : 'medium' as const,
+            }));
+            const coverageGaps = [...nonRangeGaps, ...rangeGaps];
+
+            const readRanges = investigationState.getCoverage(target.filePath)?.ranges ?? [];
+            const partText = segment ? ` (part ${segment.index} of ${segment.total}, lines ${segment.startLine}–${segment.endLine})` : '';
+            const salvageSummary = `${summary} The agent did not produce a finish; partial result from ${stepsDelivered} step(s). Lines read in ${target.filePath}${partText}: ${readRanges.length > 0 ? formatLineRanges(readRanges) : 'none'}.`;
+            console.warn(`[Agent Scan Loop] ${terminationReason}: no finish produced — returning partial result with ${investigationNotes.length} note(s) and ${coverageGaps.length} gap(s).`);
+            const covSummary = investigationState.getCoverageSummary(target.filePath);
+            qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
+            qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
+            trace.logRunCompleted('incomplete');
+            return closeRun({
+                status: 'incomplete',
+                findings: [],
+                investigationNotes,
+                coverageGaps,
+                transcript,
+                stepsUsed: stepsTaken,
+                stepsGranted,
+                extensionsGranted,
+                costSpentUsd,
+                terminationReason: fallbackTermination,
+                summary: salvageSummary,
+                qualityMetrics: qualityTracker.getMetrics(),
+            });
+        };
+
+        const salvageHardTermination = async (terminationReason: string, summary: string, fallbackTermination: TerminationReason): Promise<AgentScanResult | null> => {
             const activeCandidates = candidateStore.getActive().filter(c =>
                 c.status === 'discovered' || c.status === 'investigating' || c.status === 'supported');
-            if (!lastFinishAction && activeCandidates.length === 0) return null;
+            if (!lastFinishAction && activeCandidates.length === 0) {
+                if (stepsDelivered === 0) return null;
+                return salvageWithoutFinish(terminationReason, summary, fallbackTermination);
+            }
 
             const finish = lastFinishAction;
-            const findings = finish ? sanitizeFindings(finish.findings) : [];
-            const investigationNotes = [...(finish?.investigationNotes ?? [])];
+            const scoped = partitionSegmentFindings(finish ? sanitizeFindings(finish.findings) : [], segment, target.filePath);
+            const findings = scoped.inRange;
+            const investigationNotes = [...(finish?.investigationNotes ?? []), ...scoped.notes];
             for (const candidate of activeCandidates) {
                 const missingDims = candidate.requiredProofDimensions?.filter(d =>
                     !candidate.satisfiedDimensions?.includes(d),
@@ -529,7 +698,7 @@ export async function runAgentScan(
             // Wall clock check
             if (Date.now() - startTime > wallClockMs) {
                 terminateScan(scanState, 'wall_clock', `Wall clock limit (${wallClockMs}ms) exceeded.`);
-                const salvaged = await salvageHardTermination('wall_clock', `Wall clock limit (${wallClockMs}ms) exceeded.`);
+                const salvaged = await salvageHardTermination('wall_clock', `Wall clock limit (${wallClockMs}ms) exceeded.`, 'wall_clock');
                 if (salvaged) return salvaged;
                 return closeRun({
                     status: 'incomplete',
@@ -606,7 +775,7 @@ export async function runAgentScan(
                 : compactTranscript(transcript);
             const stepReq: AgentScanStepRequest = {
                 runId: startResp.runId,
-                target,
+                target: segment ? { ...target, segment: { ...segment }, functionMap } : target,
                 transcript: compactedTranscript,
                 budget: {
                     stepsRemaining: budget.stepsRemaining,
@@ -700,6 +869,7 @@ export async function runAgentScan(
                         console.warn('[Agent Scan Loop] Agent run already terminated after a delivered finish — surfacing the finish findings.');
                         const finish = lastFinishAction;
                         const coverageGaps = [...(finish.coverageGaps ?? [])];
+                        const scopedFinish = partitionSegmentFindings(sanitizeFindings(finish.findings), segment, target.filePath);
                         if (lastFinishRejectionReasons.length > 0) {
                             coverageGaps.push({
                                 title: 'Finish accepted by the server despite local gate concerns',
@@ -711,8 +881,8 @@ export async function runAgentScan(
                         }
                         return closeRun({
                             status: 'completed',
-                            findings: sanitizeFindings(finish.findings),
-                            investigationNotes: finish.investigationNotes ?? [],
+                            findings: scopedFinish.inRange,
+                            investigationNotes: [...(finish.investigationNotes ?? []), ...scopedFinish.notes],
                             coverageGaps,
                             transcript,
                             stepsUsed: stepsTaken,
@@ -808,6 +978,10 @@ export async function runAgentScan(
                 scanState.budget.costCapUsd = serverBudget.costCapUsd;
             }
             scanState.budget.costSpentUsd = costSpentUsd;
+            if (stepResp.next || stepResp.systemEvent) stepsDelivered++;
+            landing = typeof stepResp.landing === 'boolean'
+                ? stepResp.landing
+                : isLandingBudget(serverBudget);
             consecutiveErrors = 0;
             llmHealth.recordStepTelemetry(!!stepResp.degraded || !!stepResp.fallbackFired);
             trace.logStepRequested(stepResp.model, stepResp.tokens, stepResp.costUsd, stepResp.latencyMs);
@@ -877,6 +1051,18 @@ export async function runAgentScan(
             if (!stepResp.next) {
                 if (stepResp.capReason) capReason = stepResp.capReason;
                 const capped = stepResp.costCapped || !!stepResp.capReason;
+                if (capped && !lastFinishAction && !finalFinishRequested && stepsTaken > 0 && !options.signal?.aborted) {
+                    finalFinishRequested = true;
+                    const note = 'BUDGET REACHED: no more budget can be added. Your next action must be finish with your findings so far; put unconfirmed suspicions in investigationNotes and unread areas in coverageGaps.';
+                    transcript.push({
+                        action: { type: 'system_event', eventType: 'finish_gate', message: note } as any,
+                        observation: note,
+                    });
+                    if (options.onProgress) {
+                        options.onProgress(stepsTaken, stepsGranted, 'Budget reached: asking the agent for its final report');
+                    }
+                    continue;
+                }
                 const costCapSummary = capReasonSummary(stepResp.capReason, serverBudget?.maxCredits ?? stepResp.paidExtension?.maxCredits)
                     ?? `Cost cap ($${budget.costCapUsd.toFixed(2)}) reached.`;
                 const hardReason = capped ? (stepResp.capReason ?? 'cost_cap') : 'budget_exhausted';
@@ -886,6 +1072,7 @@ export async function runAgentScan(
                 const salvaged = await salvageHardTermination(
                     hardReason,
                     capped ? costCapSummary : 'Step budget exhausted.',
+                    capped ? 'cost_cap' : 'budget_exhausted',
                 );
                 if (salvaged) return salvaged;
                 const status: AgentScanRunStatus = capped
@@ -966,11 +1153,14 @@ export async function runAgentScan(
                 qualityTracker.recordFinishAttempt();
                 lastFinishAction = action;
                 lastFinishRejectionReasons = [];
+                const scopedFinish = partitionSegmentFindings(action.findings, segment, target.filePath);
 
                 // Register candidates from findings — each finding becomes a
                 // tracked candidate. If the candidate is new (discovered), the
                 // finish gate will reject and the agent must gather evidence.
-                for (const finding of action.findings) {
+                // Findings outside a split file's part are not candidates:
+                // they become notes for the part that owns them.
+                for (const finding of scopedFinish.inRange) {
                     const rootCauseId = finding.rootCause?.rootCauseId || `${finding.type}:${finding.line}`;
                     const existing = candidateStore.getCandidatesByRootCause(rootCauseId);
                     if (existing.length === 0) {
@@ -1059,7 +1249,12 @@ export async function runAgentScan(
                     candidates: candidateStore,
                     investigation: investigationState,
                     scheduler: schedDecision,
-                    target: { filePath: target.filePath, fileContent: target.fileContent },
+                    target: {
+                        filePath: target.filePath,
+                        fileContent: target.fileContent,
+                        segment: segment ? { startLine: segment.startLine, endLine: segment.endLine } : undefined,
+                    },
+                    landing,
                 });
 
                 // Finish-loop escape: when the identical gate reasons have
@@ -1068,7 +1263,7 @@ export async function runAgentScan(
                 // (the same salvage semantics as the 75% soft deadline)
                 // instead of looping to the wall clock.
                 if (!gateResult.accepted) {
-                    trackFinishRejection(finishLoop, gateResult.reasons);
+                    trackFinishRejection(finishLoop, gateResult.reasons, candidateStore.getActive().length);
                     if (finishLoopEscaped(finishLoop)) {
                         const loopNote = `[FINISH GATE LOOP DETECTED] The same gate reasons have now rejected ${finishLoop.rejections} consecutive finishes. Accepting this finish as forced-incomplete — unresolved items are recorded as coverage gaps instead of looping to the wall clock.`;
                         transcript.push({
@@ -1104,7 +1299,7 @@ export async function runAgentScan(
                     qualityTracker.recordCoverage(covSummary.totalLines, covSummary.coveredLines, covSummary.uncoveredRangeCount, covSummary.largestUncoveredRange);
                     qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
 
-                    const investigationNotes = [...(action.investigationNotes ?? [])];
+                    const investigationNotes = [...(action.investigationNotes ?? []), ...scopedFinish.notes];
                     for (const candidate of candidateStore.getActive()) {
                         if (candidate.status === 'discovered' || candidate.status === 'investigating' || candidate.status === 'supported') {
                             const missingDims = candidate.requiredProofDimensions?.filter(d =>
@@ -1126,7 +1321,7 @@ export async function runAgentScan(
 
                     return closeRun({
                         status: 'completed',
-                        findings: sanitizeFindings(action.findings),
+                        findings: sanitizeFindings(scopedFinish.inRange),
                         investigationNotes,
                         coverageGaps,
                         transcript,
@@ -1223,7 +1418,8 @@ export async function runAgentScan(
                 );
                 const checklist = investigationState.formatChecklistForPrompt();
                 const fileMax = maxReadsForFile(action.path);
-                const count = investigationState.getReadCount(action.path);
+                const scopedRead = !!segment && isTargetPath(action.path);
+                const count = scopedRead ? segmentReadCount : investigationState.getReadCount(action.path);
 
                 if (readValue.classification === 'duplicate') {
                     qualityTracker.recordRead('duplicate', false);
@@ -1276,6 +1472,9 @@ export async function runAgentScan(
                         );
                         const rangeKey = `${normalizedPath}:${readResult.actualStart || 0}:${readResult.actualEnd || 0}`;
                         readFiles.add(rangeKey);
+                        if (scopedRead && readResult.actualEnd >= segment!.startLine && readResult.actualStart <= segment!.endLine) {
+                            segmentReadCount++;
+                        }
                         qualityTracker.recordToolUse('read_file'); investigationState.recordToolUse('read_file');
                         meaningfulProgressSinceLastExtension = true;
                         meaningfulProgressSinceRecovery = true;
@@ -1577,7 +1776,7 @@ export async function runAgentScan(
                     if (endpoints.length > 0) {
                         handlerInventory.addFromEndpoints(endpoints, target.filePath);
                         // Create work items for newly discovered handlers
-                        for (const handler of handlerInventory.getAll()) {
+                        for (const handler of handlersInScope()) {
                             if (!workItemQueue.all().some(w => w.title === `Review handler: ${handler.symbol || 'unknown'}`)) {
                                 workItemQueue.add(createHandlerReviewWorkItem(
                                     handler.filePath,
@@ -1593,9 +1792,16 @@ export async function runAgentScan(
             }
 
             // Auto-complete all-handlers-reviewed if handler inventory is
-            // empty (no handlers to review for this file type)
-            if (handlerInventory.size() === 0 && !investigationState.getCompletedSteps().includes('all-handlers-reviewed' as any)) {
+            // empty (no handlers to review for this file type, or none in
+            // this part of a split file)
+            const scopedHandlerCount = handlersInScope().length;
+            if (scopedHandlerCount === 0 && !investigationState.getCompletedSteps().includes('all-handlers-reviewed' as any)) {
                 investigationState.markAllHandlersReviewed();
+            }
+            // Handler-inventory requirements cannot apply when discovery ran
+            // and found nothing to review.
+            if (!wasBlocked && scopedHandlerCount === 0 && (action.type === 'get_endpoints' || action.type === 'search_code')) {
+                evidenceLedger.markInventoryEmpty();
             }
 
             // Handler review tracking: when the agent reads a file range that

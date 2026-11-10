@@ -19,6 +19,7 @@
  */
 
 import type { AgentScanAction, AgentScanFinishAction } from './agentScanProtocol';
+import { AGENT_SCAN_DEFAULTS } from './agentScanProtocol';
 import type { ScanRunState } from './scanState';
 import type { EvidenceLedger } from './evidenceLedger';
 import type { WorkItemQueue } from './workItem';
@@ -38,13 +39,47 @@ export type FinishGateMode = 'complete' | 'continue' | 'forced-incomplete';
  */
 export const FINISH_LOOP_ESCAPE_THRESHOLD = 4;
 
+/**
+ * Lower threshold when the only blockers are checklist items (unsatisfied
+ * evidence requirements / incomplete checklist steps) and nothing of
+ * substance is pending — no candidates and no high-priority unread range.
+ * Each rejection costs about two steps; grinding four of them on a
+ * checklist that may not apply to the file wastes the budget.
+ */
+export const FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD = 2;
+
+const CHECKLIST_ONLY_REASON_CODES = new Set(['unsatisfied-evidence-requirement', 'incomplete-checklist']);
+
+export const HIGH_PRIORITY_KEYWORDS = [
+    'authenticat', 'authorize', 'authorization', 'token', 'session',
+    'credential', 'password', 'execfile', 'exec(', 'spawn(',
+    'child_process', 'writefile', 'permission', 'ownership',
+    'bootstrap', 'pairing', 'sql', 'queryraw', 'eval(',
+];
+
+export function rangeHasHighPriorityCode(fileContent: string | undefined, range: { start: number; end: number }): boolean {
+    if (!fileContent) return false;
+    const lines = fileContent.split('\n');
+    const rangeText = lines.slice(Math.max(0, range.start - 1), Math.min(lines.length, range.end)).join('\n').toLowerCase();
+    return HIGH_PRIORITY_KEYWORDS.some(kw => rangeText.includes(kw));
+}
+
 export interface FinishLoopTracker {
     rejections: number;
     signature: string;
+    threshold: number;
 }
 
 export function newFinishLoopTracker(): FinishLoopTracker {
-    return { rejections: 0, signature: '' };
+    return { rejections: 0, signature: '', threshold: FINISH_LOOP_ESCAPE_THRESHOLD };
+}
+
+export function finishLoopEscapeThreshold(reasons: FinishGateReason[], activeCandidateCount = 0): number {
+    if (reasons.length === 0) return FINISH_LOOP_ESCAPE_THRESHOLD;
+    const checklistOnly = reasons.every(r => CHECKLIST_ONLY_REASON_CODES.has(r.code));
+    return checklistOnly && activeCandidateCount === 0
+        ? FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD
+        : FINISH_LOOP_ESCAPE_THRESHOLD;
 }
 
 /**
@@ -52,7 +87,7 @@ export function newFinishLoopTracker(): FinishLoopTracker {
  * signature climbs the counter; a changed signature means the investigation
  * is still making progress (fewer/different blockers) and resets it.
  */
-export function trackFinishRejection(tracker: FinishLoopTracker, reasons: FinishGateReason[]): FinishLoopTracker {
+export function trackFinishRejection(tracker: FinishLoopTracker, reasons: FinishGateReason[], activeCandidateCount = 0): FinishLoopTracker {
     const signature = reasons.map(r => r.code).sort().join('|');
     if (signature === tracker.signature) {
         tracker.rejections++;
@@ -60,11 +95,28 @@ export function trackFinishRejection(tracker: FinishLoopTracker, reasons: Finish
         tracker.rejections = 1;
         tracker.signature = signature;
     }
+    tracker.threshold = finishLoopEscapeThreshold(reasons, activeCandidateCount);
     return tracker;
 }
 
 export function finishLoopEscaped(tracker: FinishLoopTracker): boolean {
-    return tracker.rejections >= FINISH_LOOP_ESCAPE_THRESHOLD;
+    return tracker.rejections >= (tracker.threshold ?? FINISH_LOOP_ESCAPE_THRESHOLD);
+}
+
+/**
+ * Landing mode: no more credits can be added to the run and the remaining
+ * cost budget covers fewer than three steps. Mirrors the API rule so an
+ * older API that does not send `landing` still lets the run land.
+ */
+export function isLandingBudget(
+    serverBudget: { creditsUsed: number; maxCredits: number; costSpentUsd: number; costCapUsd: number } | undefined,
+    perStepEstimateUsd: number = AGENT_SCAN_DEFAULTS.perStepEstimateUsd,
+    extensionCredits: number = AGENT_SCAN_DEFAULTS.extensionCredits,
+): boolean {
+    if (!serverBudget) return false;
+    const { creditsUsed, maxCredits, costSpentUsd, costCapUsd } = serverBudget;
+    if (![creditsUsed, maxCredits, costSpentUsd, costCapUsd].every(v => typeof v === 'number' && Number.isFinite(v))) return false;
+    return creditsUsed + extensionCredits > maxCredits && costCapUsd - costSpentUsd < 3 * perStepEstimateUsd;
 }
 
 export interface FinishGateReason {
@@ -90,11 +142,28 @@ export interface FinishGateInput {
     candidates: CandidateStore;
     investigation: InvestigationState;
     scheduler: ScheduleDecision;
-    target: { filePath: string; fileContent?: string };
+    target: { filePath: string; fileContent?: string; segment?: { startLine: number; endLine: number } };
+    landing?: boolean;
+}
+
+function normalizeGatePath(p: string): string {
+    return p.replace(/\\/g, '/').toLowerCase();
+}
+
+function countUnreviewedSensitiveHandlers(handlers: HandlerInventory, target: FinishGateInput['target']): number {
+    if (!target.segment) return handlers.getUnreviewedSensitiveCount();
+    const targetNorm = normalizeGatePath(target.filePath);
+    const { startLine, endLine } = target.segment;
+    return handlers.getAll().filter(h => {
+        if (!h.securitySensitive || h.reviewed) return false;
+        const handlerNorm = normalizeGatePath(h.filePath);
+        if (handlerNorm !== targetNorm && !handlerNorm.endsWith(`/${targetNorm}`)) return true;
+        return h.range.end >= startLine && h.range.start <= endLine;
+    }).length;
 }
 
 export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
-    const { proposal, state, evidence, workItems, handlers, candidates, investigation, scheduler, target } = input;
+    const { proposal, state, evidence, workItems, handlers, candidates, investigation, scheduler, target, landing } = input;
 
     const reasons: FinishGateReason[] = [];
     const coverageGaps: FinishGateResult['coverageGaps'] = [];
@@ -107,9 +176,11 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
     // file, so a hard "reject while budget remains" rule grinds deep
     // investigators into a wall-clock discard. The last quarter of the
     // run is the landing window: finishes are accepted with their
-    // un-investigated areas recorded as coverage gaps.
+    // un-investigated areas recorded as coverage gaps. The API's landing
+    // mode (no more credits can be added, under three steps of budget
+    // left) opens the same window early.
     const wallClockElapsedMs = Date.now() - state.budget.startedAt;
-    const softDeadlinePassed = wallClockElapsedMs >= state.budget.wallClockMs * 0.75;
+    const softDeadlinePassed = wallClockElapsedMs >= state.budget.wallClockMs * 0.75 || landing === true;
 
     // Check 1: Incomplete investigation steps
     const incompleteSteps = investigation.getIncompleteSteps();
@@ -200,7 +271,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
     }
 
     // Check 4: Unreviewed security-sensitive handlers
-    const unreviewedSensitive = handlers.getUnreviewedSensitiveCount();
+    const unreviewedSensitive = countUnreviewedSensitiveHandlers(handlers, target);
     if (unreviewedSensitive > 0) {
         reasons.push({
             code: 'unreviewed-handlers',
@@ -229,19 +300,14 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
     // was never read. This prevents finishing while authentication,
     // authorization, or command-execution code remains uninspected.
     if (hasBudget && hasWallClock && target.fileContent) {
-        const uncoveredRanges = investigation.getUncoveredRanges(target.filePath);
+        const uncoveredRanges = investigation.getUncoveredRanges(target.filePath)
+            .map(r => target.segment
+                ? { start: Math.max(r.start, target.segment.startLine), end: Math.min(r.end, target.segment.endLine) }
+                : r)
+            .filter(r => r.start <= r.end);
         if (uncoveredRanges.length > 0) {
-            const lines = target.fileContent.split('\n');
-            const HIGH_PRIORITY_KEYWORDS = [
-                'authenticat', 'authorize', 'authorization', 'token', 'session',
-                'credential', 'password', 'execfile', 'exec(', 'spawn(',
-                'child_process', 'writefile', 'permission', 'ownership',
-                'bootstrap', 'pairing', 'sql', 'queryraw', 'eval(',
-            ];
             for (const range of uncoveredRanges) {
-                const rangeLines = lines.slice(Math.max(0, range.start - 1), Math.min(lines.length, range.end));
-                const rangeText = rangeLines.join('\n').toLowerCase();
-                const hasHighPriority = HIGH_PRIORITY_KEYWORDS.some(kw => rangeText.includes(kw));
+                const hasHighPriority = rangeHasHighPriorityCode(target.fileContent, range);
                 if (hasHighPriority) {
                     reasons.push({
                         code: 'high-priority-unread-range',

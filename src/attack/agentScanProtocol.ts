@@ -12,13 +12,31 @@ export const AGENT_SCAN_DEFAULTS = {
     maxSteps: 80,
     costCapUsd: 4.00,
     wallClockMs: 2_700_000,
-    perStepEstimateUsd: 0.08,
+    perStepEstimateUsd: 0.06,
     creditsPerRun: 5,
     extensionCredits: 2,
     maxCreditsPerRun: 15,
     dailyRunLimit: 20,
     blockedReadRecoveryLimit: 5,
 } as const;
+
+export const SEGMENT_THRESHOLD_LINES = 2000;
+export const SEGMENT_TARGET_LINES = 1500;
+export const SEGMENT_MIN_LINES = 400;
+
+export interface AgentScanSegment {
+    groupId: string;
+    index: number;
+    total: number;
+    startLine: number;
+    endLine: number;
+}
+
+export interface AgentScanFunctionMapEntry {
+    name: string;
+    startLine: number;
+    endLine: number;
+}
 
 // ── Protocol versioning + capability negotiation ─────────────────────────────
 //
@@ -574,6 +592,8 @@ export interface AgentScanTarget {
      *  run. Gives the agent project-wide context (important files, trust
      *  boundaries, security controls) so it doesn't re-discover them. */
     architectureContext?: string;
+    segment?: AgentScanSegment;
+    functionMap?: AgentScanFunctionMapEntry[];
 }
 
 export interface AgentScanStartResponse {
@@ -655,6 +675,7 @@ export interface AgentScanStepResponse {
     serverBudget?: AgentScanServerBudget;
     paidExtension?: AgentScanPaidExtension;
     capReason?: AgentScanCapReason;
+    landing?: boolean;
     /** Protocol v5: server-side finish gate evaluation result. */
     finishGate?: {
         status: 'accepted' | 'rejected' | 'not_evaluated';
@@ -726,6 +747,7 @@ export interface AgentScanResult {
     maxCredits?: number;
     creditExtensionsGranted?: number;
     creditsRefunded?: number;
+    segment?: AgentScanSegment;
 }
 
 // ── Verify budget ───────────────────────────────────────────────────────────

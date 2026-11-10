@@ -138,6 +138,7 @@ export class InvestigationState {
     private lineDensities = new Map<string, number>();
     private tasks = new Map<string, InvestigationTask>();
     private flowVerifications: FlowVerification[] = [];
+    private scopes = new Map<string, LineRange>();
 
     constructor() {
         this.checklist = {
@@ -479,6 +480,34 @@ export class InvestigationState {
         return this.fileCoverages.get(InvestigationState.normalizePath(filePath));
     }
 
+    /**
+     * Restrict coverage accounting for a file to a line range (a part of a
+     * split file). Uncovered ranges, next-unread hints, coverage percent and
+     * the coverage summary only consider lines inside the scope; reads
+     * outside it are still recorded as context.
+     */
+    setScope(filePath: string, range: LineRange | null): void {
+        const normalized = InvestigationState.normalizePath(filePath);
+        if (!range) {
+            this.scopes.delete(normalized);
+            return;
+        }
+        this.scopes.set(normalized, { start: Math.min(range.start, range.end), end: Math.max(range.start, range.end) });
+    }
+
+    getScope(filePath: string): LineRange | undefined {
+        const scope = this.scopes.get(InvestigationState.normalizePath(filePath));
+        return scope ? { ...scope } : undefined;
+    }
+
+    private scopedBounds(filePath: string, totalLines: number): LineRange {
+        const scope = this.scopes.get(InvestigationState.normalizePath(filePath));
+        if (!scope) return { start: 1, end: totalLines };
+        const start = Math.max(1, Math.min(scope.start, totalLines));
+        const end = Math.max(start, Math.min(scope.end, totalLines));
+        return { start, end };
+    }
+
     isCovered(filePath: string, startLine?: number, endLine?: number): boolean {
         const coverage = this.getCoverage(filePath);
         if (!coverage) return false;
@@ -496,15 +525,19 @@ export class InvestigationState {
     getUncoveredRanges(filePath: string): LineRange[] {
         const coverage = this.getCoverage(filePath);
         if (!coverage || !coverage.totalLines) return [];
-        if (coverage.ranges.length === 0) {
-            return [{ start: 1, end: coverage.totalLines }];
+        const bounds = this.scopedBounds(filePath, coverage.totalLines);
+        const sorted = [...coverage.ranges]
+            .filter(r => r.end >= bounds.start && r.start <= bounds.end)
+            .map(r => ({ start: Math.max(r.start, bounds.start), end: Math.min(r.end, bounds.end) }))
+            .sort((a, b) => a.start - b.start);
+        if (sorted.length === 0) {
+            return [{ start: bounds.start, end: bounds.end }];
         }
         const gaps: LineRange[] = [];
-        const sorted = [...coverage.ranges].sort((a, b) => a.start - b.start);
 
         // Gap before the first range
-        if (sorted[0].start > 1) {
-            gaps.push({ start: 1, end: sorted[0].start - 1 });
+        if (sorted[0].start > bounds.start) {
+            gaps.push({ start: bounds.start, end: sorted[0].start - 1 });
         }
 
         // Gaps between ranges
@@ -518,8 +551,8 @@ export class InvestigationState {
 
         // Gap after the last range
         const last = sorted[sorted.length - 1];
-        if (last.end < coverage.totalLines) {
-            gaps.push({ start: last.end + 1, end: coverage.totalLines });
+        if (last.end < bounds.end) {
+            gaps.push({ start: last.end + 1, end: bounds.end });
         }
 
         return gaps;
@@ -637,10 +670,9 @@ export class InvestigationState {
     getCoveragePercent(filePath: string): number {
         const coverage = this.getCoverage(filePath);
         if (!coverage || !coverage.totalLines) return 0;
-        const coveredLines = coverage.ranges.reduce(
-            (sum, r) => sum + (r.end - r.start + 1), 0,
-        );
-        return Math.round((coveredLines / coverage.totalLines) * 100);
+        const bounds = this.scopedBounds(filePath, coverage.totalLines);
+        const coveredLines = InvestigationState.coveredLinesInRange(coverage.ranges, bounds);
+        return Math.round((coveredLines / (bounds.end - bounds.start + 1)) * 100);
     }
 
     static chunkSizeForLines(totalLines: number): number {
@@ -878,8 +910,13 @@ export class InvestigationState {
         blockedReadCount: number;
     } {
         const coverage = this.getCoverage(filePath);
-        const totalLines = coverage?.totalLines ?? 0;
-        const coveredLines = (coverage?.ranges ?? []).reduce((sum, r) => sum + (r.end - r.start + 1), 0);
+        const fileTotalLines = coverage?.totalLines ?? 0;
+        const scoped = fileTotalLines > 0 && this.scopes.has(InvestigationState.normalizePath(filePath));
+        const bounds = scoped ? this.scopedBounds(filePath, fileTotalLines) : null;
+        const totalLines = bounds ? bounds.end - bounds.start + 1 : fileTotalLines;
+        const coveredLines = bounds
+            ? InvestigationState.coveredLinesInRange(coverage?.ranges ?? [], bounds)
+            : (coverage?.ranges ?? []).reduce((sum, r) => sum + (r.end - r.start + 1), 0);
         const uncovered = this.getUncoveredRanges(filePath);
         const largestUncovered = uncovered.length > 0
             ? uncovered.reduce((max, r) => (r.end - r.start) > (max.end - max.start) ? r : max)

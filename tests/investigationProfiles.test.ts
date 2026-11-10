@@ -5,6 +5,8 @@ import {
     WEBSOCKET_RPC_PROFILE,
     AUTH_SERVICE_PROFILE,
     GENERIC_UTILITY_PROFILE,
+    DECLARATION_PROFILE,
+    extractRoleFromArchitectureContext,
 } from '../src/attack/investigationProfiles';
 
 describe('selectInvestigationProfile', () => {
@@ -18,9 +20,17 @@ describe('selectInvestigationProfile', () => {
     it('selects WebSocket RPC profile for socket.io handler', () => {
         const profile = selectInvestigationProfile({
             filePath: 'src/handler.ts',
-            architectureContext: 'Uses WebSocket and socket.io for real-time communication',
+            architectureContext: 'src/handler.ts uses WebSocket and socket.io for real-time communication',
         });
         expect(profile.name).toBe('websocket-rpc');
+    });
+
+    it('ignores project-wide architecture text that does not mention the target', () => {
+        const profile = selectInvestigationProfile({
+            filePath: 'src/billing/invoice.ts',
+            architectureContext: 'Project uses WebSocket and socket.io for real-time communication\nsrc/ws/server.ts — RPC methods',
+        });
+        expect(profile.name).not.toBe('websocket-rpc');
     });
 
     it('selects Auth Service profile for auth file', () => {
@@ -147,5 +157,83 @@ describe('selectInvestigationProfile', () => {
         const hasPolicyCheck = GENERIC_UTILITY_PROFILE.requirements.some(r => r.acceptedKinds.includes('policy-result'));
         expect(hasRouteDiscovery).toBe(false);
         expect(hasPolicyCheck).toBe(false);
+    });
+});
+
+describe('selectInvestigationProfile — file shape, role and word boundaries', () => {
+    const typesOnly = `import { ServiceMap } from "effect";
+export interface ServerAuthShape { readonly authenticate: (token: string) => boolean }
+export class ServerAuth extends ServiceMap.Service<ServerAuth, ServerAuthShape>()("t3/auth/Services/ServerAuth") {}
+`;
+
+    it('selects the declaration profile for a types-only file before any path heuristic', () => {
+        const profile = selectInvestigationProfile({
+            filePath: 'apps/server/src/auth/Services/ServerAuth.ts',
+            fileContent: typesOnly,
+            role: 'authentication Issues session tokens',
+        });
+        expect(profile.name).toBe('declaration');
+        expect(profile).toBe(DECLARATION_PROFILE);
+    });
+
+    it('declaration profile requires only an initial read and an implementation search', () => {
+        expect(DECLARATION_PROFILE.requirements.map(r => r.id)).toEqual(['decl-initial-read', 'decl-find-implementation']);
+        const find = DECLARATION_PROFILE.requirements[1];
+        expect(find.requiredTools).toEqual(['search_code', 'find_references']);
+        expect(find.acceptsNegative).toBe(true);
+    });
+
+    it('does not pick the declaration profile for a file with implementation', () => {
+        const profile = selectInvestigationProfile({
+            filePath: 'src/utils/format.ts',
+            fileContent: 'export function format(x: string) { return x.trim(); }',
+        });
+        expect(profile.name).toBe('generic-utility');
+    });
+
+    it('role keywords win over path heuristics', () => {
+        expect(selectInvestigationProfile({ filePath: 'src/wsRpc.ts', role: 'route_handler REST endpoints' }).name).toBe('http-route');
+        expect(selectInvestigationProfile({ filePath: 'src/lib/thing.ts', role: 'middleware' }).name).toBe('http-route');
+        expect(selectInvestigationProfile({ filePath: 'src/lib/thing.ts', role: 'service Handles WebSocket RPC calls' }).name).toBe('websocket-rpc');
+        expect(selectInvestigationProfile({ filePath: 'src/lib/thing.ts', role: 'service auth service for session tokens' }).name).toBe('auth-service');
+        expect(selectInvestigationProfile({ filePath: 'src/lib/thing.ts', role: 'service token issuance' }).name).toBe('auth-service');
+        expect(selectInvestigationProfile({ filePath: 'src/lib/thing.ts', role: 'model shared types and interfaces' }).name).toBe('declaration');
+    });
+
+    it('a role that matches nothing falls through to path heuristics', () => {
+        expect(selectInvestigationProfile({ filePath: 'src/wsRpc.ts', role: 'shared_helper formatting' }).name).toBe('websocket-rpc');
+    });
+
+    it('extracts the role from the formatted architecture context', () => {
+        const arch = [
+            'Important files (2, ranked by security importance):',
+            '  [95] apps/server/src/auth/Layers/ServerAuth.ts (authentication) — Issues session tokens; validates bearer',
+            '  [80] apps/server/src/http.ts (route_handler) — HTTP routes',
+        ].join('\n');
+        expect(extractRoleFromArchitectureContext(arch, 'apps/server/src/http.ts')).toBe('route_handler HTTP routes');
+        expect(extractRoleFromArchitectureContext(arch, 'apps/server/src/auth/Layers/ServerAuth.ts')).toBe('authentication Issues session tokens; validates bearer');
+        expect(extractRoleFromArchitectureContext(arch, 'apps/server/src/other.ts')).toBeUndefined();
+    });
+
+    it('uses word boundaries for websocket path tokens (views.ts / news.ts are not websocket)', () => {
+        expect(selectInvestigationProfile({ filePath: 'src/views.ts' }).name).toBe('generic-utility');
+        expect(selectInvestigationProfile({ filePath: 'src/news/feed.ts' }).name).toBe('generic-utility');
+        expect(selectInvestigationProfile({ filePath: 'src/lib/rpcs.ts' }).name).toBe('generic-utility');
+        expect(selectInvestigationProfile({ filePath: 'src/ws/server.ts' }).name).toBe('websocket-rpc');
+        expect(selectInvestigationProfile({ filePath: 'src/websocketServer.ts' }).name).toBe('websocket-rpc');
+    });
+
+    it('uses word boundaries for auth path tokens', () => {
+        expect(selectInvestigationProfile({ filePath: 'src/author/profile.ts' }).name).toBe('generic-utility');
+        expect(selectInvestigationProfile({ filePath: 'src/lib/tokenizer.ts' }).name).toBe('generic-utility');
+        expect(selectInvestigationProfile({ filePath: 'src/authMiddleware.ts' }).name).toBe('auth-service');
+        expect(selectInvestigationProfile({ filePath: 'src/session_store.ts' }).name).toBe('auth-service');
+    });
+
+    it('all-handlers requirements are satisfiable by an empty inventory', () => {
+        for (const profile of [HTTP_ROUTE_PROFILE, WEBSOCKET_RPC_PROFILE, AUTH_SERVICE_PROFILE]) {
+            const allHandlers = profile.requirements.find(r => r.id.endsWith('-all-handlers'));
+            expect(allHandlers?.satisfiedByEmptyInventory).toBe(true);
+        }
     });
 });

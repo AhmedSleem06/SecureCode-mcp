@@ -246,3 +246,31 @@ describe('EvidenceLedger', () => {
         expect(unsatisfied[0].id).toBe('req-2');
     });
 });
+
+describe('EvidenceLedger — requirements that cannot apply', () => {
+    it('an empty handler inventory satisfies all-handlers requirements', () => {
+        const ledger = new EvidenceLedger();
+        ledger.addRequirements([
+            { id: 'http-all-handlers', description: 'Review all handlers', acceptedKinds: ['handler-inventory'], minimumCount: 2, satisfiedByEmptyInventory: true },
+            { id: 'http-policy-check', description: 'Policy', acceptedKinds: ['policy-result'], minimumCount: 1 },
+        ]);
+        ledger.recordEvidence({ kind: 'handler-inventory', tool: 'get_endpoints', filePath: 'src/views.ts', outcome: 'positive', transcriptStep: 1 });
+        expect(ledger.isRequirementSatisfied('http-all-handlers')).toBe(false);
+        const completed = ledger.markInventoryEmpty();
+        expect(completed).toEqual(['http-all-handlers']);
+        expect(ledger.isRequirementSatisfied('http-all-handlers')).toBe(true);
+        expect(ledger.getUnsatisfiedRequirements().map(r => r.id)).toEqual(['http-policy-check']);
+        expect(ledger.markInventoryEmpty()).toEqual([]);
+    });
+
+    it('acceptsNegative requirements accept a not-applicable observation; others do not', () => {
+        const ledger = new EvidenceLedger();
+        ledger.addRequirements([
+            { id: 'neg', description: 'Config', acceptedKinds: ['config-result'], minimumCount: 1, acceptsNegative: true },
+            { id: 'strict', description: 'Config strict', acceptedKinds: ['config-result'], minimumCount: 1 },
+        ]);
+        ledger.recordEvidence({ kind: 'config-result', tool: 'read_config', outcome: 'not-applicable', transcriptStep: 1 });
+        expect(ledger.isRequirementSatisfied('neg')).toBe(true);
+        expect(ledger.isRequirementSatisfied('strict')).toBe(false);
+    });
+});

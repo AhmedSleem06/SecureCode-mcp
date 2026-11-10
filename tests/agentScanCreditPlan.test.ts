@@ -187,4 +187,41 @@ describe('calculateBatchCredits', () => {
         expect(plan.agentRunCredits).toBe(10);
         expect(plan.verificationCredits).toBe(20);
     });
+
+    it('plans 5 credits per file part and up to 15 per part', () => {
+        const plan = calculateBatchCredits({
+            depth: 'standard',
+            architectureCacheHit: true,
+            uncachedFileCount: 3,
+            cachedFileCount: 0,
+            fileParts: [
+                { filePath: 'src/computerTools.ts', parts: 4 },
+                { filePath: 'src/wsRpc.ts', parts: 3 },
+                { filePath: 'src/http.ts', parts: 1 },
+            ],
+        });
+        expect(plan.breakdown.totalParts).toBe(8);
+        expect(plan.agentRunCredits).toBe(40);
+        expect(plan.total).toBe(40);
+        expect(plan.maxTotal).toBe(120);
+        expect(plan.breakdown.files).toEqual([
+            { filePath: 'src/computerTools.ts', parts: 4 },
+            { filePath: 'src/wsRpc.ts', parts: 3 },
+            { filePath: 'src/http.ts', parts: 1 },
+        ]);
+        expect(plan.warning).toBe('Planned 5 credits per file part (8 parts across 3 files, 40 total). Files over 2,000 lines are scanned in parts: src/computerTools.ts 4 parts, src/wsRpc.ts 3 parts. Each part can use up to 15 credits (up to 120 total); unused extension credits are refunded.');
+    });
+
+    it('counts files without part info as one part each', () => {
+        const plan = calculateBatchCredits({
+            depth: 'quick',
+            architectureCacheHit: false,
+            uncachedFileCount: 3,
+            cachedFileCount: 0,
+            fileParts: [{ filePath: 'a.ts', parts: 2 }],
+        });
+        expect(plan.breakdown.totalParts).toBe(4);
+        expect(plan.agentRunCredits).toBe(20);
+        expect(plan.total).toBe(plan.architectureCredits + 20);
+    });
 });

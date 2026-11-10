@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { selectAgentScanBatchFiles } from '../src/attack/agentScanBatchSelection';
+import { selectAgentScanBatchFiles, TYPES_ONLY_SKIP_REASON } from '../src/attack/agentScanBatchSelection';
 import type { ArchitectureContext } from '../src/project-map/architectureContext';
 
 function makeArch(overrides?: Partial<ArchitectureContext>): ArchitectureContext {
@@ -193,5 +193,85 @@ describe('selectAgentScanBatchFiles', () => {
         const result = selectAgentScanBatchFiles(workspaceRoot, arch, { topN: 1 });
         expect(result.selected[0].role).toBe('authentication');
         expect(result.selected[0].importance).toBe(95);
+    });
+
+    const SERVICES_SERVER_AUTH = `import { ServiceMap } from "effect";
+export interface ServerAuthShape {
+  readonly authenticate: (token: string) => boolean;
+}
+export class ServerAuth extends ServiceMap.Service<ServerAuth, ServerAuthShape>()(
+  "app/auth/Services/ServerAuth",
+) {}
+`;
+    const LAYERS_SERVER_AUTH = `import { Layer, Effect } from "effect";
+import { ServerAuth } from "../Services/ServerAuth";
+function parseBearer(header: string): string | null {
+  if (!header.startsWith("Bearer ")) return null;
+  return header.slice(7);
+}
+export const ServerAuthLive = Layer.succeed(ServerAuth, { authenticate: (t: string) => parseBearer(t) !== null });
+`;
+
+    it('swaps a types-only Services file for its Layers implementation', () => {
+        writeFile('src/auth/Services/ServerAuth.ts', SERVICES_SERVER_AUTH);
+        writeFile('src/auth/Layers/ServerAuth.ts', LAYERS_SERVER_AUTH);
+        writeFile('src/http.ts', 'export function handle() { return 1; }');
+        const arch = makeArch({
+            recommendedScanOrder: ['src/auth/Services/ServerAuth.ts', 'src/http.ts'],
+            importantFiles: [
+                { file: 'src/auth/Services/ServerAuth.ts', role: 'authentication', importance: 95, reasons: ['test'] },
+            ],
+        });
+        const result = selectAgentScanBatchFiles(workspaceRoot, arch, { topN: 2 });
+        expect(result.selected.map(s => s.filePath)).toEqual(['src/auth/Layers/ServerAuth.ts', 'src/http.ts']);
+        expect(result.selected[0].replaced).toEqual({
+            from: 'src/auth/Services/ServerAuth.ts',
+            to: 'src/auth/Layers/ServerAuth.ts',
+            reason: 'types only',
+        });
+        expect(result.selected[0].role).toBe('authentication');
+        expect(result.selected[0].rank).toBe(1);
+        expect(result.selected[1].replaced).toBeUndefined();
+        expect(result.skipped).toEqual([]);
+    });
+
+    it('finds X.impl.* next to a types-only file', () => {
+        writeFile('src/store/Store.ts', 'export interface Store { get(k: string): string }');
+        writeFile('src/store/Store.impl.ts', 'export function get(k: string) { return k; }');
+        const arch = makeArch({ recommendedScanOrder: ['src/store/Store.ts'] });
+        const result = selectAgentScanBatchFiles(workspaceRoot, arch, { topN: 1 });
+        expect(result.selected[0].filePath).toBe('src/store/Store.impl.ts');
+        expect(result.selected[0].replaced?.from).toBe('src/store/Store.ts');
+    });
+
+    it('finds an implementation that references the type with implements', () => {
+        writeFile('src/core/types/Mailer.ts', 'export interface Mailer { send(to: string): void }');
+        writeFile('src/core/smtp/smtpMailer.ts', 'import type { Mailer } from "../types/Mailer";\nexport class SmtpMailer implements Mailer {\n  send(to: string) { console.log(to); }\n}\n');
+        const arch = makeArch({ recommendedScanOrder: ['src/core/types/Mailer.ts'] });
+        const result = selectAgentScanBatchFiles(workspaceRoot, arch, { topN: 1 });
+        expect(result.selected[0].filePath).toBe('src/core/smtp/smtpMailer.ts');
+        expect(result.selected[0].replaced).toEqual({ from: 'src/core/types/Mailer.ts', to: 'src/core/smtp/smtpMailer.ts', reason: 'types only' });
+    });
+
+    it('skips a types-only file with no implementation and fills from the next ranked file', () => {
+        writeFile('src/contracts/Api.ts', 'export interface Api { call(): void }\nexport type Id = string;');
+        writeFile('src/a.ts', 'const a = 1;');
+        writeFile('src/b.ts', 'const b = 2;');
+        const arch = makeArch({ recommendedScanOrder: ['src/contracts/Api.ts', 'src/a.ts', 'src/b.ts'] });
+        const result = selectAgentScanBatchFiles(workspaceRoot, arch, { topN: 2 });
+        expect(result.selected.map(s => s.filePath)).toEqual(['src/a.ts', 'src/b.ts']);
+        expect(result.selected.map(s => s.rank)).toEqual([1, 2]);
+        expect(result.skipped).toEqual([{ filePath: 'src/contracts/Api.ts', reason: TYPES_ONLY_SKIP_REASON }]);
+        expect(TYPES_ONLY_SKIP_REASON).toBe('types only (no implementation found)');
+    });
+
+    it('does not select the same implementation twice', () => {
+        writeFile('src/auth/Services/ServerAuth.ts', SERVICES_SERVER_AUTH);
+        writeFile('src/auth/Layers/ServerAuth.ts', LAYERS_SERVER_AUTH);
+        const arch = makeArch({ recommendedScanOrder: ['src/auth/Layers/ServerAuth.ts', 'src/auth/Services/ServerAuth.ts'] });
+        const result = selectAgentScanBatchFiles(workspaceRoot, arch, { topN: 2 });
+        expect(result.selected.map(s => s.filePath)).toEqual(['src/auth/Layers/ServerAuth.ts']);
+        expect(result.skipped[0].filePath).toBe('src/auth/Services/ServerAuth.ts');
+        expect(result.skipped[0].reason).toContain('types only');
     });
 });

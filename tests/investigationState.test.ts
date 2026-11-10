@@ -927,3 +927,35 @@ describe('InvestigationState', () => {
         });
     });
 });
+
+describe('InvestigationState — segment scope', () => {
+    it('scopes uncovered ranges, coverage summary and percent to the part', () => {
+        const state = new InvestigationState();
+        state.setScope('src/big.ts', { start: 1001, end: 2000 });
+        state.recordActualRead('src/big.ts', 1, 400, 4000, false);
+        state.recordActualRead('src/big.ts', 1001, 1500, 4000, false);
+        expect(state.getUncoveredRanges('src/big.ts')).toEqual([{ start: 1501, end: 2000 }]);
+        const summary = state.getCoverageSummary('src/big.ts');
+        expect(summary.totalLines).toBe(1000);
+        expect(summary.coveredLines).toBe(500);
+        expect(summary.coveragePercentage).toBe(50);
+        expect(summary.uncoveredRangeCount).toBe(1);
+        expect(summary.readCount).toBe(2);
+        expect(state.getCoveragePercent('src/big.ts')).toBe(50);
+        expect(state.getNextUnreadRange('src/big.ts')?.start).toBe(1501);
+    });
+
+    it('reports the whole part as uncovered before any in-range read', () => {
+        const state = new InvestigationState();
+        state.setScope('src/big.ts', { start: 2001, end: 3000 });
+        state.recordActualRead('src/big.ts', 1, 100, 4000, false);
+        expect(state.getUncoveredRanges('src/big.ts')).toEqual([{ start: 2001, end: 3000 }]);
+    });
+
+    it('unscoped files keep whole-file accounting', () => {
+        const state = new InvestigationState();
+        state.recordActualRead('src/a.ts', 1, 50, 100, false);
+        expect(state.getUncoveredRanges('src/a.ts')).toEqual([{ start: 51, end: 100 }]);
+        expect(state.getCoverageSummary('src/a.ts').totalLines).toBe(100);
+    });
+});

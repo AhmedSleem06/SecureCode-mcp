@@ -36,7 +36,7 @@ const CACHE_FILE = 'scan-cache.json';
  * blocked-read recovery loops that previously terminated incomplete, so
  * cached v31 results must be re-scanned.
  */
-export const AGENT_SCAN_CACHE_VERSION = 46;
+export const AGENT_SCAN_CACHE_VERSION = 47;
 
 /** Cache TTL: 7 days. Findings older than this are re-scanned. */
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -76,6 +76,7 @@ export interface ScanCacheEntry {
      * unconditionally with current memory.
      */
     memoryHash?: string;
+    segments?: any[];
 }
 
 export interface ScanCacheData {
@@ -216,6 +217,7 @@ export function writeCachedScan(
         stepsGranted?: number;
         extensionsGranted?: number;
         costSpentUsd: number;
+        segments?: any[];
     },
     memoryHash?: string,
 ): void {
@@ -261,6 +263,7 @@ export function writeCachedScan(
         costSpentUsd: result.costSpentUsd,
         filePath,
         memoryHash,
+        ...(result.segments && result.segments.length > 0 ? { segments: result.segments } : {}),
     };
 
     // Atomic write

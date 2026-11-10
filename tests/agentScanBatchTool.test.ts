@@ -321,11 +321,115 @@ describe('toolAgentScanBatch — sequential orchestration', () => {
         const result = await toolAgentScanBatch(ctx, { topN: 3 });
 
         expect(result.stopReason).toBe('insufficient-credits');
-        expect(result.stopDetail).toBe('Insufficient credits: have 14, need 15.');
+        expect(result.stopDetail).toContain('Insufficient credits: have 14, need 15.');
+        expect(result.stopDetail).toContain('Top up at https://usesecurecode.tech');
         expect(result.creditNote).toContain('up to 45 total');
 
         vi.mocked(ApiClient).mockImplementation((() => ({
             getJson: vi.fn().mockResolvedValue({ scanCredits: 1000, attackerCredits: 100 }),
         })) as any);
+    });
+});
+
+function bigFile(lines: number): string {
+    const out: string[] = [];
+    for (let i = 0; out.length < lines; i++) {
+        out.push(`export function handler${i}(req: any) {`);
+        for (let j = 0; j < 48; j++) out.push(`    const v${j} = req.body.f${j};`);
+        out.push('}');
+        out.push('');
+    }
+    return out.slice(0, lines).join('\n');
+}
+
+describe('toolAgentScanBatch — file parts and replaced files', () => {
+    let ws: string;
+    const fsMod = require('fs') as typeof import('fs');
+    const osMod = require('os') as typeof import('os');
+    const pathMod = require('path') as typeof import('path');
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        ws = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'sc-batch-parts-'));
+        fsMod.mkdirSync(pathMod.join(ws, 'src'), { recursive: true });
+        fsMod.writeFileSync(pathMod.join(ws, 'src/big.ts'), bigFile(4700));
+        fsMod.writeFileSync(pathMod.join(ws, 'src/small.ts'), 'export const x = 1;\n');
+        vi.mocked(ApiClient).mockImplementation((() => ({
+            getJson: vi.fn().mockResolvedValue({ scanCredits: 1000, attackerCredits: 100 }),
+        })) as any);
+    });
+
+    it('plans 5 credits per file part and lists the part counts', async () => {
+        mockArchResult(makeArch(), true);
+        mockSelection(['src/big.ts', 'src/small.ts']);
+        (toolAgentScan as any).mockResolvedValue(mockScanResult('completed', { creditsUsed: 5 }));
+        const events: string[] = [];
+
+        const result = await toolAgentScanBatch({ ...ctx, workspaceRoot: ws }, {
+            topN: 2,
+            _progress: (_c: number, _t: number, m: string) => events.push(m),
+        });
+
+        expect(result.creditNote).toContain('Planned 5 credits per file part (5 parts across 2 files, 25 total)');
+        expect(result.creditNote).toContain('src/big.ts 4 parts');
+        expect(result.creditNote).toContain('up to 75 total');
+        expect(events.some(e => e.includes('Scanning src/big.ts (1/2, 4 parts)'))).toBe(true);
+        expect(result.completed[0].parts).toBe(4);
+        expect(result.completed[1].parts).toBe(1);
+    });
+
+    it('stops before starting when the balance cannot cover the base credits of every part', async () => {
+        vi.mocked(ApiClient).mockImplementation((() => ({
+            getJson: vi.fn().mockResolvedValue({ scanCredits: 15, attackerCredits: 0 }),
+        })) as any);
+        mockArchResult(makeArch(), true);
+        mockSelection(['src/big.ts', 'src/small.ts']);
+
+        const result = await toolAgentScanBatch({ ...ctx, workspaceRoot: ws }, { topN: 2 });
+
+        expect(result.status).toBe('preflight-failed');
+        expect(result.stopReason).toBe('insufficient-credits');
+        expect(result.stopDetail).toContain('have 15, need 25 (5 file parts × 5).');
+        expect(result.stopDetail).toContain('Top up at https://usesecurecode.tech');
+        expect((toolAgentScan as any).mock.calls).toHaveLength(0);
+        expect(result.notStarted[0].parts).toBe(4);
+    });
+
+    it('passes merged part segments through to the file result', async () => {
+        mockArchResult(makeArch(), true);
+        mockSelection(['src/big.ts']);
+        const segments = [
+            { index: 1, startLine: 1, endLine: 1500, status: 'completed', creditsUsed: 5 },
+            { index: 2, startLine: 1501, endLine: 4700, status: 'completed', creditsUsed: 7 },
+        ];
+        (toolAgentScan as any).mockResolvedValue(mockScanResult('completed', { creditsUsed: 12, segments }));
+
+        const result = await toolAgentScanBatch({ ...ctx, workspaceRoot: ws }, { topN: 1 });
+
+        expect(result.completed[0].segments).toEqual(segments);
+        expect(result.completed[0].parts).toBe(2);
+        expect(result.totals.creditsUsed).toBe(12);
+    });
+
+    it('renders replaced and types-only skipped files', async () => {
+        mockArchResult(makeArch(), true);
+        (selectAgentScanBatchFiles as any).mockImplementation(() => ({
+            selected: [{
+                filePath: 'src/small.ts', rank: 1,
+                replaced: { from: 'src/Services/ServerAuth.ts', to: 'src/small.ts', reason: 'types only' },
+            }],
+            skipped: [
+                { filePath: 'src/Services/Types.ts', reason: 'types only (no implementation found)' },
+                { filePath: 'src/missing.ts', reason: 'file does not exist' },
+            ],
+        }));
+        (toolAgentScan as any).mockResolvedValue(mockScanResult('completed'));
+
+        const result = await toolAgentScanBatch({ ...ctx, workspaceRoot: ws }, { topN: 1 });
+
+        expect(result.replaced).toEqual([{ from: 'src/Services/ServerAuth.ts', to: 'src/small.ts', reason: 'types only' }]);
+        expect(result.completed[0].replaced?.from).toBe('src/Services/ServerAuth.ts');
+        expect(result.selectionNote).toBe('Replaced src/Services/ServerAuth.ts (types only) with src/small.ts. Skipped src/Services/Types.ts (types only (no implementation found)).');
+        expect(result.skipped).toHaveLength(2);
     });
 });

@@ -105,7 +105,7 @@ async function runViaJob(ctx: ServerContext, kind: JobKind, args: any): Promise<
         kind,
         progress: job.progress,
         elapsedSeconds: elapsedSeconds(job),
-        estimatedMinutes: estimateJobMinutes(kind, job.args),
+        estimatedMinutes: estimateJobMinutes(kind, job.args, ctx.workspaceRoot),
         ...(started.status === 'existing' ? { alreadyRunning: true } : {}),
         message: `The scan is still running in the background (job ${jobId}). Its result is kept when it finishes.`,
         next: CHECK_BACK,

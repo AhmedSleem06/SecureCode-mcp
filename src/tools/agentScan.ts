@@ -36,7 +36,15 @@ import {
     formatArchitectureRiskTasksForTarget,
 } from '../project-map/architectureContext';
 import { runAgentScan } from '../attack/agentScanLoop';
-import { globalScanCoordinator } from '../attack/agentScanCoordinator';
+import { globalScanCoordinator, SINGLE_SCAN_OPERATION_TIMEOUT_MS } from '../attack/agentScanCoordinator';
+import {
+    planFileSegments,
+    planFileSegmentsForPath,
+    countFileLines,
+    formatSegmentEstimate,
+    formatSegmentRange,
+    type PlannedFileSegment,
+} from '../attack/fileSegments';
 import { runVerifyLoop } from '../attack/verifyLoop';
 import { runFixVerifyLoop } from '../attack/fixVerifyLoop';
 import { mergeFixedCode } from '../attack/fixCodeMerge';
@@ -60,7 +68,7 @@ import {
     formatCreditUsage,
     VERIFY_BUDGET_EXHAUSTED_REASON,
 } from '../attack/agentScanCredits';
-import type { AgentScanFinding, AgentScanTarget, VerificationLevel } from '../attack/agentScanProtocol';
+import type { AgentScanFinding, AgentScanSegment, AgentScanTarget, VerificationLevel } from '../attack/agentScanProtocol';
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
 import { ApprovalBroker } from '../approval/broker';
 import { getGitChangedFiles } from '../utils/gitContext';
@@ -227,8 +235,22 @@ export async function toolAgentScan(ctx: ServerContext, args: any): Promise<unkn
     return globalScanCoordinator.runExclusive(
         ctx.workspaceRoot,
         () => toolAgentScanInner(ctx, args),
-        { signal: args._signal as AbortSignal | undefined, maxWaitMs: 10_000 },
+        {
+            signal: args._signal as AbortSignal | undefined,
+            maxWaitMs: 10_000,
+            ...segmentedOperationTimeout(ctx, args),
+        },
     );
+}
+
+function segmentedOperationTimeout(ctx: ServerContext, args: any): { operationTimeoutMs?: number } {
+    try {
+        if (!args.filePath) return {};
+        const parts = planFileSegments(readFileFromWorkspace(ctx.workspaceRoot, args.filePath).code).length;
+        return parts > 1 ? { operationTimeoutMs: SINGLE_SCAN_OPERATION_TIMEOUT_MS * (parts + 1) } : {};
+    } catch {
+        return {};
+    }
 }
 
 async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknown> {
@@ -242,7 +264,6 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
 
 async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: AgentScanRunCloser): Promise<unknown> {
     const progress = args._progress as ((progress: number, total: number, message: string) => void) | undefined;
-    const skipFix = !!args._skipFix;
 
     // 1. Resolve code + language
     let code: string;
@@ -426,6 +447,7 @@ async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: Agent
                         added: [],
                         pendingCount: (filteredFindings as any[]).filter((f: any) => f.reviewStatus === 'pending').length,
                     },
+                    ...(cached.segments && cached.segments.length > 0 ? { segments: cached.segments } : {}),
                 };
             }
         } catch (err: any) {
@@ -482,13 +504,72 @@ async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: Agent
         architectureContext: architectureContextStr,
     };
 
+    const prep: ScanPrep = {
+        code,
+        language,
+        filePath,
+        endpointContext,
+        relatedFiles,
+        scope,
+        architectureContextStr,
+        memoryFingerprint,
+        useCache,
+        target,
+    };
+
+    if (filePath) {
+        const segments = await planFileSegmentsForPath(code, filePath);
+        if (segments.length > 1) return runSegmentedScan(ctx, args, prep, segments);
+    }
+
+    return (await scanTarget(ctx, args, prep, runCloser)).result;
+}
+
+interface ScanPrep {
+    code: string;
+    language: string;
+    filePath?: string;
+    endpointContext: any[];
+    relatedFiles: any[];
+    scope?: AgentScanScope;
+    architectureContextStr?: string;
+    memoryFingerprint: string;
+    useCache: boolean;
+    target: AgentScanTarget;
+}
+
+interface ScanPart {
+    segment: AgentScanSegment;
+    progress?: (progress: number, total: number, message: string) => void;
+}
+
+interface ScanOutput {
+    result: Record<string, any>;
+    agentSummary?: string;
+}
+
+async function scanTarget(
+    ctx: ServerContext,
+    args: any,
+    prep: ScanPrep,
+    runCloser: AgentScanRunCloser,
+    part?: ScanPart,
+): Promise<ScanOutput> {
+    const progress = part
+        ? part.progress
+        : args._progress as ((progress: number, total: number, message: string) => void) | undefined;
+    const skipFix = !!args._skipFix;
+    const { code, language, filePath, endpointContext, relatedFiles, scope, architectureContextStr, memoryFingerprint, useCache, target } = prep;
+
     const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
-    const agentResult = await runAgentScan(ctx, target, {
+    const agentResult = await runAgentScan(ctx, part ? { ...target, segment: part.segment } : target, {
         signal: (args as any)._signal as AbortSignal | undefined,
         onProgress: (steps, max, msg) => {
             if (progress) progress(steps, max, msg);
         },
         deferClose: true,
+        ...(part ? { segment: part.segment } : {}),
+        ...(typeof (args as any)._role === 'string' ? { role: (args as any)._role } : {}),
     });
     const scanRunId = agentResult.runId;
     runCloser.attach(
@@ -500,7 +581,19 @@ async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: Agent
     const runIdField = scanRunId ? { runId: scanRunId } : {};
 
     if (agentResult.status === 'failed') {
-        throw new Error(agentResult.error || 'Agent scan failed to start.');
+        if (!part) throw new Error(agentResult.error || 'Agent scan failed to start.');
+        const settlement = await runCloser.close();
+        return {
+            result: failedPartResult(part.segment, agentResult.error || 'Agent scan failed to start.', {
+                creditsUsed: settlement?.creditsUsed ?? agentResult.creditsUsed,
+                creditsRefunded: settlement?.creditsRefunded ?? agentResult.creditsRefunded,
+                baseCredits: agentResult.baseCredits,
+                stepsUsed: agentResult.stepsUsed,
+                costSpentUsd: agentResult.costSpentUsd,
+                terminationReason: agentResult.terminationReason,
+                capReason: agentResult.capReason,
+            }),
+        };
     }
 
     // 4. Verify each finding via the verify subagent (replaces sandbox prove + juror)
@@ -1190,7 +1283,7 @@ async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: Agent
     // degraded, or incomplete runs (llm_degraded, blocked reads, budget
     // stops, crashes) reflect a bad model-server or environment window,
     // not the file's true state, and must not be served for 7 days.
-    if (useCache && agentResult.status === 'completed' && agentResult.terminationReason === 'agent_finish') {
+    if (!part && useCache && agentResult.status === 'completed' && agentResult.terminationReason === 'agent_finish') {
         try {
             writeCachedScan(ctx.workspaceRoot, filePath!, code, {
                 findings: provenFindings,
@@ -1310,39 +1403,404 @@ async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: Agent
     const summary = [agentResult.summary, creditText].filter(Boolean).join(' ') || agentResult.summary;
 
     return {
-        status: agentResult.status,
+        agentSummary: agentResult.summary,
+        result: {
+            status: agentResult.status,
+            summary,
+            agentFindings: provenFindings,
+            verifiedFindings: provenFindings.filter(f => f.proven === 'PROVEN'),
+            allFindings: [],
+            investigationNotes: agentResult.investigationNotes ?? [],
+            coverageGaps: agentResult.coverageGaps ?? [],
+            stepsUsed: agentResult.stepsUsed,
+            stepsGranted: agentResult.stepsGranted,
+            extensionsGranted: agentResult.extensionsGranted,
+            terminationReason: agentResult.terminationReason,
+            ...(agentResult.capReason ? { capReason: agentResult.capReason } : {}),
+            costSpentUsd: agentResult.costSpentUsd,
+            ...creditFields,
+            transcript: agentResult.transcript,
+            provenCount: provenFindings.filter(f => f.proven === 'PROVEN').length,
+            unprovenCount: provenFindings.filter(f => f.proven === 'UNPROVEN').length,
+            inconclusiveCount: provenFindings.filter(f => f.proven === 'INCONCLUSIVE').length,
+            notReproducibleCount: provenFindings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
+            skippedCount: provenFindings.filter(f => f.proven === 'SKIPPED').length,
+            verifyHint,
+            verifyUsage: {
+                findingsAttempted: verifyTracker.findingsAttempted,
+                roundsUsed: verifyTracker.roundsUsed,
+                llmCallsUsed: verifyTracker.llmCallsUsed,
+                costSpentUsd: verifyTracker.costSpentUsd,
+                wallClockMs: verifyTracker.wallClockElapsedMs,
+                budget: verifyBudget,
+            },
+            reviewQueue: {
+                added: reviewQueueAdded,
+                pendingCount: provenFindings.filter(f => f.reviewStatus === 'pending').length,
+            },
+            ...(part ? { segment: part.segment } : {}),
+        },
+    };
+}
+
+const TOP_UP_URL = 'https://usesecurecode.tech';
+
+const PROVEN_RANK: Record<string, number> = { PROVEN: 5, INCONCLUSIVE: 4, NOT_REPRODUCIBLE: 3, SKIPPED: 2, UNPROVEN: 1 };
+
+interface PartRecord {
+    segment: PlannedFileSegment;
+    result?: Record<string, any>;
+    agentSummary?: string;
+}
+
+function failedPartResult(
+    segment: AgentScanSegment,
+    error: string,
+    extra: {
+        creditsUsed?: number;
+        creditsRefunded?: number;
+        baseCredits?: number;
+        stepsUsed?: number;
+        costSpentUsd?: number;
+        terminationReason?: string;
+        capReason?: string;
+    },
+): Record<string, any> {
+    return {
+        status: 'failed',
+        error,
+        terminationReason: extra.terminationReason ?? 'api_error',
+        ...(extra.capReason ? { capReason: extra.capReason } : {}),
+        agentFindings: [],
+        investigationNotes: [],
+        coverageGaps: [],
+        transcript: [],
+        stepsUsed: extra.stepsUsed ?? 0,
+        stepsGranted: 0,
+        extensionsGranted: 0,
+        costSpentUsd: extra.costSpentUsd ?? 0,
+        ...(typeof extra.creditsUsed === 'number'
+            ? {
+                creditsUsed: extra.creditsUsed,
+                creditsRefunded: extra.creditsRefunded ?? 0,
+                baseCredits: extra.baseCredits ?? AGENT_SCAN_DEFAULTS.creditsPerRun,
+                creditExtensionsGranted: 0,
+            }
+            : {}),
+        reviewQueue: { added: [], pendingCount: 0 },
+        segment,
+    };
+}
+
+function isOutOfCredits(result: Record<string, any> | undefined, err?: unknown): boolean {
+    if (err && ((err as any)?.status === 402 || (err as any)?.statusCode === 402) && !isAgentScanBudgetExhausted(err)) return true;
+    if (!result) return false;
+    if (result.capReason === 'insufficient_credits') return true;
+    return result.status === 'failed' && /insufficient credits|top up at/i.test(String(result.error ?? ''));
+}
+
+function sinkKey(f: AgentScanFinding): string {
+    const sink = f.evidenceChain?.sink;
+    if (sink && typeof sink.line === 'number') return `${sink.file ?? ''}:${sink.line}`;
+    return '';
+}
+
+function evidenceKey(f: AgentScanFinding): string {
+    return String(f.evidence ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function isSameFinding(a: AgentScanFinding, b: AgentScanFinding): boolean {
+    if (a.type !== b.type) return false;
+    if (Math.abs((a.line ?? 0) - (b.line ?? 0)) > 2) return false;
+    const sa = sinkKey(a);
+    const sb = sinkKey(b);
+    if (sa && sb) return sa === sb;
+    const ea = evidenceKey(a);
+    const eb = evidenceKey(b);
+    if (ea && eb) return ea === eb || ea.includes(eb) || eb.includes(ea);
+    return true;
+}
+
+function isStronger(a: ProvenFinding, b: ProvenFinding): boolean {
+    const ra = PROVEN_RANK[a.proven] ?? 0;
+    const rb = PROVEN_RANK[b.proven] ?? 0;
+    if (ra !== rb) return ra > rb;
+    return (a.confidence ?? 0) > (b.confidence ?? 0);
+}
+
+export function mergeSegmentFindings(findings: ProvenFinding[]): ProvenFinding[] {
+    const out: ProvenFinding[] = [];
+    for (const f of findings) {
+        const idx = out.findIndex(existing => isSameFinding(existing, f));
+        if (idx === -1) {
+            out.push(f);
+        } else if (isStronger(f, out[idx])) {
+            out[idx] = f;
+        }
+    }
+    return out;
+}
+
+function sumNumbers(values: unknown[]): number {
+    return values.reduce<number>((s, v) => s + (typeof v === 'number' && Number.isFinite(v) ? v : 0), 0);
+}
+
+function partLabel(segment: PlannedFileSegment): string {
+    return `Part ${segment.index} (lines ${formatSegmentRange(segment)})`;
+}
+
+async function runSegmentedScan(
+    ctx: ServerContext,
+    args: any,
+    prep: ScanPrep,
+    segments: PlannedFileSegment[],
+): Promise<unknown> {
+    const progress = args._progress as ((progress: number, total: number, message: string) => void) | undefined;
+    const signal = args._signal as AbortSignal | undefined;
+    const total = segments.length;
+    const groupId = `seg-${require('crypto').randomBytes(4).toString('hex')}`;
+    const lineCount = countFileLines(prep.code);
+
+    if (progress) progress(0, total, `${formatSegmentEstimate(lineCount, total)}. Parts run one after another.`);
+
+    const parts: PartRecord[] = [];
+    let outOfCreditsAfter: PlannedFileSegment | undefined;
+    let cancelled = false;
+    let firstError: string | undefined;
+
+    for (const seg of segments) {
+        if (outOfCreditsAfter || cancelled) {
+            parts.push({ segment: seg });
+            continue;
+        }
+        if (signal?.aborted) {
+            cancelled = true;
+            parts.push({ segment: seg });
+            continue;
+        }
+
+        const segment: AgentScanSegment = {
+            groupId,
+            index: seg.index,
+            total,
+            startLine: seg.startLine,
+            endLine: seg.endLine,
+        };
+        const prefix = `file part ${seg.index}/${total}: `;
+        const partProgress = progress
+            ? (c: number, t: number, m: string) => progress(c, t, `${prefix}${m}`)
+            : undefined;
+        if (partProgress) partProgress(0, 1, `Scanning lines ${formatSegmentRange(seg)}...`);
+
+        const closer = new AgentScanRunCloser();
+        let record: PartRecord;
+        let thrown: unknown;
+        try {
+            const output = await scanTarget(ctx, args, prep, closer, { segment, progress: partProgress });
+            record = { segment: seg, result: output.result, agentSummary: output.agentSummary };
+        } catch (err: any) {
+            thrown = err;
+            const settlement = await closer.close();
+            record = {
+                segment: seg,
+                result: failedPartResult(segment, err?.message || String(err), {
+                    creditsUsed: settlement?.creditsUsed,
+                    creditsRefunded: settlement?.creditsRefunded,
+                }),
+            };
+        } finally {
+            await closer.close();
+        }
+        parts.push(record);
+
+        const result = record.result!;
+        if (result.status === 'failed' && !firstError) firstError = String(result.error ?? 'Agent scan failed.');
+        if (isOutOfCredits(result, thrown)) {
+            outOfCreditsAfter = seg;
+        } else if (result.status === 'cancelled' || signal?.aborted) {
+            cancelled = true;
+        }
+    }
+
+    const ran = parts.filter(p => p.result);
+    if (!cancelled && ran.length > 0 && ran.every(p => p.result!.status === 'failed')) {
+        const msg = firstError || 'Agent scan failed to start.';
+        throw new Error(outOfCreditsAfter && !/top up/i.test(msg)
+            ? `${msg} — Top up at ${TOP_UP_URL} and retry.`
+            : msg);
+    }
+
+    return mergeSegmentResults(ctx, prep, parts, { groupId, total, outOfCreditsAfter, cancelled });
+}
+
+function mergeSegmentResults(
+    ctx: ServerContext,
+    prep: ScanPrep,
+    parts: PartRecord[],
+    info: { groupId: string; total: number; outOfCreditsAfter?: PlannedFileSegment; cancelled: boolean },
+): Record<string, any> {
+    const ran = parts.filter(p => p.result);
+    const notStarted = parts.filter(p => !p.result);
+    const results = ran.map(p => p.result!);
+
+    const allFindings: ProvenFinding[] = [];
+    const investigationNotes: any[] = [];
+    const coverageGaps: any[] = [];
+    const transcript: any[] = [];
+    const verifyHints: string[] = [];
+    const reviewAdded: string[] = [];
+    for (const p of ran) {
+        const r = p.result!;
+        const tag = { index: p.segment.index, total: info.total, startLine: p.segment.startLine, endLine: p.segment.endLine };
+        allFindings.push(...((r.agentFindings ?? []) as ProvenFinding[]));
+        for (const n of r.investigationNotes ?? []) investigationNotes.push({ ...n, part: tag });
+        for (const g of r.coverageGaps ?? []) coverageGaps.push({ ...g, part: tag });
+        transcript.push(...(r.transcript ?? []));
+        if (r.verifyHint && !verifyHints.includes(r.verifyHint)) verifyHints.push(r.verifyHint);
+        reviewAdded.push(...(r.reviewQueue?.added ?? []));
+    }
+    for (const p of notStarted) {
+        coverageGaps.push({
+            title: `${partLabel(p.segment)} not scanned`,
+            detail: info.outOfCreditsAfter
+                ? 'Scan stopped because the account ran out of credits.'
+                : 'Scan was cancelled before this part ran.',
+            requiredEvidence: [],
+            suggestedNextAction: info.outOfCreditsAfter
+                ? `Top up at ${TOP_UP_URL} and re-scan this file.`
+                : 'Re-scan this file.',
+            priority: 'high',
+            line: p.segment.startLine,
+            lineEnd: p.segment.endLine,
+            ...(prep.filePath ? { file: prep.filePath } : {}),
+            part: { index: p.segment.index, total: info.total, startLine: p.segment.startLine, endLine: p.segment.endLine },
+        });
+    }
+    const findings = mergeSegmentFindings(allFindings);
+
+    const allCompleted = notStarted.length === 0
+        && results.every(r => r.status === 'completed' && r.terminationReason === 'agent_finish');
+    let status: string;
+    if (info.cancelled) status = 'cancelled';
+    else if (allCompleted) status = 'completed';
+    else status = 'incomplete';
+
+    let terminationReason: string | undefined;
+    if (info.cancelled) terminationReason = 'cancelled';
+    else if (allCompleted) terminationReason = 'agent_finish';
+    else terminationReason = results.find(r => r.terminationReason && r.terminationReason !== 'agent_finish')?.terminationReason
+        ?? (info.outOfCreditsAfter ? 'budget_exhausted' : 'forced_incomplete');
+
+    const creditParts = results.filter(r => typeof r.creditsUsed === 'number');
+    const creditsUsed = sumNumbers(creditParts.map(r => r.creditsUsed));
+    const creditsRefunded = sumNumbers(creditParts.map(r => r.creditsRefunded));
+    const baseCredits = sumNumbers(creditParts.map(r => r.baseCredits ?? AGENT_SCAN_DEFAULTS.creditsPerRun));
+    const creditExtensionsGranted = sumNumbers(creditParts.map(r => r.creditExtensionsGranted));
+    const maxCredits = sumNumbers(creditParts.map(r => r.maxCredits ?? AGENT_SCAN_DEFAULTS.maxCreditsPerRun));
+    const perPartBase = creditParts.length > 0 ? Math.round(baseCredits / creditParts.length) : AGENT_SCAN_DEFAULTS.creditsPerRun;
+    const extensionCredits = Math.max(0, creditsUsed - baseCredits);
+
+    const sentences: string[] = [];
+    sentences.push(`Scanned in ${info.total} parts (lines ${parts.map(p => formatSegmentRange(p.segment)).join(', ')}).`);
+    if (creditParts.length > 0) {
+        const breakdown = extensionCredits > 0
+            ? `${creditParts.length} part${creditParts.length === 1 ? '' : 's'} × ${perPartBase} + ${extensionCredits} extension credit${extensionCredits === 1 ? '' : 's'}`
+            : `${creditParts.length} part${creditParts.length === 1 ? '' : 's'} × ${perPartBase}`;
+        sentences.push(`This file used ${creditsUsed} credit${creditsUsed === 1 ? '' : 's'} (${breakdown}).`);
+        if (creditsRefunded > 0) sentences.push(`${creditsRefunded} credit${creditsRefunded === 1 ? ' was' : 's were'} refunded.`);
+    }
+    for (const p of ran) {
+        if (p.result!.status === 'failed') {
+            sentences.push(`${partLabel(p.segment)} failed: ${p.result!.error ?? 'unknown error'}.`);
+        }
+    }
+    if (info.outOfCreditsAfter && notStarted.length > 0) {
+        sentences.push(`Out of credits after part ${info.outOfCreditsAfter.index} of ${info.total}: lines ${notStarted.map(p => formatSegmentRange(p.segment)).join(', ')} were not scanned. Top up at ${TOP_UP_URL} and re-scan this file.`);
+    } else if (info.outOfCreditsAfter) {
+        sentences.push(`Credits ran out during part ${info.outOfCreditsAfter.index} of ${info.total}. Top up at ${TOP_UP_URL} and re-scan to scan deeper.`);
+    } else if (info.cancelled && notStarted.length > 0) {
+        sentences.push(`Scan cancelled: lines ${notStarted.map(p => formatSegmentRange(p.segment)).join(', ')} were not scanned.`);
+    }
+    for (const p of ran) {
+        if (p.agentSummary) sentences.push(`${partLabel(p.segment)}: ${p.agentSummary}`);
+    }
+
+    const segmentsField = parts.map(p => ({
+        index: p.segment.index,
+        startLine: p.segment.startLine,
+        endLine: p.segment.endLine,
+        status: p.result ? p.result.status : 'not-started',
+        ...(p.result && typeof p.result.creditsUsed === 'number' ? { creditsUsed: p.result.creditsUsed } : {}),
+        ...(p.result?.terminationReason ? { terminationReason: p.result.terminationReason } : {}),
+        ...(p.result?.error ? { error: p.result.error } : {}),
+    }));
+
+    const summary = sentences.join(' ');
+    const stepsUsed = sumNumbers(results.map(r => r.stepsUsed));
+    const costSpentUsd = sumNumbers(results.map(r => r.costSpentUsd));
+    const capReason = info.outOfCreditsAfter ? 'insufficient_credits' : results.find(r => r.capReason)?.capReason;
+
+    if (prep.useCache && prep.filePath && status === 'completed' && terminationReason === 'agent_finish') {
+        try {
+            writeCachedScan(ctx.workspaceRoot, prep.filePath, prep.code, {
+                findings,
+                investigationNotes,
+                coverageGaps,
+                status,
+                terminationReason,
+                summary,
+                stepsUsed,
+                stepsGranted: sumNumbers(results.map(r => r.stepsGranted)),
+                extensionsGranted: sumNumbers(results.map(r => r.extensionsGranted)),
+                costSpentUsd,
+                segments: segmentsField,
+            }, prep.memoryFingerprint);
+        } catch (err: any) {
+            console.warn(`[Agent Scan] Cache write skipped: ${err?.message || err}`);
+        }
+    }
+
+    const verifyBudgets = results.map(r => r.verifyUsage).filter(Boolean);
+
+    return {
+        status,
         summary,
-        agentFindings: provenFindings,
-        verifiedFindings: provenFindings.filter(f => f.proven === 'PROVEN'),
+        agentFindings: findings,
+        verifiedFindings: findings.filter(f => f.proven === 'PROVEN'),
         allFindings: [],
-        investigationNotes: agentResult.investigationNotes ?? [],
-        coverageGaps: agentResult.coverageGaps ?? [],
-        stepsUsed: agentResult.stepsUsed,
-        stepsGranted: agentResult.stepsGranted,
-        extensionsGranted: agentResult.extensionsGranted,
-        terminationReason: agentResult.terminationReason,
-        ...(agentResult.capReason ? { capReason: agentResult.capReason } : {}),
-        costSpentUsd: agentResult.costSpentUsd,
-        ...creditFields,
-        transcript: agentResult.transcript,
-        provenCount: provenFindings.filter(f => f.proven === 'PROVEN').length,
-        unprovenCount: provenFindings.filter(f => f.proven === 'UNPROVEN').length,
-        inconclusiveCount: provenFindings.filter(f => f.proven === 'INCONCLUSIVE').length,
-        notReproducibleCount: provenFindings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
-        skippedCount: provenFindings.filter(f => f.proven === 'SKIPPED').length,
-        verifyHint,
+        investigationNotes,
+        coverageGaps,
+        stepsUsed,
+        stepsGranted: sumNumbers(results.map(r => r.stepsGranted)),
+        extensionsGranted: sumNumbers(results.map(r => r.extensionsGranted)),
+        terminationReason,
+        ...(capReason ? { capReason } : {}),
+        costSpentUsd,
+        ...(creditParts.length > 0
+            ? { creditsUsed, baseCredits, creditExtensionsGranted, creditsRefunded, maxCredits }
+            : {}),
+        transcript,
+        provenCount: findings.filter(f => f.proven === 'PROVEN').length,
+        unprovenCount: findings.filter(f => f.proven === 'UNPROVEN').length,
+        inconclusiveCount: findings.filter(f => f.proven === 'INCONCLUSIVE').length,
+        notReproducibleCount: findings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
+        skippedCount: findings.filter(f => f.proven === 'SKIPPED').length,
+        ...(verifyHints.length > 0 ? { verifyHint: verifyHints.join('\n') } : {}),
         verifyUsage: {
-            findingsAttempted: verifyTracker.findingsAttempted,
-            roundsUsed: verifyTracker.roundsUsed,
-            llmCallsUsed: verifyTracker.llmCallsUsed,
-            costSpentUsd: verifyTracker.costSpentUsd,
-            wallClockMs: verifyTracker.wallClockElapsedMs,
-            budget: verifyBudget,
+            findingsAttempted: sumNumbers(verifyBudgets.map(v => v.findingsAttempted)),
+            roundsUsed: sumNumbers(verifyBudgets.map(v => v.roundsUsed)),
+            llmCallsUsed: sumNumbers(verifyBudgets.map(v => v.llmCallsUsed)),
+            costSpentUsd: sumNumbers(verifyBudgets.map(v => v.costSpentUsd)),
+            wallClockMs: sumNumbers(verifyBudgets.map(v => v.wallClockMs)),
+            ...(verifyBudgets[0]?.budget ? { budget: verifyBudgets[0].budget } : {}),
         },
         reviewQueue: {
-            added: reviewQueueAdded,
-            pendingCount: provenFindings.filter(f => f.reviewStatus === 'pending').length,
+            added: reviewAdded,
+            pendingCount: findings.filter(f => f.reviewStatus === 'pending').length,
         },
+        cached: false,
+        segmentGroupId: info.groupId,
+        segments: segmentsField,
     };
 }
 

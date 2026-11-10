@@ -201,6 +201,8 @@ The deterministic control plane enforces proof quality:
 
 Languages: JavaScript, TypeScript, Python (partial).
 
+Credits: an agent scan uses 5 credits; large files can use up to 15 (extended 2 credits at a time) and unused extension credits are refunded. Files over 2,000 lines are scanned in parts; each part uses 5–15 credits. Parts run one after another and the result is merged into one file result.
+
 ## Tool Errors and Progress
 
 **Failures say what to do, not just what broke.** A missing or expired session

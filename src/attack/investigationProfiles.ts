@@ -10,6 +10,7 @@
 
 import type { InvestigationStep } from './investigationState';
 import type { EvidenceRequirement } from './evidenceLedger';
+import { detectDeclarationOnly, type FileShapeBoundary } from './fileShape';
 
 export interface InvestigationProfile {
     name: string;
@@ -38,7 +39,7 @@ export const HTTP_ROUTE_PROFILE: InvestigationProfile = {
         { id: 'http-auth-search', description: 'Find authentication symbols', acceptedKinds: ['symbol-definition', 'symbol-reference'], requiredTools: ['search_code'], minimumCount: 1 },
         { id: 'http-cross-file-flow', description: 'Trace cross-file data flow', acceptedKinds: ['cross-file-flow'], requiredTools: ['trace_flow_cross_file', 'trace_flow'], minimumCount: 1 },
         { id: 'http-config-inspection', description: 'Inspect security configuration', acceptedKinds: ['config-result'], requiredTools: ['read_config'], minimumCount: 1, acceptsNegative: true },
-        { id: 'http-all-handlers', description: 'Review all discovered handlers', acceptedKinds: ['handler-inventory'], minimumCount: 2 },
+        { id: 'http-all-handlers', description: 'Review all discovered handlers', acceptedKinds: ['handler-inventory'], minimumCount: 2, satisfiedByEmptyInventory: true },
         { id: 'http-authz-check', description: 'Verify authorization on authenticated vs unauthenticated paths', acceptedKinds: ['policy-result', 'guard-result'], requiredTools: ['check_policy', 'check_guard'], minimumCount: 1, acceptsNegative: true },
         { id: 'http-csrf-check', description: 'Verify CSRF/origin checks on mutation endpoints', acceptedKinds: ['guard-result', 'policy-result'], requiredTools: ['check_guard', 'check_policy'], minimumCount: 1, acceptsNegative: true },
         { id: 'http-threat-model', description: 'Establish threat model: is the attacker in scope for this endpoint?', acceptedKinds: ['threat-model-result', 'config-result'], requiredTools: ['read_config', 'search_code'], minimumCount: 1, acceptsNegative: true },
@@ -66,7 +67,7 @@ export const WEBSOCKET_RPC_PROFILE: InvestigationProfile = {
         { id: 'ws-ownership-analysis', description: 'Trace ownership for resource methods', acceptedKinds: ['cross-file-flow', 'symbol-reference'], requiredTools: ['trace_flow_cross_file', 'search_code'], minimumCount: 1 },
         { id: 'ws-cross-file-flow', description: 'Trace cross-file data flow', acceptedKinds: ['cross-file-flow'], requiredTools: ['trace_flow_cross_file'], minimumCount: 1 },
         { id: 'ws-config-inspection', description: 'Inspect security configuration', acceptedKinds: ['config-result'], requiredTools: ['read_config'], minimumCount: 1, acceptsNegative: true },
-        { id: 'ws-all-handlers', description: 'Review all RPC methods', acceptedKinds: ['handler-inventory'], minimumCount: 2 },
+        { id: 'ws-all-handlers', description: 'Review all RPC methods', acceptedKinds: ['handler-inventory'], minimumCount: 2, satisfiedByEmptyInventory: true },
         { id: 'ws-per-method-authz', description: 'Verify per-method authorization (owner vs client roles)', acceptedKinds: ['guard-result', 'policy-result'], requiredTools: ['check_guard', 'check_policy'], minimumCount: 1, acceptsNegative: true },
         { id: 'ws-cmd-execution', description: 'Trace command execution paths (execFile, spawn, child_process)', acceptedKinds: ['cross-file-flow', 'source-range'], requiredTools: ['trace_flow_cross_file', 'trace_flow'], minimumCount: 1, acceptsNegative: true },
         { id: 'ws-threat-model', description: 'Establish threat model: are untrusted local processes in scope? Is the binding address exposed?', acceptedKinds: ['threat-model-result', 'config-result'], requiredTools: ['read_config', 'search_code'], minimumCount: 1, acceptsNegative: true },
@@ -92,7 +93,7 @@ export const AUTH_SERVICE_PROFILE: InvestigationProfile = {
         { id: 'auth-cross-file-flow', description: 'Trace credential flow across files', acceptedKinds: ['cross-file-flow'], requiredTools: ['trace_flow_cross_file'], minimumCount: 1 },
         { id: 'auth-config-inspection', description: 'Inspect auth configuration', acceptedKinds: ['config-result'], requiredTools: ['read_config'], minimumCount: 1, acceptsNegative: true },
         { id: 'auth-tests-found', description: 'Find tests for auth code', acceptedKinds: ['test-location'], requiredTools: ['find_tests'], minimumCount: 1, acceptsNegative: true },
-        { id: 'auth-all-handlers', description: 'Review all auth operations', acceptedKinds: ['handler-inventory'], minimumCount: 1 },
+        { id: 'auth-all-handlers', description: 'Review all auth operations', acceptedKinds: ['handler-inventory'], minimumCount: 1, satisfiedByEmptyInventory: true },
         { id: 'auth-credential-lifecycle', description: 'Verify credential lifecycle (issue, verify, revoke, expire)', acceptedKinds: ['guard-result', 'cross-file-flow'], requiredTools: ['check_guard', 'trace_flow_cross_file'], minimumCount: 1, acceptsNegative: true },
         { id: 'auth-bootstrap-token', description: 'Verify bootstrap/pairing token handling', acceptedKinds: ['guard-result', 'policy-result'], requiredTools: ['check_guard', 'check_policy'], minimumCount: 1, acceptsNegative: true },
         { id: 'auth-threat-model', description: 'Establish threat model: is the attacker in scope for the auth flow?', acceptedKinds: ['threat-model-result', 'config-result'], requiredTools: ['read_config', 'search_code'], minimumCount: 1, acceptsNegative: true },
@@ -117,25 +118,97 @@ export const GENERIC_UTILITY_PROFILE: InvestigationProfile = {
     ],
 };
 
+export const DECLARATION_PROFILE: InvestigationProfile = {
+    name: 'declaration',
+    requiredSteps: [
+        'initial-read',
+        'candidates-verified',
+    ],
+    description: 'Types-only file — declares interfaces, types, or service tags with no implementation. Requires an initial read and a search for the implementation.',
+    requirements: [
+        { id: 'decl-initial-read', description: 'Read the target file source', acceptedKinds: ['source-range'], requiredTools: ['read_file'], minimumCount: 1 },
+        { id: 'decl-find-implementation', description: 'Find where the declared types are implemented', acceptedKinds: ['symbol-reference', 'symbol-definition'], requiredTools: ['search_code', 'find_references'], minimumCount: 1, acceptsNegative: true },
+    ],
+};
+
 export interface ProfileSelectionInput {
     filePath: string;
     architectureContext?: string;
     endpointContext?: string;
+    role?: string;
+    fileContent?: string;
+    functionBoundaries?: FileShapeBoundary[] | null;
+}
+
+const WS_PATH_TOKENS = /(^|[\/._-])(ws|wss|websockets?|rpc|sockets?|socketio)([\/._-]|$)/;
+const AUTH_PATH_TOKENS = /(^|[\/._-])(auth|authn|authz|authentication|authorization|login|logout|tokens?|sessions?|credentials?|passwords?|jwt|oauth2?)([\/._-]|$)/;
+
+function tokenizePath(filePath: string): string {
+    return (filePath || '')
+        .replace(/\\/g, '/')
+        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+        .replace(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
+        .toLowerCase();
+}
+
+function profileFromRole(role: string, hasContent: boolean): InvestigationProfile | null {
+    const text = role.toLowerCase().replace(/_/g, ' ');
+    const roleValue = text.trim().split(/\s+/).slice(0, 2).join(' ');
+    if (/^(route handler|middleware)\b/.test(roleValue)) return HTTP_ROUTE_PROFILE;
+    if (/^(authentication|authorization)\b/.test(roleValue)) return AUTH_SERVICE_PROFILE;
+    if (/\b(middleware|routes?|rest|http)\b/.test(text)) return HTTP_ROUTE_PROFILE;
+    if (/\b(websockets?|rpc)\b/.test(text)) return WEBSOCKET_RPC_PROFILE;
+    if (/\bauth(entication)? service\b|\bsessions?\b|\btoken issu/.test(text)) return AUTH_SERVICE_PROFILE;
+    if (!hasContent && /\b(types|interfaces?|schemas?)\b/.test(text)) return DECLARATION_PROFILE;
+    return null;
 }
 
 /**
- * Select an investigation profile based on the target file path and context.
+ * Pull the `(role) — reasons` text for a file out of the formatted
+ * architecture context (see formatArchitectureContextForPrompt).
+ */
+export function extractRoleFromArchitectureContext(architectureContext: string | undefined, filePath: string): string | undefined {
+    if (typeof architectureContext !== 'string' || !architectureContext || !filePath) return undefined;
+    const target = filePath.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+    for (const line of architectureContext.split('\n')) {
+        const match = /^\s*\[\d+\]\s+(\S+)\s+\(([^)]+)\)\s*(?:—\s*(.*))?$/.exec(line);
+        if (!match) continue;
+        const file = match[1].replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+        if (file !== target && !target.endsWith(`/${file}`) && !file.endsWith(`/${target}`)) continue;
+        return [match[2], match[3]].filter(Boolean).join(' ');
+    }
+    return undefined;
+}
+
+/**
+ * Select an investigation profile based on the target file shape, its
+ * architecture role, its path, and context.
  *
- * Heuristics:
- *   - File path contains "ws", "websocket", "rpc", "socket" → WebSocket RPC
- *   - File path contains "auth", "login", "token", "session", "credential" → Auth Service
- *   - Architecture context mentions "endpoint", "route", "handler", "express", "fastify" → HTTP Route
+ * Order:
+ *   - File content only declares types → Declaration
+ *   - Architecture role keywords (route/middleware/HTTP, WebSocket/RPC,
+ *     auth service/session/token issuance, types/interface/schema)
+ *   - Path tokens ws/websocket/rpc/socket → WebSocket RPC
+ *   - Path tokens auth/login/token/session/credential → Auth Service
+ *   - Architecture context mentions endpoint/route/handler → HTTP Route
  *   - Otherwise → Generic Utility
  */
 export function selectInvestigationProfile(input: ProfileSelectionInput): InvestigationProfile {
+    const pathTokens = tokenizePath(input.filePath);
     const filePathLower = (input.filePath || '').toLowerCase();
     const archContextRaw = input.architectureContext;
-    const archContext = (typeof archContextRaw === 'string' ? archContextRaw : '').toLowerCase();
+    const normalizedTarget = (input.filePath || '').replace(/\\/g, '/').toLowerCase();
+    const targetBase = normalizedTarget.split('/').pop() || '';
+    const baseIsDistinct = targetBase.length > 0 && !/^index\.[a-z]+$/.test(targetBase) && targetBase !== normalizedTarget;
+    const archContext = (typeof archContextRaw === 'string' ? archContextRaw : '')
+        .toLowerCase()
+        .split('\n')
+        .filter(line => {
+            if (!normalizedTarget) return false;
+            const l = line.replace(/\\/g, '/');
+            return l.includes(normalizedTarget) || (baseIsDistinct && l.includes(targetBase));
+        })
+        .join('\n');
     // The endpoint context arrives as an EndpointContext[] (target.endpointContext)
     // or, in tests/legacy callers, as a pre-rendered string. Serialize the array
     // into a searchable string so route-file detection actually sees it.
@@ -154,14 +227,24 @@ export function selectInvestigationProfile(input: ProfileSelectionInput): Invest
         endpointContext = '';
     }
 
+    const hasContent = typeof input.fileContent === 'string' && input.fileContent.trim().length > 0;
+    if (hasContent && detectDeclarationOnly(input.fileContent!, input.functionBoundaries)) {
+        return DECLARATION_PROFILE;
+    }
+
+    if (input.role) {
+        const fromRole = profileFromRole(input.role, hasContent);
+        if (fromRole) return fromRole;
+    }
+
     // WebSocket RPC detection
-    if (/(ws|websocket|rpc|socket|wss)/i.test(filePathLower) ||
+    if (WS_PATH_TOKENS.test(pathTokens) ||
         /websocket|rpc\s+method|socket\.io/i.test(archContext)) {
         return WEBSOCKET_RPC_PROFILE;
     }
 
     // Authentication service detection
-    if (/(auth|login|token|session|credential|password|jwt|oauth)/i.test(filePathLower) ||
+    if (AUTH_PATH_TOKENS.test(pathTokens) ||
         /auth.*service|token.*issue|credential.*lifecycle/i.test(archContext)) {
         return AUTH_SERVICE_PROFILE;
     }

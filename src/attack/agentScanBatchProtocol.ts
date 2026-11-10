@@ -47,6 +47,20 @@ export interface AgentScanBatchFileError {
     retryable?: boolean;
 }
 
+export interface AgentScanBatchFileSegment {
+    index: number;
+    startLine: number;
+    endLine: number;
+    status: string;
+    creditsUsed?: number;
+}
+
+export interface AgentScanBatchReplacement {
+    from: string;
+    to: string;
+    reason: string;
+}
+
 export interface AgentScanBatchFileResult {
     filePath: string;
     rank: number;
@@ -62,6 +76,9 @@ export interface AgentScanBatchFileResult {
     stepsUsed: number;
     costSpentUsd: number;
     creditsUsed?: number;
+    parts?: number;
+    segments?: AgentScanBatchFileSegment[];
+    replaced?: AgentScanBatchReplacement;
     error?: AgentScanBatchFileError;
 }
 
@@ -83,6 +100,12 @@ export interface AgentScanBatchResult {
     /** Human-readable explanation of why the batch stopped (preflight failures in particular). */
     stopDetail?: string;
     creditNote?: string;
+    /** Files swapped for their implementation because they only declare types. */
+    replaced?: AgentScanBatchReplacement[];
+    /** Files left out of the selection, with the reason. */
+    skipped?: { filePath: string; reason: string }[];
+    /** Human-readable note on replaced / skipped files. */
+    selectionNote?: string;
     /** Completed scans currently available in the cache — retrievable without consuming a run. */
     cachedScans?: { filePath: string; findings: number; scannedAt: string }[];
     requestedTopN: number;
@@ -179,6 +202,22 @@ export interface AggregateBatchExtras {
     stopDetail?: string;
     creditNote?: string;
     cachedScans?: { filePath: string; findings: number; scannedAt: string }[];
+    replaced?: AgentScanBatchReplacement[];
+    skipped?: { filePath: string; reason: string }[];
+}
+
+export function formatBatchSelectionNote(
+    replaced: AgentScanBatchReplacement[] | undefined,
+    skipped: { filePath: string; reason: string }[] | undefined,
+): string | undefined {
+    const parts: string[] = [];
+    for (const r of replaced ?? []) {
+        parts.push(`Replaced ${r.from} (${r.reason}) with ${r.to}.`);
+    }
+    for (const s of skipped ?? []) {
+        if (/types only/i.test(s.reason)) parts.push(`Skipped ${s.filePath} (${s.reason}).`);
+    }
+    return parts.length > 0 ? parts.join(' ') : undefined;
 }
 
 /**
@@ -222,6 +261,8 @@ export function aggregateBatchResult(
         status = incomplete.length > 0 || failed.length > 0 ? 'incomplete' : 'completed';
     }
 
+    const selectionNote = formatBatchSelectionNote(extras?.replaced, extras?.skipped);
+
     return {
         status,
         stopReason,
@@ -244,6 +285,9 @@ export function aggregateBatchResult(
         },
         stopDetail: extras?.stopDetail,
         ...(extras?.creditNote ? { creditNote: extras.creditNote } : {}),
+        ...(extras?.replaced && extras.replaced.length > 0 ? { replaced: extras.replaced } : {}),
+        ...(extras?.skipped && extras.skipped.length > 0 ? { skipped: extras.skipped } : {}),
+        ...(selectionNote ? { selectionNote } : {}),
         cachedScans: extras?.cachedScans,
     };
 }
