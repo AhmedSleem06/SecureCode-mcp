@@ -571,8 +571,22 @@ function processExpression(
         return;
     }
 
-    // Sink call
-    const sinkMatch = matchSink(node, sourceText, language);
+    // Sink call — the statement's own call plus sink calls nested in its
+    // arguments (e.g. res.send(fs.readFileSync(p))), excluding callbacks,
+    // which are processed as their own scopes below.
+    const sinkCalls: TreeSitterNode[] = [node];
+    if (CALL_NODE_TYPES.has(node.type)) {
+        const visit = (n: TreeSitterNode): void => {
+            for (const c of n.namedChildren) {
+                if (FUNCTION_NODE_TYPES.has(c.type)) continue;
+                if (CALL_NODE_TYPES.has(c.type)) sinkCalls.push(c);
+                visit(c);
+            }
+        };
+        visit(node);
+    }
+    for (const callNode of sinkCalls) {
+    const sinkMatch = matchSink(callNode, sourceText, language);
     if (sinkMatch) {
         for (const arg of sinkMatch.args) {
             const taint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
@@ -593,6 +607,7 @@ function processExpression(
                 });
             }
         }
+    }
     }
 
     // Recurse into arrow/function callbacks passed as call arguments.

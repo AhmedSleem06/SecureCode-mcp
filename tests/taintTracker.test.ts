@@ -3,6 +3,30 @@ import { trackTaint } from '../src/project-map/taintTracker';
 
 describe('Taint Propagation Tracker', () => {
 
+    it('detects a sink nested inside another call: res.send(fs.readFileSync(p))', async () => {
+        const code = `const fs = require('fs');
+const path = require('path');
+app.get('/file', (req, res) => {
+    const filePath = path.join(__dirname, 'uploads', req.query.name);
+    res.send(fs.readFileSync(filePath, 'utf8'));
+});`;
+        const results = await trackTaint(code, 'javascript');
+        const flow = results.find(r => r.sink === 'fs-read-write');
+        expect(flow).toBeDefined();
+        expect(flow!.source).toBe('req.query.name');
+        expect(flow!.sinkLine).toBe(5);
+        expect(flow!.canonicalType).toBe('path_traversal');
+    });
+
+    it('does not report a nested sink inside a callback twice', async () => {
+        const code = `app.get('/x', (req, res) => {
+    const q = req.query.q;
+    run(() => { exec(q); });
+});`;
+        const results = await trackTaint(code, 'javascript');
+        expect(results.filter(r => r.sink === 'exec')).toHaveLength(1);
+    });
+
     // ── Direct flow ──────────────────────────────────────────────────────
 
     it('detects direct flow: const q = req.body.q; exec(q)', async () => {
