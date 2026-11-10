@@ -47,92 +47,91 @@ const KeychainDarwin = {
     },
 };
 
+function runPowerShell(script: string, input?: string): string {
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    return execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+        stdio: 'pipe',
+        encoding: 'utf8',
+        ...(input !== undefined ? { input } : {}),
+        windowsHide: true,
+    });
+}
+
+const CRED_STRUCT = `
+public class CredMan {
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CredWriteW(ref CREDENTIAL cred, uint flags);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CredReadW(string target, uint type, uint flags, out IntPtr cred);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CredDeleteW(string target, uint type, uint flags);
+    [DllImport("advapi32.dll")]
+    public static extern void CredFree(IntPtr cred);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct CREDENTIAL {
+        public uint Flags;
+        public uint Type;
+        public string TargetName;
+        public string Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public uint CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public uint Persist;
+        public uint AttributeCount;
+        public IntPtr Attributes;
+        public string TargetAlias;
+        public string UserName;
+    }
+}`;
+
+const PS_PRELUDE = `$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+${CRED_STRUCT}
+"@
+`;
+
 const KeychainWin32 = {
     set(token: string): void {
-        const psScript = `
-            Add-Type @"
-            using System;
-            using System.Runtime.InteropServices;
-            public class CredMan {
-                [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-                public static extern bool CredWriteW(ref CREDENTIAL cred, uint flags);
-
-                [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-                public struct CREDENTIAL {
-                    public uint Flags;
-                    public uint Type;
-                    public string TargetName;
-                    public string Comment;
-                    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-                    public uint CredentialBlobSize;
-                    public string CredentialBlob;
-                    public uint Persist;
-                    public uint AttributeCount;
-                    public IntPtr Attributes;
-                    public string TargetAlias;
-                    public string UserName;
-                }
-            }
-"@
-            $blob = [System.Text.Encoding]::Unicode.GetBytes("${token.replace(/"/g, '`"')}")
-            $cred = New-Object CredMan+CREDENTIAL
-            $cred.Flags = 0
-            $cred.Type = 1
-            $cred.TargetName = "${SERVICE_NAME}"
-            $cred.CredentialBlobSize = $blob.Length
-            $cred.CredentialBlob = "${token.replace(/"/g, '`"')}"
-            $cred.Persist = 2
-            $cred.UserName = "${ACCOUNT_NAME}"
-            [CredMan]::CredWriteW([ref]$cred, 0) | Out-Null
-        `;
-        execSync('powershell -NoProfile -Command "' + psScript.replace(/"/g, '\\"').replace(/\n/g, ' ') + '"', {
-            stdio: 'pipe',
-            encoding: 'utf8',
-        });
+        const script = `${PS_PRELUDE}
+$token = [Console]::In.ReadToEnd()
+$bytes = [System.Text.Encoding]::Unicode.GetBytes($token)
+$ptr = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+try {
+    [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $ptr, $bytes.Length)
+    $cred = New-Object CredMan+CREDENTIAL
+    $cred.Type = 1
+    $cred.TargetName = "${SERVICE_NAME}"
+    $cred.CredentialBlobSize = $bytes.Length
+    $cred.CredentialBlob = $ptr
+    $cred.Persist = 2
+    $cred.UserName = "${ACCOUNT_NAME}"
+    if (-not [CredMan]::CredWriteW([ref]$cred, 0)) { throw "CredWrite failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+} finally {
+    [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)
+}
+`;
+        runPowerShell(script, token);
     },
 
     get(): string | null {
-        const psScript = `
-            Add-Type @"
-            using System;
-            using System.Runtime.InteropServices;
-            public class CredMan {
-                [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-                public static extern bool CredReadW(string target, uint type, uint flags, out IntPtr cred);
-
-                [DllImport("advapi32.dll")]
-                public static extern void CredFree(IntPtr cred);
-
-                [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-                public struct CREDENTIAL {
-                    public uint Flags;
-                    public uint Type;
-                    public string TargetName;
-                    public string Comment;
-                    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-                    public uint CredentialBlobSize;
-                    public string CredentialBlob;
-                    public uint Persist;
-                    public uint AttributeCount;
-                    public IntPtr Attributes;
-                    public string TargetAlias;
-                    public string UserName;
-                }
-            }
-"@
-            $ptr = [IntPtr]::Zero
-            $ok = [CredMan]::CredReadW("${SERVICE_NAME}", 1, 0, [ref]$ptr)
-            if (-not $ok) { return "" }
-            $cred = [Runtime.InteropServices.Marshal]::PtrToStructure[CredMan+CREDENTIAL]($ptr)
-            [CredMan]::CredFree($ptr)
-            return $cred.CredentialBlob
-        `;
+        const script = `${PS_PRELUDE}
+$ptr = [IntPtr]::Zero
+if (-not [CredMan]::CredReadW("${SERVICE_NAME}", 1, 0, [ref]$ptr)) { exit 0 }
+try {
+    $cred = [Runtime.InteropServices.Marshal]::PtrToStructure($ptr, [type][CredMan+CREDENTIAL])
+    $len = [int]$cred.CredentialBlobSize
+    $bytes = New-Object byte[] $len
+    [Runtime.InteropServices.Marshal]::Copy($cred.CredentialBlob, $bytes, 0, $len)
+    [Console]::Out.Write([System.Text.Encoding]::Unicode.GetString($bytes))
+} finally {
+    [CredMan]::CredFree($ptr)
+}
+`;
         try {
-            const result = execSync('powershell -NoProfile -Command "' + psScript.replace(/"/g, '\\"').replace(/\n/g, ' ') + '"', {
-                stdio: 'pipe',
-                encoding: 'utf8',
-            });
-            const token = result.trim();
+            const token = runPowerShell(script).trim();
             return token || null;
         } catch {
             return null;
@@ -140,21 +139,11 @@ const KeychainWin32 = {
     },
 
     delete(): boolean {
-        const psScript = `
-            Add-Type @"
-            using System;
-            using System.Runtime.InteropServices;
-            public class CredMan {
-                [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-                public static extern bool CredDeleteW(string target, uint type, uint flags);
-            }
-"@
-            [CredMan]::CredDeleteW("${SERVICE_NAME}", 1, 0) | Out-Null
-        `;
+        const script = `${PS_PRELUDE}
+if (-not [CredMan]::CredDeleteW("${SERVICE_NAME}", 1, 0)) { exit 1 }
+`;
         try {
-            execSync('powershell -NoProfile -Command "' + psScript.replace(/"/g, '\\"').replace(/\n/g, ' ') + '"', {
-                stdio: 'pipe',
-            });
+            runPowerShell(script);
             return true;
         } catch {
             return false;
@@ -201,6 +190,16 @@ const IMPLS: Record<Platform, typeof KeychainDarwin> = {
     linux: KeychainLinux,
 };
 
+export function sanitizeKeychainError(err: any, secret: string): string {
+    const stderr = typeof err?.stderr === 'string' ? err.stderr : Buffer.isBuffer(err?.stderr) ? err.stderr.toString('utf8') : '';
+    const firstLine = stderr.split(/\r?\n/).map((l: string) => l.trim()).find((l: string) => l.length > 0) || '';
+    const code = typeof err?.status === 'number' ? `exit ${err.status}` : (err?.code ? String(err.code) : 'error');
+    let detail = firstLine.slice(0, 200);
+    if (secret) detail = detail.split(secret).join('***');
+    detail = detail.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '***');
+    return detail ? `keychain write failed (${code}): ${detail}` : `keychain write failed (${code})`;
+}
+
 export interface KeychainResult {
     success: boolean;
     method: 'keychain' | 'file';
@@ -242,7 +241,7 @@ export class Keychain {
             IMPLS[platform].set(token);
             return { success: true, method: 'keychain', platform };
         } catch (err: any) {
-            return { success: false, method: 'file', platform, error: err.message };
+            return { success: false, method: 'file', platform, error: sanitizeKeychainError(err, token) };
         }
     }
 

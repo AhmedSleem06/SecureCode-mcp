@@ -56,18 +56,25 @@ describe('Keychain platform detection', () => {
 });
 
 describe('CredentialStore with keychain fallback', () => {
-    it('writes the fallback file inside the sandbox dir', () => {
+    it('stores the token in the keychain (with metadata) or in the fallback file inside the sandbox dir', () => {
         const result = CredentialStore.save({
             apiToken: 'round-trip-test-token',
             apiUrl: 'https://api.usesecurecode.tech',
             storedAt: new Date().toISOString(),
         });
-        expect(typeof result.method).toBe('string');
         expect(['keychain', 'file']).toContain(result.method);
-        const expectedFile = path.join(credSandbox, 'credentials.json');
-        expect(fs.existsSync(expectedFile)).toBe(true);
+        const credFile = path.join(credSandbox, 'credentials.json');
+        const metaFile = path.join(credSandbox, 'metadata.json');
+        if (result.method === 'keychain') {
+            expect(fs.existsSync(metaFile)).toBe(true);
+            expect(fs.existsSync(credFile)).toBe(false);
+            expect(CredentialStore.get()?.apiToken).toBe('round-trip-test-token');
+        } else {
+            expect(fs.existsSync(credFile)).toBe(true);
+        }
         CredentialStore.clear();
-        expect(fs.existsSync(expectedFile)).toBe(false);
+        expect(fs.existsSync(credFile)).toBe(false);
+        expect(fs.existsSync(metaFile)).toBe(false);
     });
 
     it('clear returns a boolean', () => {
