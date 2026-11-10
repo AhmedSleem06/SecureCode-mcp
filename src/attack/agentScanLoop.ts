@@ -1386,6 +1386,7 @@ export async function runAgentScan(
                         recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
                     }
                     qualityTracker.recordToolUse(recoveryAction.type); investigationState.recordToolUse(recoveryAction.type);
+                    recordActionEvidence(recoveryAction, stepsTaken, 'recovery');
                     trace.logToolCompleted(recoveryAction.type, recoveryObservation);
                     transcript.push({ action: recoveryAction, observation: `[FINISH GATE RECOVERY] ${recoveryObservation}` });
                 }
