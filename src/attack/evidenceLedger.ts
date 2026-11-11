@@ -190,6 +190,21 @@ export class EvidenceLedger {
         return completed;
     }
 
+    /**
+     * The same all-handlers requirements are satisfied once every in-scope
+     * handler has been covered by a delivered read.
+     */
+    markHandlersReviewed(): string[] {
+        const completed: string[] = [];
+        for (const [reqId, state] of this.requirementStates) {
+            if (!state.requirement.satisfiedByEmptyInventory) continue;
+            if (state.count >= state.requirement.minimumCount) continue;
+            state.count = state.requirement.minimumCount;
+            completed.push(reqId);
+        }
+        return completed;
+    }
+
     getUnsatisfiedRequirements(): EvidenceRequirement[] {
         const unsatisfied: EvidenceRequirement[] = [];
         for (const [_, state] of this.requirementStates) {

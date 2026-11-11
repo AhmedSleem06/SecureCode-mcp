@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { EvidenceLedger, type EvidenceRequirement } from '../src/attack/evidenceLedger';
+import { HTTP_ROUTE_PROFILE } from '../src/attack/investigationProfiles';
 
 describe('EvidenceLedger', () => {
     let ledger: EvidenceLedger;
@@ -261,6 +262,20 @@ describe('EvidenceLedger — requirements that cannot apply', () => {
         expect(ledger.isRequirementSatisfied('http-all-handlers')).toBe(true);
         expect(ledger.getUnsatisfiedRequirements().map(r => r.id)).toEqual(['http-policy-check']);
         expect(ledger.markInventoryEmpty()).toEqual([]);
+    });
+
+    it('reviewing every handler satisfies the profile all-handlers requirement only', () => {
+        const ledger = new EvidenceLedger();
+        ledger.addRequirements(HTTP_ROUTE_PROFILE.requirements);
+        ledger.recordEvidence({ kind: 'handler-inventory', tool: 'get_endpoints', filePath: 'src/app.js', outcome: 'positive', transcriptStep: 1 });
+        expect(ledger.isRequirementSatisfied('http-all-handlers')).toBe(false);
+        const before = ledger.getUnsatisfiedRequirements().map(r => r.id);
+        expect(before).toContain('http-all-handlers');
+
+        expect(ledger.markHandlersReviewed()).toEqual(['http-all-handlers']);
+        expect(ledger.isRequirementSatisfied('http-all-handlers')).toBe(true);
+        expect(ledger.getUnsatisfiedRequirements().map(r => r.id)).toEqual(before.filter(id => id !== 'http-all-handlers'));
+        expect(ledger.markHandlersReviewed()).toEqual([]);
     });
 
     it('acceptsNegative requirements accept a not-applicable observation; others do not', () => {

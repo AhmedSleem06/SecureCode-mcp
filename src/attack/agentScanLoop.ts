@@ -391,6 +391,31 @@ export async function runAgentScan(
             ? handlerInventory.getAll().filter(h =>
                 !isTargetPath(h.filePath) || (h.range.end >= segment.startLine && h.range.start <= segment.endLine))
             : handlerInventory.getAll();
+        const sameFile = (a: string, b: string): boolean => {
+            const na = a.replace(/\\/g, '/').toLowerCase();
+            const nb = b.replace(/\\/g, '/').toLowerCase();
+            return na === nb || na.endsWith(`/${nb}`) || nb.endsWith(`/${na}`);
+        };
+        function syncAllHandlersReviewed(): void {
+            const scoped = handlersInScope();
+            if (scoped.length === 0 || !scoped.every(h => h.reviewed)) return;
+            if (!investigationState.getCompletedSteps().includes('all-handlers-reviewed' as any)) {
+                investigationState.markAllHandlersReviewed();
+            }
+            evidenceLedger.markHandlersReviewed();
+        }
+        // Handler review tracking: a delivered read that covers a handler's
+        // range marks that handler as reviewed.
+        function markHandlersCoveredBy(filePath: string, start: number, end: number): void {
+            if (handlerInventory.size() === 0) return;
+            for (const handler of handlerInventory.getAll()) {
+                if (handler.reviewed || !sameFile(handler.filePath, filePath)) continue;
+                if (handler.range.start >= start && handler.range.end <= end) {
+                    handlerInventory.markReviewed(handler.id);
+                }
+            }
+            syncAllHandlersReviewed();
+        }
         // Dynamic read cap based on file size (a part's line count for a
         // split file):
         //   < 200 lines  → 5 reads (small file, 5 chunks is enough)
@@ -1381,6 +1406,9 @@ export async function runAgentScan(
                                 readResult.totalLines,
                                 readResult.truncated,
                             );
+                            if (readResult.actualStart > 0 && readResult.actualEnd >= readResult.actualStart) {
+                                markHandlersCoveredBy(String((recoveryAction as any).path || target.filePath), readResult.actualStart, readResult.actualEnd);
+                            }
                         }
                     } else {
                         recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
@@ -1405,6 +1433,7 @@ export async function runAgentScan(
             let observation: string;
             let wasBlocked = false;
             let flowResult: import('./agentScanProtocol').StructuredFlowResult | null = null;
+            let deliveredRead: LineRange | null = null;
             // Reset progress flag — only set to true when actual progress is made
             meaningfulProgressSinceRecovery = false;
 
@@ -1476,6 +1505,7 @@ export async function runAgentScan(
                             readResult.totalLines,
                             readResult.truncated,
                         );
+                        deliveredRead = { start: readResult.actualStart, end: readResult.actualEnd };
                         const rangeKey = `${normalizedPath}:${readResult.actualStart || 0}:${readResult.actualEnd || 0}`;
                         readFiles.add(rangeKey);
                         if (scopedRead && readResult.actualEnd >= segment!.startLine && readResult.actualStart <= segment!.endLine) {
@@ -1800,8 +1830,17 @@ export async function runAgentScan(
                     );
                     if (endpoints.length > 0) {
                         handlerInventory.addFromEndpoints(endpoints, target.filePath);
+                        // Reads delivered before discovery (e.g. an opening
+                        // whole-file read) already covered these handlers.
+                        const coverageFiles = new Set([target.filePath, ...handlerInventory.getAll().map(h => h.filePath)]);
+                        for (const file of coverageFiles) {
+                            for (const r of investigationState.getCoverage(file)?.ranges ?? []) {
+                                markHandlersCoveredBy(file, r.start, r.end);
+                            }
+                        }
                         // Create work items for newly discovered handlers
                         for (const handler of handlersInScope()) {
+                            if (handler.reviewed) continue;
                             if (!workItemQueue.all().some(w => w.title === `Review handler: ${handler.symbol || 'unknown'}`)) {
                                 workItemQueue.add(createHandlerReviewWorkItem(
                                     handler.filePath,
@@ -1829,22 +1868,12 @@ export async function runAgentScan(
                 evidenceLedger.markInventoryEmpty();
             }
 
-            // Handler review tracking: when the agent reads a file range that
-            // covers a handler's range, mark that handler as reviewed.
             if (!wasBlocked && action.type === 'read_file' && handlerInventory.size() > 0) {
-                const readStart = (action as any).startLine || 1;
-                const readEnd = (action as any).endLine || 9999;
-                const readFileNorm = String((action as any).path || target.filePath).replace(/\\/g, '/').toLowerCase();
-                for (const handler of handlerInventory.getAll()) {
-                    if (!handler.reviewed) {
-                        const handlerFileNorm = handler.filePath.replace(/\\/g, '/').toLowerCase();
-                        if (handlerFileNorm === readFileNorm) {
-                            if (handler.range.start >= readStart && handler.range.end <= readEnd) {
-                                handlerInventory.markReviewed(handler.id);
-                            }
-                        }
-                    }
-                }
+                markHandlersCoveredBy(
+                    String((action as any).path || target.filePath),
+                    deliveredRead?.start ?? ((action as any).startLine || 1),
+                    deliveredRead?.end ?? ((action as any).endLine || 9999),
+                );
             }
 
             // Deterministic recovery: on the third consecutive blocked read,
@@ -1960,6 +1989,7 @@ export async function runAgentScan(
                                 );
                                 if (readResult.actualStart > 0 && readResult.actualEnd >= readResult.actualStart) {
                                     recoveryMadeProgress = true;
+                                    markHandlersCoveredBy(String((recoveryAction as any).path || target.filePath), readResult.actualStart, readResult.actualEnd);
                                 }
                             }
                         } else {
@@ -2161,10 +2191,11 @@ function validateFinding(f: any, index: number): { finding: any; issues: string[
         sanitized.severity = 'low';
     }
     if (typeof sanitized.confidence !== 'number' || !Number.isFinite(sanitized.confidence)) {
-        issues.push(`finding[${index}]: invalid confidence — defaulting to 0.3`);
-        sanitized.confidence = 0.3;
+        issues.push(`finding[${index}]: invalid confidence — defaulting to 30`);
+        sanitized.confidence = 30;
     } else {
-        sanitized.confidence = Math.max(0, Math.min(1, sanitized.confidence));
+        const c = sanitized.confidence > 0 && sanitized.confidence < 1 ? sanitized.confidence * 100 : sanitized.confidence;
+        sanitized.confidence = Math.round(Math.max(0, Math.min(100, c)));
     }
     if (sanitized.lineEnd !== undefined && (typeof sanitized.lineEnd !== 'number' || sanitized.lineEnd < sanitized.line)) {
         delete sanitized.lineEnd;
@@ -2177,7 +2208,7 @@ function validateFinding(f: any, index: number): { finding: any; issues: string[
         if (sanitized.severity === 'high' || sanitized.severity === 'critical') {
             sanitized.severity = 'medium';
         }
-        sanitized.confidence = Math.min(sanitized.confidence, 0.3);
+        sanitized.confidence = Math.min(sanitized.confidence, 30);
     }
     sanitized.evidence = sanitizeFindingText(sanitized.evidence || '');
 

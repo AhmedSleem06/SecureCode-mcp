@@ -45,6 +45,7 @@ import {
     formatSegmentRange,
     type PlannedFileSegment,
 } from '../attack/fileSegments';
+import { buildGuardMap } from '../attack/guardMap';
 import { runVerifyLoop } from '../attack/verifyLoop';
 import { runFixVerifyLoop } from '../attack/fixVerifyLoop';
 import { mergeFixedCode } from '../attack/fixCodeMerge';
@@ -1447,10 +1448,73 @@ const TOP_UP_URL = 'https://usesecurecode.tech';
 
 const PROVEN_RANK: Record<string, number> = { PROVEN: 5, INCONCLUSIVE: 4, NOT_REPRODUCIBLE: 3, SKIPPED: 2, UNPROVEN: 1 };
 
-interface PartRecord {
+export interface PartRecord {
     segment: PlannedFileSegment;
     result?: Record<string, any>;
     agentSummary?: string;
+}
+
+const PRIOR_PARTS_HEADER = 'Earlier parts of this file (already scanned):';
+const SEGMENT_CONTEXT_MAX_CHARS = 4000;
+
+function clip(text: unknown, max: number): string {
+    const s = String(text ?? '').replace(/\s+/g, ' ').trim();
+    return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
+}
+
+function atLine(line: unknown): string {
+    return typeof line === 'number' && Number.isFinite(line) ? `@${line}` : '';
+}
+
+export function buildPriorPartsContext(parts: PartRecord[], maxChars = 2500): string {
+    const rendered: string[] = [];
+    for (const p of parts) {
+        const r = p.result;
+        if (!r) continue;
+        const label = partLabel(p.segment);
+        if (r.status === 'failed') {
+            rendered.push(`${label}: scan failed; treat these lines as unscanned.`);
+            continue;
+        }
+        const findings = [...((r.agentFindings ?? []) as ProvenFinding[])]
+            .sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+        const notes = [...((r.investigationNotes ?? []) as any[])]
+            .sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+        if (findings.length === 0 && notes.length === 0) {
+            rendered.push(`${label}: no findings or notes.`);
+            continue;
+        }
+        rendered.push(`${label}:`);
+        for (const f of findings) {
+            const proven = f.proven ? ` [${f.proven}]` : '';
+            const why = clip(f.why, 140);
+            rendered.push(`  finding: ${clip(f.type, 60)}${atLine(f.line)}${proven}${why ? ` — ${why}` : ''}`);
+        }
+        for (const n of notes) {
+            const line = typeof n.line === 'number' && Number.isFinite(n.line) ? ` (line ${n.line})` : '';
+            rendered.push(`  note: ${clip(n.title, 100)}${line}`);
+        }
+    }
+    if (rendered.length === 0) return '';
+
+    let out = PRIOR_PARTS_HEADER;
+    for (const line of rendered) {
+        const next = `${out}\n${line}`;
+        if (next.length > maxChars - 2) {
+            out += '\n…';
+            break;
+        }
+        out = next;
+    }
+    return out;
+}
+
+function buildSegmentContext(guardMap: string, parts: PartRecord[]): string | undefined {
+    const context = [guardMap, buildPriorPartsContext(parts)].filter(Boolean).join('\n\n');
+    if (!context) return undefined;
+    return context.length > SEGMENT_CONTEXT_MAX_CHARS
+        ? `${context.slice(0, SEGMENT_CONTEXT_MAX_CHARS - 1)}…`
+        : context;
 }
 
 function failedPartResult(
@@ -1567,6 +1631,7 @@ async function runSegmentedScan(
     let outOfCreditsAfter: PlannedFileSegment | undefined;
     let cancelled = false;
     let firstError: string | undefined;
+    const guardMap = buildGuardMap(prep.code);
 
     for (const seg of segments) {
         if (outOfCreditsAfter || cancelled) {
@@ -1579,12 +1644,14 @@ async function runSegmentedScan(
             continue;
         }
 
+        const context = buildSegmentContext(guardMap, parts);
         const segment: AgentScanSegment = {
             groupId,
             index: seg.index,
             total,
             startLine: seg.startLine,
             endLine: seg.endLine,
+            ...(context ? { context } : {}),
         };
         const prefix = `file part ${seg.index}/${total}: `;
         const partProgress = progress

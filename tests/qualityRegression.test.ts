@@ -28,7 +28,7 @@ const FIXTURES: QualityFixture[] = [
             { line: 25, type: 'xss', severity: 'medium', confidence: 0.6, why: 'Unescaped output in template', evidence: 'res.send(userInput)' },
         ],
         expected: {
-            count: 2, severities: ['high', 'medium'], minConfidence: 0.6, maxConfidence: 0.85,
+            count: 2, severities: ['high', 'medium'], minConfidence: 60, maxConfidence: 85,
             allHaveLine: true, allHaveType: true, allHaveWhy: true, noControlChars: true, noDuplicates: true,
         },
     },
@@ -36,7 +36,7 @@ const FIXTURES: QualityFixture[] = [
         name: 'missing-fields',
         input: [{ why: 'some explanation here' }],
         expected: {
-            count: 1, severities: ['low'], minConfidence: 0.3, maxConfidence: 0.3,
+            count: 1, severities: ['low'], minConfidence: 30, maxConfidence: 30,
             allHaveLine: true, allHaveType: true, allHaveWhy: true, noControlChars: true, noDuplicates: true,
         },
     },
@@ -44,7 +44,7 @@ const FIXTURES: QualityFixture[] = [
         name: 'incoherent-why-downgrade',
         input: [{ line: 1, type: 'rce', severity: 'critical', confidence: 0.95, why: '   ', evidence: 'x' }],
         expected: {
-            count: 1, severities: ['medium'], minConfidence: 0, maxConfidence: 0.3,
+            count: 1, severities: ['medium'], minConfidence: 0, maxConfidence: 30,
             allHaveLine: true, allHaveType: true, allHaveWhy: true, noControlChars: true, noDuplicates: true,
         },
     },
@@ -52,18 +52,18 @@ const FIXTURES: QualityFixture[] = [
         name: 'invalid-severity-fixed',
         input: [{ line: 1, type: 'xss', severity: 'extreme', confidence: 0.5, why: 'valid explanation text', evidence: 'x' }],
         expected: {
-            count: 1, severities: ['low'], minConfidence: 0.5, maxConfidence: 0.5,
+            count: 1, severities: ['low'], minConfidence: 50, maxConfidence: 50,
             allHaveLine: true, allHaveType: true, allHaveWhy: true, noControlChars: true, noDuplicates: true,
         },
     },
     {
         name: 'confidence-clamped',
         input: [
-            { line: 1, type: 'a', severity: 'low', confidence: 5, why: 'valid explanation here', evidence: 'x' },
+            { line: 1, type: 'a', severity: 'low', confidence: 150, why: 'valid explanation here', evidence: 'x' },
             { line: 2, type: 'b', severity: 'low', confidence: -1, why: 'another valid one', evidence: 'y' },
         ],
         expected: {
-            count: 2, severities: ['low', 'low'], minConfidence: 0, maxConfidence: 1,
+            count: 2, severities: ['low', 'low'], minConfidence: 0, maxConfidence: 100,
             allHaveLine: true, allHaveType: true, allHaveWhy: true, noControlChars: true, noDuplicates: true,
         },
     },
@@ -74,7 +74,7 @@ const FIXTURES: QualityFixture[] = [
             { line: 42, type: 'xss', severity: 'medium', confidence: 0.5, why: 'second valid explanation', evidence: 'b' },
         ],
         expected: {
-            count: 1, severities: ['high'], minConfidence: 0.8, maxConfidence: 0.8,
+            count: 1, severities: ['high'], minConfidence: 80, maxConfidence: 80,
             allHaveLine: true, allHaveType: true, allHaveWhy: true, noControlChars: true, noDuplicates: true,
         },
     },
@@ -82,7 +82,7 @@ const FIXTURES: QualityFixture[] = [
         name: 'control-chars-stripped',
         input: [{ line: 1, type: 'xss', severity: 'low', confidence: 0.5, why: 'valid \x00 explanation here', evidence: 'code \x01 here' }],
         expected: {
-            count: 1, severities: ['low'], minConfidence: 0.5, maxConfidence: 0.5,
+            count: 1, severities: ['low'], minConfidence: 50, maxConfidence: 50,
             allHaveLine: true, allHaveType: true, allHaveWhy: true, noControlChars: true, noDuplicates: true,
         },
     },

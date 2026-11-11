@@ -392,4 +392,61 @@ describe('executeReadFileAction — structured metadata', () => {
 
         fs.unlinkSync(tmpFile);
     });
+
+    it('labels a ranged read inside a test-only helper on the line after the header', async () => {
+        const content = [
+            'export class ServerConfig {',
+            '  static readonly layerTest = (cwd: string) => ({',
+            '    cwd,',
+            '    authToken: undefined,',
+            '  });',
+            '  static readonly layer = load();',
+            '}',
+        ].join('\n');
+        const tmpFile = path.join(os.tmpdir(), 'test-layer-config.ts');
+        fs.writeFileSync(tmpFile, content);
+
+        const result = await executeReadFileAction(
+            { type: 'read_file', path: 'test-layer-config.ts', startLine: 3, endLine: 4, rationale: 'read' },
+            ctx,
+        );
+
+        const obsLines = result.observation.split('\n');
+        expect(obsLines[0]).toBe('File: test-layer-config.ts (lines 3-4 of 7)');
+        expect(obsLines[1]).toBe('[TEST-ONLY CODE: inside layerTest (line 2) — not production behaviour]');
+        expect(result.observation).toContain('4:     authToken: undefined,');
+        expect(result.actualStart).toBe(3);
+        expect(result.actualEnd).toBe(4);
+        expect(result.truncated).toBe(false);
+
+        const prod = await executeReadFileAction(
+            { type: 'read_file', path: 'test-layer-config.ts', startLine: 6, endLine: 7, rationale: 'read' },
+            ctx,
+        );
+        expect(prod.observation).not.toContain('TEST-ONLY');
+
+        fs.unlinkSync(tmpFile);
+    });
+
+    it('labels a whole-file read of a test file and still redacts secrets', async () => {
+        const dir = path.join(os.tmpdir(), '__tests__');
+        fs.mkdirSync(dir, { recursive: true });
+        const tmpFile = path.join(dir, 'secret-read.ts');
+        fs.writeFileSync(tmpFile, 'const key = "abcdefghijklmnopqrstuvwxyz012345";\n');
+
+        const result = await executeReadFileAction(
+            { type: 'read_file', path: '__tests__/secret-read.ts', rationale: 'read' },
+            ctx,
+        );
+
+        const obsLines = result.observation.split('\n');
+        expect(obsLines[0]).toBe('File: __tests__/secret-read.ts (2 lines)');
+        expect(obsLines[1]).toBe('[TEST-ONLY CODE: test file — not production behaviour]');
+        expect(result.observation).not.toContain('abcdefghijklmnopqrstuvwxyz012345');
+        expect(result.observation).toContain('[REDACTED]');
+        expect(result.actualStart).toBe(1);
+        expect(result.actualEnd).toBe(2);
+
+        fs.unlinkSync(tmpFile);
+    });
 });

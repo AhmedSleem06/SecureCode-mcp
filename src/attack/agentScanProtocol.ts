@@ -30,6 +30,8 @@ export interface AgentScanSegment {
     total: number;
     startLine: number;
     endLine: number;
+    /** Whole-file authorization-check map and earlier parts' conclusions. */
+    context?: string;
 }
 
 export interface AgentScanFunctionMapEntry {

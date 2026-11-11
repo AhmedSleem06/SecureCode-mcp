@@ -629,12 +629,12 @@ describe('sanitizeFindings quality guard', () => {
         expect(result[0].line).toBe(0);
         expect(result[0].type).toBe('unknown');
         expect(result[0].severity).toBe('low');
-        expect(result[0].confidence).toBe(0.3);
+        expect(result[0].confidence).toBe(30);
     });
 
     it('preserves valid findings', () => {
         const input = [{
-            line: 42, type: 'sql-injection', severity: 'high', confidence: 0.8,
+            line: 42, type: 'sql-injection', severity: 'high', confidence: 80,
             why: 'User input flows into SQL query without parameterization',
             evidence: 'db.query(req.body.input)',
         }];
@@ -642,25 +642,29 @@ describe('sanitizeFindings quality guard', () => {
         expect(result[0].line).toBe(42);
         expect(result[0].type).toBe('sql-injection');
         expect(result[0].severity).toBe('high');
-        expect(result[0].confidence).toBe(0.8);
+        expect(result[0].confidence).toBe(80);
     });
 
-    it('clamps confidence to [0, 1]', () => {
-        const result = sanitizeFindings([
-            { line: 1, type: 'xss', severity: 'medium', confidence: 5, why: 'valid explanation here', evidence: 'x' },
-            { line: 2, type: 'xss', severity: 'medium', confidence: -1, why: 'another valid explanation', evidence: 'y' },
-        ]);
-        expect(result[0].confidence).toBe(1);
-        expect(result[1].confidence).toBe(0);
+    it('normalizes confidence to an integer in [0, 100]', () => {
+        const cases: [unknown, number][] = [[85, 85], [0.85, 85], [150, 100], [-3, 0], ['abc', 30], [1, 1], [NaN, 30], [0, 0], [72.6, 73]];
+        const result = sanitizeFindings(cases.map(([confidence], i) => ({
+            line: i + 1, type: 'xss', severity: 'medium', confidence, why: 'valid explanation here', evidence: 'x',
+        })));
+        expect(result.map(f => f.confidence)).toEqual(cases.map(([, expected]) => expected));
+    });
+
+    it('is idempotent on normalized confidence', () => {
+        const once = sanitizeFindings([{ line: 1, type: 'xss', severity: 'medium', confidence: 0.5, why: 'valid explanation here', evidence: 'x' }]);
+        expect(sanitizeFindings(once)[0].confidence).toBe(50);
     });
 
     it('downgrades severity on incoherent why', () => {
         const result = sanitizeFindings([{
-            line: 1, type: 'rce', severity: 'critical', confidence: 0.9,
+            line: 1, type: 'rce', severity: 'critical', confidence: 90,
             why: '   ', evidence: 'x',
         }]);
         expect(result[0].severity).toBe('medium');
-        expect(result[0].confidence).toBeLessThanOrEqual(0.3);
+        expect(result[0].confidence).toBe(30);
         expect(result[0].why).toContain('Quality warning');
     });
 

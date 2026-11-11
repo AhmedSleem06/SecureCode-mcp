@@ -18,6 +18,7 @@ import { trackTaintCrossFile } from '../project-map/crossFileTaintTracker';
 import { evaluateGuard } from '../project-map/guardEvaluator';
 import type { SinkLanguage } from '../project-map/sinkRegistry';
 import { redactText } from './report';
+import { testOnlyLabel, isTestPath } from './testCodeLabel';
 import { discoverEndpoints, formatEndpoints } from '../project-map/endpointDiscovery';
 import { listImports, formatImports } from '../utils/listImports';
 import { listFiles, formatFileList } from '../utils/listFiles';
@@ -254,8 +255,9 @@ export async function executeReadFileAction(
         if (startLine || endLine) {
             const start = Math.max(1, startLine || 1);
             const end = Math.min(totalLines, endLine || totalLines);
+            const label = testOnlyLabel(rel, allLines, start, end);
             const rendered = renderNumberedRead(
-                `File: ${rel} (lines ${start}-${end} of ${totalLines})`,
+                `File: ${rel} (lines ${start}-${end} of ${totalLines})${label ? `\n${label}` : ''}`,
                 allLines, start, end,
             );
             return {
@@ -271,7 +273,8 @@ export async function executeReadFileAction(
         if (totalLines > LARGE_FILE_THRESHOLD) {
             const funcMap = await extractFunctionMap(content, rel);
             if (funcMap) {
-                const observation = redact(`File: ${rel} (${totalLines} lines — LARGE FILE)\n\nThis file is too large to show in full. Here is a function map. Use read_file with startLine/endLine to read specific sections.\n\n${funcMap}`);
+                const pathLabel = isTestPath(rel) ? '\n[TEST-ONLY CODE: test file — not production behaviour]' : '';
+                const observation = redact(`File: ${rel} (${totalLines} lines — LARGE FILE)${pathLabel}\n\nThis file is too large to show in full. Here is a function map. Use read_file with startLine/endLine to read specific sections.\n\n${funcMap}`);
                 return {
                     observation,
                     actualStart: 0,
@@ -284,8 +287,9 @@ export async function executeReadFileAction(
 
         // Case 3: small file, no range → full content (may still be cut at
         // the char cap on dense files — same delivered-range reporting)
+        const label = testOnlyLabel(rel, allLines, 1, totalLines);
         const rendered = renderNumberedRead(
-            `File: ${rel} (${totalLines} lines)`,
+            `File: ${rel} (${totalLines} lines)${label ? `\n${label}` : ''}`,
             allLines, 1, totalLines,
         );
         return {
