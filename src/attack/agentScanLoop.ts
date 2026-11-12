@@ -21,8 +21,8 @@ import { ApiClient, describeApiError } from '../api/client';
 import type { ServerContext } from '../mcp/types';
 import { executeAction, executeReadFileAction, executeFlowAction } from './agentScanExecutor';
 import { AgentTraceLogger } from './agentTrace';
-import { InvestigationState, type LineRange } from './investigationState';
-import { selectInvestigationProfile, extractRoleFromArchitectureContext } from './investigationProfiles';
+import { InvestigationState, promptShownRange, uncoveredWithin, coverageReReadCheck, formatCoverageReReadObservation, type DeliveredRead, type LineRange } from './investigationState';
+import { selectInvestigationProfile, extractRoleFromArchitectureContext, suggestedChecks } from './investigationProfiles';
 import { createInvestigationTasksFromRisks } from '../project-map/architectureContext';
 import { discoverEndpoints } from '../project-map/endpointDiscovery';
 import { looksLikeContractOnly, resolveImplementation, formatImplementationResolution } from '../project-map/implementationResolver';
@@ -41,7 +41,8 @@ import { HandlerInventory } from '../project-map/handlerInventory';
 import { CandidateStore } from './candidateStore';
 import { schedule as schedulerDecision, actionFingerprint } from './scanScheduler';
 import { createLlmHealthMonitor } from './llmHealth';
-import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, isLandingBudget, rangeHasHighPriorityCode } from './finishGate';
+import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, isLandingBudget, rangeHasHighPriorityCode, unresolvedOpenLeads, leadCoverageGap } from './finishGate';
+import { redactText } from './report';
 import { QualityMetricsTracker } from './qualityMetrics';
 import { extractFunctionBoundaries } from './agentScanExecutor';
 import {
@@ -51,9 +52,11 @@ import {
 } from './protocolValidator';
 import {
     AGENT_SCAN_DEFAULTS,
-    FULL_READ_WINDOW,
+    clampHarnessSettings,
     defaultClientCapabilities,
     type AgentActionConstraint,
+    type AgentHarnessSettings,
+    type AgentLead,
     type AgentScanAction,
     type AgentScanBudget,
     type AgentScanCapReason,
@@ -227,6 +230,7 @@ export async function runAgentScan(
         }
         const startResp = startValidation.value;
         activeRunId = startResp.runId;
+        const harness: AgentHarnessSettings = clampHarnessSettings(startResp.harness);
 
         const trace = new AgentTraceLogger(ctx.workspaceRoot, startResp.runId);
         trace.logRunStarted();
@@ -241,7 +245,7 @@ export async function runAgentScan(
         const qualityTracker = new QualityMetricsTracker();
 
         const transcript: AgentScanTranscriptStep[] = [];
-        const investigationState = new InvestigationState();
+        const investigationState = new InvestigationState(harness.fullReadWindow);
         if (segment) {
             investigationState.setScope(target.filePath, { start: segment.startLine, end: segment.endLine });
         }
@@ -396,6 +400,45 @@ export async function runAgentScan(
             const nb = b.replace(/\\/g, '/').toLowerCase();
             return na === nb || na.endsWith(`/${nb}`) || nb.endsWith(`/${na}`);
         };
+        const evidenceMode = harness.gateMode === 'evidence';
+        const coverageReReads = harness.reReadPolicy === 'coverage';
+        const promptShown = promptShownRange(
+            target.fileContent,
+            segment ? { startLine: segment.startLine, endLine: segment.endLine } : undefined,
+        );
+        const targetTotalLines = typeof target.fileContent === 'string' ? target.fileContent.split('\n').length : 0;
+        const evidenceTargetRange: LineRange = segment
+            ? { start: segment.startLine, end: Math.max(segment.startLine, Math.min(segment.endLine, targetTotalLines || segment.endLine)) }
+            : { start: 1, end: Math.max(1, targetTotalLines) };
+        const deliveredReads: Array<{ path: string; range: LineRange; step: number }> = [];
+        const logDeliveredRead = (path: string, start: number, end: number): void => {
+            if (start > 0 && end >= start) deliveredReads.push({ path: String(path), range: { start, end }, step: stepsTaken });
+        };
+        const deliveredReadsFor = (path: string): DeliveredRead[] => {
+            const reads: DeliveredRead[] = deliveredReads
+                .filter(d => sameFile(d.path, path))
+                .map(d => ({ range: { ...d.range }, step: d.step }));
+            if (promptShown && isTargetPath(path)) reads.unshift({ range: { ...promptShown }, step: null });
+            return reads;
+        };
+        const targetDeliveredRanges = (): LineRange[] => InvestigationState.mergeRanges([
+            ...(investigationState.getCoverage(target.filePath)?.ranges ?? []).map(r => ({ ...r })),
+            ...deliveredReads.filter(d => isTargetPath(d.path)).map(d => ({ ...d.range })),
+            ...(promptShown ? [{ ...promptShown }] : []),
+        ]);
+        let currentLeads: AgentLead[] = [];
+        let openLeadsRejectedOnce = false;
+        const openLeadGaps = (existingTitles: Set<string>, proposal?: Pick<AgentScanFinishAction, 'coverageGaps'>) =>
+            unresolvedOpenLeads(currentLeads, proposal)
+                .map(lead => leadCoverageGap(lead, target.filePath))
+                .filter(gap => {
+                    if (existingTitles.has(gap.title)) return false;
+                    existingTitles.add(gap.title);
+                    return true;
+                });
+        const withChecklist = (text: string): string => evidenceMode
+            ? text
+            : `${text}\n\n${investigationState.formatChecklistForPrompt()}`;
         function syncAllHandlersReviewed(): void {
             const scoped = handlersInScope();
             if (scoped.length === 0 || !scoped.every(h => h.reviewed)) return;
@@ -547,7 +590,7 @@ export async function runAgentScan(
         // the investigation did NOT get to, so "no findings" is never read
         // as "clean" after a cut-short run.
         const buildCoverageGaps = () => {
-            const incompleteSteps = investigationState.getIncompleteSteps();
+            const incompleteSteps = evidenceMode ? [] : investigationState.getIncompleteSteps();
             const autoGaps = incompleteSteps.map(step => ({
                 title: `Investigation step not completed: ${step}`,
                 detail: `The agent was terminated after repeated blocked reads without completing this required investigation step: ${step}. The investigation was incomplete and vulnerabilities may have been missed.`,
@@ -570,7 +613,9 @@ export async function runAgentScan(
                 suggestedNextAction: task.requiredTools[0] || 'continue investigation',
                 priority: 'high' as const,
             }));
-            const uncoveredRanges = investigationState.getUncoveredRanges(target.filePath);
+            const uncoveredRanges = evidenceMode
+                ? (target.fileContent ? uncoveredWithin(evidenceTargetRange, targetDeliveredRanges()) : [])
+                : investigationState.getUncoveredRanges(target.filePath);
             const rangeGaps = uncoveredRanges.map(r => ({
                 title: `Unread range: lines ${r.start}-${r.end} of ${target.filePath}`,
                 detail: `This range was never read during the investigation. Vulnerabilities in this range were not checked.`,
@@ -579,7 +624,8 @@ export async function runAgentScan(
                 suggestedNextAction: 'read_file',
                 priority: 'high' as const,
             }));
-            return [...autoGaps, ...taskGaps, ...rangeGaps];
+            const leadGaps = evidenceMode ? openLeadGaps(new Set()) : [];
+            return [...autoGaps, ...taskGaps, ...rangeGaps, ...leadGaps];
         };
 
         // Salvage for hard terminations (wall clock / cost cap / step
@@ -594,6 +640,9 @@ export async function runAgentScan(
         // gaps, the ranges read in the summary). Returns null only when no
         // step was delivered.
         const unreadTargetRanges = (): LineRange[] => {
+            if (evidenceMode && target.fileContent) {
+                return uncoveredWithin(evidenceTargetRange, targetDeliveredRanges());
+            }
             if (investigationState.getCoverage(target.filePath)?.totalLines) {
                 return investigationState.getUncoveredRanges(target.filePath);
             }
@@ -819,6 +868,8 @@ export async function runAgentScan(
                     meaningfulProgressSinceLastExtension,
                 },
                 actionConstraint,
+                harness,
+                ...(evidenceMode && transcript.length === 0 ? { suggestedChecks: suggestedChecks(profile) } : {}),
             };
 
             // Spiral-capture instrument: when a blocked-read streak forms,
@@ -1123,6 +1174,9 @@ export async function runAgentScan(
             }
 
             const action: AgentScanAction = stepResp.next;
+            if (Array.isArray((action as any).leads)) {
+                currentLeads = ((action as any).leads as AgentLead[]).filter(l => !!l && typeof l === 'object');
+            }
             llmHealth.recordModelAction(actionFingerprint(action));
             const healthTrip = llmHealth.evaluate();
             if (healthTrip.tripped) {
@@ -1285,6 +1339,16 @@ export async function runAgentScan(
                         segment: segment ? { startLine: segment.startLine, endLine: segment.endLine } : undefined,
                     },
                     landing,
+                    ...(evidenceMode ? {
+                        gateMode: 'evidence' as const,
+                        evidenceGate: {
+                            currentLeads,
+                            deliveredRanges: targetDeliveredRanges(),
+                            targetRange: evidenceTargetRange,
+                            openLeadsRejectedOnce,
+                            findings: scopedFinish.inRange,
+                        },
+                    } : {}),
                 });
 
                 // Finish-loop escape: when the identical gate reasons have
@@ -1293,6 +1357,7 @@ export async function runAgentScan(
                 // (the same salvage semantics as the 75% soft deadline)
                 // instead of looping to the wall clock.
                 if (!gateResult.accepted) {
+                    if (gateResult.reasons.some(r => r.code === 'open-leads')) openLeadsRejectedOnce = true;
                     trackFinishRejection(finishLoop, gateResult.reasons, candidateStore.getActive().length);
                     if (finishLoopEscaped(finishLoop)) {
                         const loopNote = `[FINISH GATE LOOP DETECTED] The same gate reasons have now rejected ${finishLoop.rejections} consecutive finishes. Accepting this finish as forced-incomplete — unresolved items are recorded as coverage gaps instead of looping to the wall clock.`;
@@ -1323,6 +1388,10 @@ export async function runAgentScan(
                     let coverageGaps = action.coverageGaps ?? [];
                     if (gateResult.coverageGaps) {
                         coverageGaps = [...coverageGaps, ...gateResult.coverageGaps];
+                    }
+                    if (evidenceMode) {
+                        const leadGaps = openLeadGaps(new Set(coverageGaps.map(g => g.title)), action);
+                        if (leadGaps.length > 0) coverageGaps = [...coverageGaps, ...leadGaps];
                     }
 
                     const covSummary = investigationState.getCoverageSummary(target.filePath);
@@ -1371,12 +1440,21 @@ export async function runAgentScan(
                 lastFinishRejectionReasons = gateResult.reasons.map(r => r.description);
 
                 // Add a system event so the model sees the rejection
-                const rejectionMessage = `FINISH REJECTED — your investigation is incomplete:\n${gateResult.reasons.map(r => `  - ${r.description}`).join('\n')}\n\nYou must complete the remaining investigation steps before calling finish.${gateResult.recoveryAction ? `\n\nYour next action MUST be: ${gateResult.recoveryAction.type}` : ''}`;
+                const rejectionMessage = evidenceMode
+                    ? `FINISH REJECTED — address these before calling finish again:\n${gateResult.reasons.map(r => `  - ${r.description}`).join('\n')}`
+                    : `FINISH REJECTED — your investigation is incomplete:\n${gateResult.reasons.map(r => `  - ${r.description}`).join('\n')}\n\nYou must complete the remaining investigation steps before calling finish.${gateResult.recoveryAction ? `\n\nYour next action MUST be: ${gateResult.recoveryAction.type}` : ''}`;
+                const finishNotebook = evidenceMode
+                    ? {
+                        ...(typeof action.memo === 'string' ? { memo: action.memo } : {}),
+                        ...(Array.isArray(action.leads) ? { leads: action.leads } : {}),
+                    }
+                    : {};
                 transcript.push({
                     action: {
                         type: 'system_event',
                         eventType: 'finish_rejected',
                         message: rejectionMessage,
+                        ...finishNotebook,
                     } as any,
                     observation: rejectionMessage,
                 });
@@ -1408,6 +1486,7 @@ export async function runAgentScan(
                             );
                             if (readResult.actualStart > 0 && readResult.actualEnd >= readResult.actualStart) {
                                 markHandlersCoveredBy(String((recoveryAction as any).path || target.filePath), readResult.actualStart, readResult.actualEnd);
+                                logDeliveredRead(String((recoveryAction as any).path || target.filePath), readResult.actualStart, readResult.actualEnd);
                             }
                         }
                     } else {
@@ -1434,49 +1513,78 @@ export async function runAgentScan(
             let wasBlocked = false;
             let flowResult: import('./agentScanProtocol').StructuredFlowResult | null = null;
             let deliveredRead: LineRange | null = null;
+            let readSkipped = false;
             // Reset progress flag — only set to true when actual progress is made
             meaningfulProgressSinceRecovery = false;
 
             if (action.type === 'read_file') {
                 const normalizedPath = action.path.replace(/\\/g, '/').toLowerCase();
                 let totalLines: number | undefined;
+                let readFileContent: string | undefined;
                 try {
                     const fs = require('fs');
                     const abs = require('path').resolve(ctx.workspaceRoot, action.path);
                     const content = fs.readFileSync(abs, 'utf8');
                     totalLines = content.split('\n').length;
+                    readFileContent = content;
                     investigationState.recordLineDensity(action.path, content);
                 } catch { /* best-effort */ }
+                if (readFileContent === undefined && isTargetPath(action.path) && typeof target.fileContent === 'string') {
+                    readFileContent = target.fileContent;
+                }
 
                 const readValue = investigationState.classifyRead(
                     action.path, action.startLine, action.endLine, totalLines,
                 );
                 const checklist = investigationState.formatChecklistForPrompt();
+                const checklistSuffix = evidenceMode ? '' : `\n\n${checklist}`;
                 const fileMax = maxReadsForFile(action.path);
                 const scopedRead = !!segment && isTargetPath(action.path);
                 const count = scopedRead ? segmentReadCount : investigationState.getReadCount(action.path);
 
-                if (readValue.classification === 'duplicate') {
+                let coverageDigest: string | null = null;
+                if (coverageReReads && readValue.classification !== 'invalid' && readValue.classification !== 'function-map') {
+                    const knownTotal = totalLines ?? (readFileContent !== undefined ? readFileContent.split('\n').length : undefined);
+                    const hasRange = typeof action.startLine === 'number' || typeof action.endLine === 'number';
+                    if (hasRange || knownTotal !== undefined) {
+                        const parsed = InvestigationState.parseRange(action.startLine, action.endLine, knownTotal);
+                        const requested = knownTotal !== undefined
+                            ? { start: Math.max(1, parsed.start), end: Math.min(parsed.end, knownTotal) }
+                            : parsed;
+                        if (requested.start <= requested.end) {
+                            const reRead = coverageReReadCheck(requested, deliveredReadsFor(action.path));
+                            if (reRead.skip) {
+                                coverageDigest = redactText(formatCoverageReReadObservation(requested, reRead.sources, readFileContent));
+                            }
+                        }
+                    }
+                }
+
+                if (coverageDigest !== null) {
+                    qualityTracker.recordRead('coverage-digest', false);
+                    observation = coverageDigest;
+                    readSkipped = true;
+                } else if (!coverageReReads && readValue.classification === 'duplicate') {
                     qualityTracker.recordRead('duplicate', false);
                     investigationState.recordBlockedRead(action.path);
                     const nextHint = readValue.nextUnreadRange
                         ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
                         : '';
-                    observation = `BLOCKED: Lines ${action.startLine || 'all'}-${action.endLine || 'all'} of "${action.path}" are one of your last ${FULL_READ_WINDOW} reads and are still shown in full in the transcript above. Use that content, or analyze it with trace_flow/check_guard/check_policy.${nextHint}\n\n${checklist}`;
+                    observation = `BLOCKED: Lines ${action.startLine || 'all'}-${action.endLine || 'all'} of "${action.path}" are one of your last ${harness.fullReadWindow} reads and are still shown in full in the transcript above. Use that content, or analyze it with trace_flow/check_guard/check_policy.${nextHint}${checklistSuffix}`;
                     wasBlocked = true;
-                } else if (readValue.classification === 'high-overlap') {
+                } else if (!coverageReReads && readValue.classification === 'high-overlap') {
                     qualityTracker.recordRead('high-overlap', false);
                     investigationState.recordBlockedRead(action.path);
                     const nextHint = readValue.nextUnreadRange
                         ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
                         : '';
                     const visibleList = investigationState.getVisibleRanges(action.path).map(r => `${r.start}-${r.end}`).join(', ');
-                    observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" mostly overlap lines ${visibleList}, which are among your last ${FULL_READ_WINDOW} reads and still shown in full in the transcript above. Read a DIFFERENT section or use trace_flow/check_guard/check_policy to analyze that content.${nextHint}\n\n${checklist}`;
+                    observation = `BLOCKED: Lines ${action.startLine || 1}-${action.endLine || totalLines || '?'} of "${action.path}" mostly overlap lines ${visibleList}, which are among your last ${harness.fullReadWindow} reads and still shown in full in the transcript above. Read a DIFFERENT section or use trace_flow/check_guard/check_policy to analyze that content.${nextHint}${checklistSuffix}`;
                     wasBlocked = true;
                 } else if (readValue.classification === 'invalid') {
                     qualityTracker.recordRead('invalid', false);
                     investigationState.recordBlockedRead(action.path);
-                    observation = `BLOCKED: Invalid range for "${action.path}" (startLine=${action.startLine}, endLine=${action.endLine}). The requested range is inverted or out of bounds. Use a valid line range.\n\n${checklist}`;
+                    observation = `BLOCKED: Invalid range for "${action.path}" (startLine=${action.startLine}, endLine=${action.endLine}). The requested range is inverted or out of bounds. Use a valid line range.${checklistSuffix}`;
                     wasBlocked = true;
                 } else if (readValue.classification === 'function-map') {
                     qualityTracker.recordRead('function-map', false);
@@ -1484,12 +1592,13 @@ export async function runAgentScan(
                     const nextHint = readValue.nextUnreadRange
                         ? `\nNext unread range: lines ${readValue.nextUnreadRange.start}-${readValue.nextUnreadRange.end}. Use read_file with startLine=${readValue.nextUnreadRange.start} and endLine=${readValue.nextUnreadRange.end}.`
                         : '';
-                    observation = `BLOCKED: The function map for "${action.path}" is already in the transcript above — it delivers no source coverage. Use read_file with explicit startLine/endLine to read the actual code.${nextHint}\n\n${checklist}`;
+                    observation = `BLOCKED: The function map for "${action.path}" is already in the transcript above — it delivers no source coverage. Use read_file with explicit startLine/endLine to read the actual code.${nextHint}${checklistSuffix}`;
                     wasBlocked = true;
                 } else {
                     const readResult = await executeReadFileAction(action, ctx);
                     observation = readResult.observation;
-                    qualityTracker.recordRead(readValue.classification, readResult.truncated);
+                    const windowRepeat = readValue.classification === 'duplicate' || readValue.classification === 'high-overlap';
+                    qualityTracker.recordRead(windowRepeat ? 're-read' : readValue.classification, readResult.truncated);
 
                     // Record coverage for the DELIVERED range only. A ranged
                     // read on a dense file can be cut at the observation
@@ -1506,6 +1615,7 @@ export async function runAgentScan(
                             readResult.truncated,
                         );
                         deliveredRead = { start: readResult.actualStart, end: readResult.actualEnd };
+                        logDeliveredRead(action.path, readResult.actualStart, readResult.actualEnd);
                         const rangeKey = `${normalizedPath}:${readResult.actualStart || 0}:${readResult.actualEnd || 0}`;
                         readFiles.add(rangeKey);
                         if (scopedRead && readResult.actualEnd >= segment!.startLine && readResult.actualStart <= segment!.endLine) {
@@ -1516,7 +1626,7 @@ export async function runAgentScan(
                         meaningfulProgressSinceRecovery = true;
 
                         if (count >= fileMax) {
-                            observation += `\n\nNOTE: You have read "${action.path}" ${count + 1} times. Consider using search_code, trace_flow, check_guard, or check_policy to analyze the code you've read. If you have enough evidence, call finish to report your findings.\n\n${checklist}`;
+                            observation += `\n\nNOTE: You have read "${action.path}" ${count + 1} times. Consider using search_code, trace_flow, check_guard, or check_policy to analyze the code you've read. If you have enough evidence, call finish to report your findings.${checklistSuffix}`;
                         }
                     } else if (readResult.totalLines > 0 && readResult.truncated) {
                         // Function-map read (large file, no range): no
@@ -1597,8 +1707,7 @@ export async function runAgentScan(
                             if (equivalentSearchCount >= 2) {
                                 observation = `BLOCKED: This search is equivalent to a previous search (same terms, different order). The results are in the transcript above. Use find_definition, find_references, call_graph, a targeted read_file with specific line numbers, or trace_flow_cross_file instead.`;
                                 wasBlocked = true;
-                                const checklist = investigationState.formatChecklistForPrompt();
-                                observation += `\n\n${checklist}`;
+                                observation = withChecklist(observation);
                                 // Skip execution — jump to the blocked handling
                                 transcript.push({ action, observation });
                                 trace.logToolBlocked(action.type, observation.slice(0, 200));
@@ -1765,7 +1874,7 @@ export async function runAgentScan(
             // and the finish gate can verify all evidence requirements are
             // met. Deterministic-recovery executions go through the same
             // path (see recordActionEvidence).
-            if (!wasBlocked) {
+            if (!wasBlocked && !readSkipped) {
                 recordActionEvidence(action, stepsTaken, 'model');
             }
 
@@ -1868,7 +1977,7 @@ export async function runAgentScan(
                 evidenceLedger.markInventoryEmpty();
             }
 
-            if (!wasBlocked && action.type === 'read_file' && handlerInventory.size() > 0) {
+            if (!wasBlocked && !readSkipped && action.type === 'read_file' && handlerInventory.size() > 0) {
                 markHandlersCoveredBy(
                     String((action as any).path || target.filePath),
                     deliveredRead?.start ?? ((action as any).startLine || 1),
@@ -1990,6 +2099,7 @@ export async function runAgentScan(
                                 if (readResult.actualStart > 0 && readResult.actualEnd >= readResult.actualStart) {
                                     recoveryMadeProgress = true;
                                     markHandlersCoveredBy(String((recoveryAction as any).path || target.filePath), readResult.actualStart, readResult.actualEnd);
+                                    logDeliveredRead(String((recoveryAction as any).path || target.filePath), readResult.actualStart, readResult.actualEnd);
                                 }
                             }
                         } else {

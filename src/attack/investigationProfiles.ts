@@ -131,6 +131,43 @@ export const DECLARATION_PROFILE: InvestigationProfile = {
     ],
 };
 
+const SUGGESTED_CHECKS: Record<string, string[]> = {
+    'http-route': [
+        'Which routes change state, and which authentication and authorization check guards each one',
+        'Whether a resource id from the request is checked against the caller (ownership / IDOR)',
+        'Origin or CSRF checks on state-changing routes that use cookies',
+        'Request input that reaches SQL, shell, file-path, redirect or template sinks',
+        'Security configuration that applies here (CORS, rate limits, headers) and whether it is active in production',
+    ],
+    'websocket-rpc': [
+        'How the connection is authenticated, and whether origin is checked on upgrade',
+        'Per-method authorization: which roles can call each method, and what each role can already do without it',
+        'Command execution paths (execFile, spawn, child_process) and where their arguments come from',
+        'Ownership of resources referenced by method parameters',
+        'Where the socket binds and who can reach it',
+    ],
+    'auth-service': [
+        'Token issue and verify: signature, expiry, audience and algorithm checks',
+        'Credential lifecycle: revocation, rotation and session invalidation',
+        'Bootstrap and pairing tokens: single use, expiry and comparison',
+        'Secret comparisons in constant time; password hashing strength',
+        'Role assignment: who can grant or raise a role',
+    ],
+    'generic-utility': [
+        'Which callers pass untrusted input into this code',
+        'Security-sensitive branches: file paths, shell commands, queries, deserialization',
+        'Validation or sanitization that callers rely on and whether it holds',
+    ],
+    declaration: [
+        'Where the declared types are implemented, and whether the implementation enforces the documented checks',
+    ],
+};
+
+/** Neutral checks worth considering for a file of this profile (shown to the agent in evidence mode). */
+export function suggestedChecks(profile: InvestigationProfile): string[] {
+    return [...(SUGGESTED_CHECKS[profile.name] ?? SUGGESTED_CHECKS['generic-utility'])];
+}
+
 export interface ProfileSelectionInput {
     filePath: string;
     architectureContext?: string;

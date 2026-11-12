@@ -45,6 +45,8 @@ import type {
 export { MAX_OBSERVATION_CHARS, LARGE_FILE_THRESHOLD } from './observationLimits';
 import { MAX_OBSERVATION_CHARS, LARGE_FILE_THRESHOLD } from './observationLimits';
 
+const TAINT_EMPTY_SUFFIX = ' The tracker found no request-input sources it recognises in this file; this is not evidence the file is safe.';
+
 export function truncate(text: string): string {
     if (text.length <= MAX_OBSERVATION_CHARS) return text;
     return text.slice(0, MAX_OBSERVATION_CHARS) + '\n… [truncated]';
@@ -343,7 +345,7 @@ export async function executeAction(
                 }
                 const results = await trackTaint(content, sinkLang);
                 if (results.length === 0) {
-                    return `No taint flows found in ${action.filePath}.`;
+                    return `No taint flows found in ${action.filePath}.${TAINT_EMPTY_SUFFIX}`;
                 }
                 const formatted = results.map(r => {
                     const path = r.propagationPath
@@ -365,7 +367,7 @@ export async function executeAction(
                     maxDepth: (action as any).maxDepth ?? 3,
                 });
                 if (results.length === 0) {
-                    return `No cross-file taint flows found starting from ${action.filePath}.`;
+                    return `No cross-file taint flows found starting from ${action.filePath}.${TAINT_EMPTY_SUFFIX}`;
                 }
                 const formatted = results.map(r => {
                     const path = r.crossFileSteps
@@ -681,7 +683,7 @@ export async function executeFlowAction(
             const results = await trackTaint(content, sinkLang);
             if (results.length === 0) {
                 return {
-                    observation: `No taint flows found in ${action.filePath}.`,
+                    observation: `No taint flows found in ${action.filePath}.${TAINT_EMPTY_SUFFIX}`,
                     flowResult: {
                         status: 'refuted',
                         source: undefined,
@@ -739,7 +741,7 @@ export async function executeFlowAction(
             });
             if (results.length === 0) {
                 return {
-                    observation: `No cross-file taint flows found starting from ${action.filePath}.`,
+                    observation: `No cross-file taint flows found starting from ${action.filePath}.${TAINT_EMPTY_SUFFIX}`,
                     flowResult: {
                         status: 'refuted',
                         source: undefined,

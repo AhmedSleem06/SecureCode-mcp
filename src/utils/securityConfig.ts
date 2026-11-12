@@ -99,25 +99,40 @@ function parseConfigFile(filePath: string, workspaceRoot: string): string {
     return content.slice(0, 12000);
 }
 
-function searchInlineConfig(workspaceRoot: string, kind: ConfigKind): { file: string; snippet: string; line: number }[] {
-    const out: { file: string; snippet: string; line: number }[] = [];
-    const patterns: { regex: string; kind: ConfigKind; label: string }[] = [
-        { regex: 'helmet\\s*\\(', kind: 'headers', label: 'helmet() call' },
-        { regex: 'cors\\s*\\(', kind: 'cors', label: 'cors() call' },
-        { regex: 'rateLimit\\s*\\(', kind: 'rate_limit', label: 'rateLimit() call' },
-        { regex: 'rate-limit', kind: 'rate_limit', label: 'rate-limit import' },
-        { regex: 'express-rate-limit', kind: 'rate_limit', label: 'express-rate-limit import' },
-        { regex: 'Content-Security-Policy|contentSecurityPolicy|CSP', kind: 'headers', label: 'CSP header' },
-        { regex: 'HSTS|strict-Transport-Security', kind: 'headers', label: 'HSTS header' },
-        { regex: 'X-Frame-Options|xFrameOptions', kind: 'headers', label: 'X-Frame-Options' },
-        { regex: 'X-Content-Type-Options|xContentTypeOptions', kind: 'headers', label: 'X-Content-Type-Options' },
-    ];
+const INLINE_CONFIG_PATTERNS: { regex: string; kind: ConfigKind; label: string }[] = [
+    { regex: 'helmet\\s*\\(', kind: 'headers', label: 'helmet() call' },
+    { regex: 'cors\\s*\\(', kind: 'cors', label: 'cors() call' },
+    { regex: 'rateLimit\\s*\\(', kind: 'rate_limit', label: 'rateLimit() call' },
+    { regex: 'rate-limit', kind: 'rate_limit', label: 'rate-limit import' },
+    { regex: 'express-rate-limit', kind: 'rate_limit', label: 'express-rate-limit import' },
+    { regex: 'Content-Security-Policy|contentSecurityPolicy|CSP', kind: 'headers', label: 'CSP header' },
+    { regex: 'HSTS|strict-Transport-Security', kind: 'headers', label: 'HSTS header' },
+    { regex: 'X-Frame-Options|xFrameOptions', kind: 'headers', label: 'X-Frame-Options' },
+    { regex: 'X-Content-Type-Options|xContentTypeOptions', kind: 'headers', label: 'X-Content-Type-Options' },
+];
 
-    for (const p of patterns) {
+function describeSearch(kind: ConfigKind): string {
+    const files = CONFIG_PATTERNS.filter(p => kind === 'all' || p.kind === kind).map(p => p.file);
+    const inline = INLINE_CONFIG_PATTERNS.filter(p => kind === 'all' || p.kind === kind).map(p => p.label);
+    if (files.length === 0 && inline.length === 0) {
+        return `Searched: nothing — read_config has no ${kind} file names or inline patterns to look for.`;
+    }
+    const parts: string[] = [];
+    if (files.length > 0) parts.push(`files in ./, config/, src/: ${files.join(', ')}`);
+    if (inline.length > 0) parts.push(`inline in *.{js,ts,mjs,jsx,tsx}: ${inline.join(', ')}`);
+    let list = parts.join('; ');
+    if (list.length > 200) list = list.slice(0, 199) + '…';
+    return `Searched: ${list}`;
+}
+
+async function searchInlineConfig(workspaceRoot: string, kind: ConfigKind): Promise<{ file: string; snippet: string; line: number }[]> {
+    const out: { file: string; snippet: string; line: number }[] = [];
+
+    for (const p of INLINE_CONFIG_PATTERNS) {
         if (kind !== 'all' && p.kind !== kind) continue;
         try {
             const { searchCode } = require('../utils/searchCode');
-            const result = searchCode(workspaceRoot, p.regex, '*.{js,ts,mjs,jsx,tsx}');
+            const result = await searchCode(workspaceRoot, p.regex, '*.{js,ts,mjs,jsx,tsx}');
             if (result && result.hits) {
                 for (const hit of result.hits.slice(0, 3)) {
                     out.push({
@@ -138,10 +153,10 @@ export async function readSecurityConfig(
     kind: ConfigKind = 'all',
 ): Promise<string> {
     const configFiles = findConfigFiles(workspaceRoot, kind);
-    const inlineConfigs = searchInlineConfig(workspaceRoot, kind);
+    const inlineConfigs = await searchInlineConfig(workspaceRoot, kind);
 
     if (configFiles.length === 0 && inlineConfigs.length === 0) {
-        return `No ${kind === 'all' ? '' : kind + ' '}security config files found. The project may not have explicit security config — check if it relies on framework defaults or environment variables.`;
+        return `No ${kind === 'all' ? '' : kind + ' '}security config files found. The project may not have explicit security config — check if it relies on framework defaults or environment variables.\n${describeSearch(kind)}`;
     }
 
     const lines: string[] = [`Security config (${kind === 'all' ? 'all' : kind}):`];

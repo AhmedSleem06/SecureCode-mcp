@@ -36,6 +36,7 @@ import {
     formatArchitectureRiskTasksForTarget,
 } from '../project-map/architectureContext';
 import { runAgentScan } from '../attack/agentScanLoop';
+import { LEAD_GAP_TITLE_PREFIX } from '../attack/finishGate';
 import { globalScanCoordinator, SINGLE_SCAN_OPERATION_TIMEOUT_MS } from '../attack/agentScanCoordinator';
 import {
     planFileSegments,
@@ -874,6 +875,7 @@ async function scanTarget(
     // findings are probed, severity-first; the rest stay INCONCLUSIVE and are
     // queued for review with the dev-server hint.
     let probeBlockedCount = 0;
+    let approvalSkippedCount = 0;
     if (probeCandidates.length > 0 && !runtimeProbeDisabled) {
         const markAllProbeBlocked = (suffix: string) => {
             for (const candidate of probeCandidates) {
@@ -894,26 +896,40 @@ async function scanTarget(
             markAllProbeBlocked(' Live-server probe available — start your dev server and re-scan to attempt runtime proof.');
         } else {
             const probeBroker = new ApprovalBroker();
-            await probeBroker.start();
+            let probeBrokerReady = true;
+            try {
+                await probeBroker.start();
+            } catch {
+                probeBrokerReady = false;
+            }
             try {
                 const probeSummary =
                     `Runtime probe verification: ${probeCandidates.length} finding(s) need live-server confirmation against ${devServer.host}:${devServer.port}. ` +
                     'Planned: short HTTP probe plans (baseline + attack requests, read-only payloads).';
-                const probeApproval = await probeBroker.requestApproval(
-                    'securecode.runtime-probe',
-                    probeSummary,
-                    [
-                        devServer.host,
-                        devServer.port,
-                        ...probeCandidates.map(c => `${c.endpoint.method} ${String(c.endpoint.mountedPath ?? '') || c.endpoint.path}`),
-                    ],
-                    120_000,
-                    'paid-generation',
-                    ctx.workspaceRoot,
-                    { onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required — open ${url} (expires in 120s)`) : undefined },
-                );
+                const probeApproval = probeBrokerReady
+                    ? await probeBroker.requestApproval(
+                        'securecode.runtime-probe',
+                        probeSummary,
+                        [
+                            devServer.host,
+                            devServer.port,
+                            ...probeCandidates.map(c => `${c.endpoint.method} ${String(c.endpoint.mountedPath ?? '') || c.endpoint.path}`),
+                        ],
+                        120_000,
+                        'paid-generation',
+                        ctx.workspaceRoot,
+                        { onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required — open ${url} (expires in 120s)`) : undefined },
+                    )
+                    : { approved: false, reason: 'Approval broker unavailable', requestId: '', duration: 0 };
 
                 if (!probeApproval.approved) {
+                    const skipReason = probeApproval.reason === 'User denied'
+                        ? PROOF_SKIPPED_DENIED_REASON
+                        : PROOF_SKIPPED_NO_APPROVAL_REASON;
+                    for (const candidate of probeCandidates) {
+                        candidate.finding.provenReason = [skipReason, candidate.finding.provenReason].filter(Boolean).join(' ');
+                    }
+                    approvalSkippedCount += probeCandidates.length;
                     markAllProbeBlocked(' Live-server probe available — start your dev server and re-scan to attempt runtime proof.');
                 } else {
                     const severityRank: string[] = ['critical', 'high', 'medium', 'low'];
@@ -1401,7 +1417,8 @@ async function scanTarget(
         }
         : {};
     const creditText = formatCreditUsage(creditFields);
-    const summary = [agentResult.summary, creditText].filter(Boolean).join(' ') || agentResult.summary;
+    const approvalText = approvalSkippedCount > 0 ? formatApprovalSkipped(approvalSkippedCount) : '';
+    const summary = [agentResult.summary, creditText, approvalText].filter(Boolean).join(' ') || agentResult.summary;
 
     return {
         agentSummary: agentResult.summary,
@@ -1446,6 +1463,18 @@ async function scanTarget(
 
 const TOP_UP_URL = 'https://usesecurecode.tech';
 
+const PROOF_SKIPPED_NO_APPROVAL_REASON = 'Proof skipped: approval was not given within 120 s — re-run with someone available to approve, or verify manually.';
+const PROOF_SKIPPED_DENIED_REASON = 'Proof skipped: approval was denied.';
+
+function formatApprovalSkipped(count: number): string {
+    return `${count} finding(s) unproven because approval wasn't given.`;
+}
+
+function isApprovalSkipped(finding: ProvenFinding): boolean {
+    const reason = finding.provenReason ?? '';
+    return reason.startsWith(PROOF_SKIPPED_NO_APPROVAL_REASON) || reason.startsWith(PROOF_SKIPPED_DENIED_REASON);
+}
+
 const PROVEN_RANK: Record<string, number> = { PROVEN: 5, INCONCLUSIVE: 4, NOT_REPRODUCIBLE: 3, SKIPPED: 2, UNPROVEN: 1 };
 
 export interface PartRecord {
@@ -1480,7 +1509,10 @@ export function buildPriorPartsContext(parts: PartRecord[], maxChars = 2500): st
             .sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
         const notes = [...((r.investigationNotes ?? []) as any[])]
             .sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
-        if (findings.length === 0 && notes.length === 0) {
+        const leads = ((r.coverageGaps ?? []) as any[])
+            .filter(g => typeof g?.title === 'string' && g.title.startsWith(LEAD_GAP_TITLE_PREFIX))
+            .sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+        if (findings.length === 0 && notes.length === 0 && leads.length === 0) {
             rendered.push(`${label}: no findings or notes.`);
             continue;
         }
@@ -1493,6 +1525,10 @@ export function buildPriorPartsContext(parts: PartRecord[], maxChars = 2500): st
         for (const n of notes) {
             const line = typeof n.line === 'number' && Number.isFinite(n.line) ? ` (line ${n.line})` : '';
             rendered.push(`  note: ${clip(n.title, 100)}${line}`);
+        }
+        for (const g of leads) {
+            const line = typeof g.line === 'number' && Number.isFinite(g.line) ? ` (line ${g.line})` : '';
+            rendered.push(`  lead: ${clip(g.title.slice(LEAD_GAP_TITLE_PREFIX.length), 120)}${line} [open]`);
         }
     }
     if (rendered.length === 0) return '';
@@ -1788,6 +1824,8 @@ function mergeSegmentResults(
     } else if (info.cancelled && notStarted.length > 0) {
         sentences.push(`Scan cancelled: lines ${notStarted.map(p => formatSegmentRange(p.segment)).join(', ')} were not scanned.`);
     }
+    const approvalSkippedTotal = findings.filter(isApprovalSkipped).length;
+    if (approvalSkippedTotal > 0) sentences.push(formatApprovalSkipped(approvalSkippedTotal));
     for (const p of ran) {
         if (p.agentSummary) sentences.push(`${partLabel(p.segment)}: ${p.agentSummary}`);
     }

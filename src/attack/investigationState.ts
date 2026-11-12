@@ -144,6 +144,141 @@ const SECURITY_KEYWORD_WEIGHTS: Array<[string, number]> = [
     ['error', 5], ['catch', 5], ['throw', 5], ['reject', 5],
 ];
 
+/**
+ * Chars of target source the API shows in the step prompt. Mirrors
+ * api/src/services/agentScanController.ts (`fileContent.slice(0, 12000)`) and
+ * AGENT_SCAN_SEGMENT_LIMITS.sourceMaxChars in api/src/attacker/agentScanProtocol.ts.
+ */
+export const PROMPT_TARGET_MAX_CHARS = 12_000;
+export const PROMPT_SEGMENT_SOURCE_MAX_CHARS = 12_000;
+
+/** Lines of the target shown in full in the API's prompt prefix, or null when none are. */
+export function promptShownRange(
+    fileContent: string | undefined,
+    segment?: { startLine: number; endLine: number },
+): LineRange | null {
+    if (typeof fileContent !== 'string' || fileContent.length === 0) return null;
+    const rawLines = fileContent.split('\n');
+    if (!segment) {
+        let offset = 0;
+        let last = 0;
+        for (let i = 0; i < rawLines.length; i++) {
+            const end = offset + rawLines[i].length;
+            if (end > PROMPT_TARGET_MAX_CHARS) break;
+            last = i + 1;
+            offset = end + 1;
+        }
+        return last >= 1 ? { start: 1, end: last } : null;
+    }
+    const lines = rawLines.map(l => l.replace(/\r$/, ''));
+    const endLine = Math.min(segment.endLine, lines.length);
+    const startLine = Math.max(1, Math.min(segment.startLine, endLine));
+    let chars = 0;
+    let last = startLine - 1;
+    for (let n = startLine; n <= endLine; n++) {
+        const len = lines[n - 1].length;
+        if (chars + len > PROMPT_SEGMENT_SOURCE_MAX_CHARS) break;
+        chars += len + 1;
+        last = n;
+    }
+    return last >= startLine ? { start: startLine, end: last } : null;
+}
+
+/** Sub-ranges of `bounds` not covered by `coverage`. */
+export function uncoveredWithin(bounds: LineRange, coverage: LineRange[]): LineRange[] {
+    const merged = InvestigationState.mergeRanges(coverage.map(r => ({ ...r })))
+        .filter(r => r.end >= bounds.start && r.start <= bounds.end);
+    const gaps: LineRange[] = [];
+    let cursor = bounds.start;
+    for (const r of merged) {
+        if (r.start > cursor) gaps.push({ start: cursor, end: Math.min(r.start - 1, bounds.end) });
+        cursor = Math.max(cursor, r.end + 1);
+        if (cursor > bounds.end) break;
+    }
+    if (cursor <= bounds.end) gaps.push({ start: cursor, end: bounds.end });
+    return gaps;
+}
+
+/** Reads longer than this many lines are candidates for the coverage re-read digest. */
+export const COVERAGE_REREAD_MAX_EXACT_LINES = 80;
+export const COVERAGE_REREAD_MIN_FRACTION = 0.8;
+
+/** A delivered range of a file; `step` is null for target source shown in the prompt. */
+export interface DeliveredRead {
+    range: LineRange;
+    step: number | null;
+}
+
+export function coverageReReadCheck(requested: LineRange, delivered: DeliveredRead[]): {
+    skip: boolean;
+    fraction: number;
+    sources: DeliveredRead[];
+} {
+    const lines = requested.end - requested.start + 1;
+    const overlapping = delivered.filter(d => InvestigationState.rangesOverlap(d.range, requested));
+    const covered = InvestigationState.coveredLinesInRange(
+        InvestigationState.mergeRanges(overlapping.map(d => ({ ...d.range }))),
+        requested,
+    );
+    const fraction = lines > 0 ? covered / lines : 0;
+    return {
+        skip: lines > COVERAGE_REREAD_MAX_EXACT_LINES && fraction >= COVERAGE_REREAD_MIN_FRACTION,
+        fraction,
+        sources: overlapping,
+    };
+}
+
+const DIGEST_KEY_LINE = /auth|token|session|passw|secret|credential|permission|role|admin|owner|exec|spawn|child_process|writefile|unlink|eval\(|sql|query|redirect|cookie|cors|origin|csrf|verify|validat|sanitiz|throw |status\(4\d\d|\b(router|app)\.(get|post|put|patch|delete|use|all)\(/i;
+const DIGEST_DECLARATION = /^\s*(export\s+)?(async\s+)?(function\b|class\b|(const|let)\s+\w+\s*=\s*(async\s*)?(\([^)]*\)|\w+)\s*=>)/;
+const DIGEST_MAX_LINES = 15;
+const DIGEST_LINE_MAX_CHARS = 140;
+
+/** Security-relevant and declaration lines of `range`, numbered, for the re-read digest. */
+export function keyLineDigest(fileContent: string | undefined, range: LineRange, maxLines = DIGEST_MAX_LINES): string[] {
+    if (typeof fileContent !== 'string') return [];
+    const lines = fileContent.split('\n');
+    const end = Math.min(range.end, lines.length);
+    const keyed: number[] = [];
+    const declarations: number[] = [];
+    for (let n = Math.max(1, range.start); n <= end; n++) {
+        const text = lines[n - 1];
+        if (!text.trim()) continue;
+        if (DIGEST_KEY_LINE.test(text)) keyed.push(n);
+        else if (DIGEST_DECLARATION.test(text)) declarations.push(n);
+    }
+    const picked = [...keyed.slice(0, maxLines)];
+    for (const n of declarations) {
+        if (picked.length >= maxLines) break;
+        picked.push(n);
+    }
+    return picked.sort((a, b) => a - b).map(n => {
+        const text = lines[n - 1].replace(/\r$/, '').trim();
+        const clipped = text.length > DIGEST_LINE_MAX_CHARS ? `${text.slice(0, DIGEST_LINE_MAX_CHARS - 1)}…` : text;
+        return `${n}| ${clipped}`;
+    });
+}
+
+export function formatCoverageReReadObservation(
+    requested: LineRange,
+    sources: DeliveredRead[],
+    fileContent: string | undefined,
+): string {
+    const fmt = (r: LineRange) => r.start === r.end ? `${r.start}` : `${r.start}–${r.end}`;
+    const described = [...sources]
+        .sort((a, b) => a.range.start - b.range.start)
+        .map(s => {
+            const clipped = { start: Math.max(s.range.start, requested.start), end: Math.min(s.range.end, requested.end) };
+            return `lines ${fmt(clipped)} ${s.step === null ? 'in the target source shown in the prompt' : `at step ${s.step}`}`;
+        })
+        .filter((v, i, all) => all.indexOf(v) === i)
+        .slice(0, 4);
+    const digest = keyLineDigest(fileContent, requested);
+    const keyLines = digest.length > 0
+        ? `Key lines:\n${digest.join('\n')}`
+        : 'Key lines: none matched (no auth, exec, file, query or declaration lines in this range).';
+    return `Already read ${described.join(', ')}. ${keyLines}\nFor exact code, re-read ≤ ${COVERAGE_REREAD_MAX_EXACT_LINES} lines around the line you need.`;
+}
+
 export class InvestigationState {
     private fileCoverages = new Map<string, FileCoverage>();
     private checklist: InvestigationChecklist;
@@ -159,8 +294,10 @@ export class InvestigationState {
     private scopes = new Map<string, LineRange>();
     private visibleReads: Array<{ filePath: string; range: LineRange }> = [];
     private guardResults: GuardResult[] = [];
+    private readonly fullReadWindow: number;
 
-    constructor() {
+    constructor(fullReadWindow: number = FULL_READ_WINDOW) {
+        this.fullReadWindow = fullReadWindow;
         this.checklist = {
             completed: new Set(),
             required: new Set([
@@ -350,8 +487,8 @@ export class InvestigationState {
 
     private recordVisibleRead(normalized: string, range: LineRange): void {
         this.visibleReads.push({ filePath: normalized, range: { ...range } });
-        if (this.visibleReads.length > FULL_READ_WINDOW) {
-            this.visibleReads.splice(0, this.visibleReads.length - FULL_READ_WINDOW);
+        if (this.visibleReads.length > this.fullReadWindow) {
+            this.visibleReads.splice(0, this.visibleReads.length - this.fullReadWindow);
         }
     }
 

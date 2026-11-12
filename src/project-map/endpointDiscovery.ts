@@ -107,7 +107,7 @@ export async function discoverEndpoints(
 
 export function formatEndpoints(endpoints: DiscoveredEndpoint[]): string {
     if (endpoints.length === 0) {
-        return 'No HTTP route handlers found in the workspace.';
+        return 'No HTTP route handlers found. This tool does not detect WebSocket/RPC method tables or framework-specific routers — use search_code on the method table instead.';
     }
 
     const lines: string[] = [`Found ${endpoints.length} endpoint(s):`];

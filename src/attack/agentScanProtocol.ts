@@ -79,6 +79,61 @@ export interface AgentScanClientCapabilities {
 export const FULL_READ_WINDOW = 2;
 
 /**
+ * Server-controlled harness switch, returned by /agent/scan/start and echoed
+ * in every step request. Mirror: api/src/attacker/agentScanProtocol.ts.
+ */
+export interface AgentHarnessSettings {
+    gateMode: 'checklist' | 'evidence';
+    /** Clamped to 2..4. */
+    fullReadWindow: number;
+    reReadPolicy: 'window' | 'coverage';
+}
+
+export const DEFAULT_AGENT_HARNESS: AgentHarnessSettings = {
+    gateMode: 'checklist',
+    fullReadWindow: FULL_READ_WINDOW,
+    reReadPolicy: 'window',
+};
+
+export const HARNESS_FULL_READ_WINDOW_MIN = 2;
+export const HARNESS_FULL_READ_WINDOW_MAX = 4;
+
+/** Unknown enums and a non-integer window take the fallback value; integer windows clamp to 2..4. */
+export function clampHarnessSettings(raw: unknown, fallback: AgentHarnessSettings = DEFAULT_AGENT_HARNESS): AgentHarnessSettings {
+    const r = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw as Record<string, unknown> : {};
+    const gateMode = r.gateMode === 'checklist' || r.gateMode === 'evidence' ? r.gateMode : fallback.gateMode;
+    const reReadPolicy = r.reReadPolicy === 'window' || r.reReadPolicy === 'coverage' ? r.reReadPolicy : fallback.reReadPolicy;
+    const w = r.fullReadWindow;
+    const fullReadWindow = typeof w === 'number' && Number.isInteger(w)
+        ? Math.min(HARNESS_FULL_READ_WINDOW_MAX, Math.max(HARNESS_FULL_READ_WINDOW_MIN, w))
+        : fallback.fullReadWindow;
+    return { gateMode, fullReadWindow, reReadPolicy };
+}
+
+export type LeadStatus = 'open' | 'finding' | 'note' | 'dropped';
+
+export interface AgentLead {
+    id: string;
+    claim: string;
+    line: number | null;
+    status: LeadStatus;
+    resolution: string | null;
+}
+
+export interface CapabilityBaseline {
+    role: string;
+    alreadyCan: string;
+    alreadyCanLine: number | null;
+    isEscalation: boolean;
+}
+
+/** Evidence-mode notebook fields; any action may carry them. null = unchanged. */
+export interface AgentScanNotebookFields {
+    memo?: string | null;
+    leads?: AgentLead[] | null;
+}
+
+/**
  * Action constraint sent by the MCP to restrict which actions the API's LLM
  * can select. Used for deterministic blocked-read recovery:
  *
@@ -110,7 +165,7 @@ export function defaultClientCapabilities(): AgentScanClientCapabilities {
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
-export interface AgentScanReadFileAction {
+export interface AgentScanReadFileAction extends AgentScanNotebookFields {
     type: 'read_file';
     path: string;
     startLine?: number;
@@ -148,20 +203,20 @@ export interface ReadFileObservation {
     truncated: boolean;
 }
 
-export interface AgentScanSearchCodeAction {
+export interface AgentScanSearchCodeAction extends AgentScanNotebookFields {
     type: 'search_code';
     pattern: string;
     glob?: string;
     rationale: string;
 }
 
-export interface AgentScanTraceFlowAction {
+export interface AgentScanTraceFlowAction extends AgentScanNotebookFields {
     type: 'trace_flow';
     filePath: string;
     rationale: string;
 }
 
-export interface AgentScanCheckGuardAction {
+export interface AgentScanCheckGuardAction extends AgentScanNotebookFields {
     type: 'check_guard';
     filePath: string;
     guardName: string;
@@ -169,13 +224,13 @@ export interface AgentScanCheckGuardAction {
     rationale: string;
 }
 
-export interface AgentScanCheckPolicyAction {
+export interface AgentScanCheckPolicyAction extends AgentScanNotebookFields {
     type: 'check_policy';
     filePath: string;
     rationale: string;
 }
 
-export interface AgentScanTraceFlowCrossFileAction {
+export interface AgentScanTraceFlowCrossFileAction extends AgentScanNotebookFields {
     type: 'trace_flow_cross_file';
     filePath: string;
     /** How many import hops to follow (default 3). */
@@ -183,20 +238,20 @@ export interface AgentScanTraceFlowCrossFileAction {
     rationale: string;
 }
 
-export interface AgentScanGetEndpointsAction {
+export interface AgentScanGetEndpointsAction extends AgentScanNotebookFields {
     type: 'get_endpoints';
     /** Optional glob filter (e.g. "*.ts"). */
     glob?: string;
     rationale: string;
 }
 
-export interface AgentScanListImportsAction {
+export interface AgentScanListImportsAction extends AgentScanNotebookFields {
     type: 'list_imports';
     filePath: string;
     rationale: string;
 }
 
-export interface AgentScanListFilesAction {
+export interface AgentScanListFilesAction extends AgentScanNotebookFields {
     type: 'list_files';
     /** Directory to list (relative to workspace root). Defaults to root. */
     path?: string;
@@ -205,7 +260,7 @@ export interface AgentScanListFilesAction {
     rationale: string;
 }
 
-export interface AgentScanCallGraphAction {
+export interface AgentScanCallGraphAction extends AgentScanNotebookFields {
     type: 'call_graph';
     /** Workspace-relative path to the file to analyze. */
     filePath: string;
@@ -214,7 +269,7 @@ export interface AgentScanCallGraphAction {
     rationale: string;
 }
 
-export interface AgentScanGitBlameAction {
+export interface AgentScanGitBlameAction extends AgentScanNotebookFields {
     type: 'git_blame';
     /** Workspace-relative path to the file. */
     filePath: string;
@@ -225,7 +280,7 @@ export interface AgentScanGitBlameAction {
     rationale: string;
 }
 
-export interface AgentScanGitHistoryAction {
+export interface AgentScanGitHistoryAction extends AgentScanNotebookFields {
     type: 'git_history';
     /** Optional workspace-relative path — if omitted, returns repo history. */
     filePath?: string;
@@ -236,7 +291,7 @@ export interface AgentScanGitHistoryAction {
     rationale: string;
 }
 
-export interface AgentScanGitDiffAction {
+export interface AgentScanGitDiffAction extends AgentScanNotebookFields {
     type: 'git_diff';
     /** Base git ref to compare from (e.g. "main", "HEAD~1", a commit SHA). */
     baseRef: string;
@@ -245,19 +300,19 @@ export interface AgentScanGitDiffAction {
     rationale: string;
 }
 
-export interface AgentScanCheckDependenciesAction {
+export interface AgentScanCheckDependenciesAction extends AgentScanNotebookFields {
     type: 'check_dependencies';
     rationale: string;
 }
 
-export interface AgentScanReadConfigAction {
+export interface AgentScanReadConfigAction extends AgentScanNotebookFields {
     type: 'read_config';
     /** What kind of config to look for. */
     configKind: 'auth' | 'cors' | 'rate_limit' | 'headers' | 'env' | 'all';
     rationale: string;
 }
 
-export interface AgentScanFindDefinitionAction {
+export interface AgentScanFindDefinitionAction extends AgentScanNotebookFields {
     type: 'find_definition';
     /** Workspace-relative path to the file where the symbol is referenced. */
     filePath: string;
@@ -268,7 +323,7 @@ export interface AgentScanFindDefinitionAction {
     rationale: string;
 }
 
-export interface AgentScanFindReferencesAction {
+export interface AgentScanFindReferencesAction extends AgentScanNotebookFields {
     type: 'find_references';
     /** Workspace-relative path to the file where the symbol is defined. */
     filePath: string;
@@ -279,7 +334,7 @@ export interface AgentScanFindReferencesAction {
     rationale: string;
 }
 
-export interface AgentScanFindTestsAction {
+export interface AgentScanFindTestsAction extends AgentScanNotebookFields {
     type: 'find_tests';
     /** Workspace-relative path to the source file to find tests for. */
     filePath: string;
@@ -288,7 +343,7 @@ export interface AgentScanFindTestsAction {
     rationale: string;
 }
 
-export interface AgentScanRunTestsAction {
+export interface AgentScanRunTestsAction extends AgentScanNotebookFields {
     type: 'run_tests';
     /** Execution mode: "existing" runs the workspace test suite; "generated" runs an inline script. */
     mode: 'existing' | 'generated';
@@ -460,9 +515,10 @@ export interface AgentScanFinding {
     evidenceChain?: EvidenceChain;
     rootCause?: RootCauseReference;
     verificationLevel?: VerificationLevel;
+    capabilityBaseline?: CapabilityBaseline | null;
 }
 
-export interface AgentScanFinishAction {
+export interface AgentScanFinishAction extends AgentScanNotebookFields {
     type: 'finish';
     findings: AgentScanFinding[];
     summary: string;
@@ -492,7 +548,7 @@ export interface AgentScanFinishAction {
 
 export type AgentScanSystemEventType = 'critique' | 'error' | 'blocked' | 'budget' | 'finish_gate';
 
-export interface AgentScanSystemEventAction {
+export interface AgentScanSystemEventAction extends AgentScanNotebookFields {
     type: 'system_event';
     eventType: AgentScanSystemEventType;
     /** Human-readable event payload — shown to the agent in the transcript. */
@@ -615,6 +671,7 @@ export interface AgentScanStartResponse {
     budget: AgentScanBudget;
     scanCredits: number;
     refundId: string;
+    harness?: AgentHarnessSettings;
 }
 
 export interface AgentScanStepRequest {
@@ -632,6 +689,8 @@ export interface AgentScanStepRequest {
     investigationProgress?: AgentInvestigationProgress;
     /** Action constraint for deterministic blocked-read recovery. */
     actionConstraint?: AgentActionConstraint;
+    harness?: AgentHarnessSettings;
+    suggestedChecks?: string[];
 }
 
 export interface AgentInvestigationProgress {
