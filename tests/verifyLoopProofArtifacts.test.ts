@@ -31,7 +31,7 @@ function client(...responses: any[]): ApiClient {
 function readArtifacts(root: string): any[] {
     const dir = path.join(root, '.securecode', 'proofs');
     if (!fs.existsSync(dir)) return [];
-    return fs.readdirSync(dir).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+    return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
 }
 
 describe('runVerifyLoop — proof artifacts', () => {

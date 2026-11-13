@@ -14,6 +14,7 @@ export interface ProofArtifactRound {
 export interface ProofArtifact {
     proofId: string;
     createdAt: string;
+    phase?: 'original' | 'fix';
     finding: { file: string; line: number; type: string; severity: string };
     rounds: ProofArtifactRound[];
     proofGate: { failedGates: string[]; warnings: string[] } | null;
@@ -65,6 +66,7 @@ function sanitizeArtifact(artifact: ProofArtifact): ProofArtifact {
             : null,
         finalVerdict: clean(artifact.finalVerdict),
         finalReason: clean(artifact.finalReason),
+        ...(artifact.phase ? { phase: artifact.phase } : {}),
     };
 }
 

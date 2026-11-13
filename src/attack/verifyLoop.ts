@@ -119,6 +119,7 @@ function withProofArtifact(result: VerifyLoopResult, opts: VerifyLoopOptions, co
     const artifactPath = saveProofArtifact(opts.workspaceRoot, {
         proofId,
         createdAt: new Date().toISOString(),
+        phase: opts.verificationPhase ?? 'original',
         finding: { file: opts.filePath || '', line: opts.finding.line, type: opts.finding.type, severity: opts.finding.severity },
         rounds: collector.rounds,
         proofGate: result.proofGateResult

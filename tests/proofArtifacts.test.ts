@@ -117,3 +117,12 @@ describe('proof artifact folder is kept out of git', () => {
         expect(fs.readFileSync(path.join(ignore, '.gitignore'), 'utf8')).toBe('*\n');
     });
 });
+
+describe('proof artifact phase', () => {
+    it('records whether the proof checked the original bug or a generated fix', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-proof-phase-'));
+        const rel = saveProofArtifact(root, makeArtifact({ proofId: 'fix-1', phase: 'fix' }));
+        const saved = JSON.parse(fs.readFileSync(path.join(root, rel as string), 'utf8'));
+        expect(saved.phase).toBe('fix');
+    });
+});
