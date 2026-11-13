@@ -17,6 +17,7 @@ export interface ProofEvidence {
     sandboxBackend: string;
     environmentFingerprint?: string;
     assumptions: string[];
+    artifactPath?: string;
 }
 
 export interface ProofGateResult {

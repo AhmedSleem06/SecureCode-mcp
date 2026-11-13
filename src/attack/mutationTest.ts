@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { runLocalTest } from '../utils/localTestRunner';
-import { applyMutation } from './mutationOperators';
+import { applyMutation, INVALID_MUTATION_DESCRIPTION, normalizeVulnerabilityType } from './mutationOperators';
 
 export interface MutationTestOptions {
     /** The original vulnerable code (the code being tested). */
@@ -69,6 +69,36 @@ export function redirectImportSpecifier(testScript: string, relativeImportPath: 
     return replaced ? rewritten : null;
 }
 
+const TREE_SITTER_FUNCTION_TYPES = new Set([
+    'function_declaration', 'function_expression', 'function', 'arrow_function', 'method_definition',
+    'generator_function_declaration', 'generator_function', 'class_static_block',
+]);
+
+/**
+ * Count syntax problems (parse errors, missing tokens, `return` outside a
+ * function) with tree-sitter. Returns null when the grammar is unavailable.
+ */
+export async function treeSitterSyntaxProblems(code: string, filePath: string): Promise<number | null> {
+    const { parseSource, grammarForFile } = await import('../project-map/parserLoader');
+    const grammar = grammarForFile(filePath);
+    if (grammar === 'unknown' || grammar === 'python') return null;
+    const parsed = await parseSource(code, grammar);
+    if (!parsed) return null;
+    let count = 0;
+    const visit = (node: any, inFunction: boolean) => {
+        const missing = typeof node.isMissing === 'function' ? node.isMissing() : node.isMissing;
+        if (node.type === 'ERROR' || missing) count++;
+        if (node.type === 'return_statement' && !inFunction) count++;
+        const nested = inFunction || TREE_SITTER_FUNCTION_TYPES.has(node.type);
+        for (const child of node.children) visit(child, nested);
+    };
+    visit(parsed.root, false);
+    try { parsed.tree.delete(); } catch { /* best effort */ }
+    return count;
+}
+
+const FS_BLOCKED_RE = /\b(ENOENT|EACCES|EPERM|ENOTDIR)\b/;
+
 /**
  * Run a mutation test:
  *
@@ -78,12 +108,14 @@ export function redirectImportSpecifier(testScript: string, relativeImportPath: 
  * 3. Run the ORIGINAL test script against the mutated (secure) code.
  * 4. If the test PASSES on the original but FAILS on the mutation → discriminating.
  * 5. If the test PASSES on both → non-discriminating (the test doesn't test security).
- * 6. If the test ERRORS on the mutation → INCONCLUSIVE (not discriminating).
+ * 6. If the test ERRORS on the mutation → INCONCLUSIVE (not discriminating),
+ *    except a path-traversal mutation whose run fails with a filesystem
+ *    not-found/denied error: the fixed path no longer reaches the target.
  *
  * Never label mutation errors as successful discrimination.
  */
 export async function runMutationTest(opts: MutationTestOptions): Promise<MutationTestResult> {
-    const mutation = applyMutation(opts.vulnerableCode, opts.vulnerabilityType, opts.line);
+    const mutation = applyMutation(opts.vulnerableCode, opts.vulnerabilityType, opts.line, opts.filePath);
 
     if (!mutation.mutated) {
         return {
@@ -92,6 +124,19 @@ export async function runMutationTest(opts: MutationTestOptions): Promise<Mutati
             reason: `Mutation test skipped: ${mutation.description}`,
             skipCause: 'no-operator',
         };
+    }
+
+    if (mutation.syntaxCheck === 'none' && opts.filePath) {
+        const before = await treeSitterSyntaxProblems(opts.vulnerableCode, opts.filePath).catch(() => null);
+        const after = before === null ? null : await treeSitterSyntaxProblems(mutation.mutatedCode, opts.filePath).catch(() => null);
+        if (before !== null && after !== null && after > before) {
+            return {
+                discriminating: false,
+                mutatedVerdict: 'not-run',
+                reason: `Mutation test skipped: ${INVALID_MUTATION_DESCRIPTION}`,
+                skipCause: 'no-operator',
+            };
+        }
     }
 
     const targetAbs = path.isAbsolute(opts.filePath)
@@ -158,6 +203,18 @@ export async function runMutationTest(opts: MutationTestOptions): Promise<Mutati
                 mutatedVerdict: 'not-run',
                 reason: `Mutation test not run (${result.verdict}): ${result.output.slice(0, 200)}`,
                 skipCause: result.verdict,
+            };
+        }
+
+        if (
+            result.verdict === 'error' &&
+            normalizeVulnerabilityType(opts.vulnerabilityType) === 'path_traversal' &&
+            FS_BLOCKED_RE.test(result.output)
+        ) {
+            return {
+                discriminating: true,
+                mutatedVerdict: 'fail',
+                reason: `Mutation test FAILED — attack blocked: the fixed code could not reach the file outside the base directory. ${mutation.description} ${result.output.slice(0, 200)}`,
             };
         }
 

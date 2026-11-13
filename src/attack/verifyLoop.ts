@@ -14,6 +14,7 @@ import { evaluateProofGate, buildProofEvidence } from './proofGate';
 import { runMutationTest } from './mutationTest';
 import { detectSandbox } from '../utils/verificationSandbox';
 import { isAgentScanBudgetExhausted, VERIFY_BUDGET_EXHAUSTED_REASON } from './agentScanCredits';
+import { saveProofArtifact, type ProofArtifact, type ProofArtifactRound } from './proofArtifacts';
 
 export interface VerifyFinding {
     type: string;
@@ -107,6 +108,30 @@ function scanBudgetExhaustedResult(roundsUsed: number, testScript: string, testO
     };
 }
 
+interface ProofArtifactCollector {
+    rounds: ProofArtifactRound[];
+    mutation: ProofArtifact['mutation'];
+}
+
+function withProofArtifact(result: VerifyLoopResult, opts: VerifyLoopOptions, collector: ProofArtifactCollector): VerifyLoopResult {
+    if (collector.rounds.length === 0) return result;
+    const proofId = result.proofEvidence?.proofId || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const artifactPath = saveProofArtifact(opts.workspaceRoot, {
+        proofId,
+        createdAt: new Date().toISOString(),
+        finding: { file: opts.filePath || '', line: opts.finding.line, type: opts.finding.type, severity: opts.finding.severity },
+        rounds: collector.rounds,
+        proofGate: result.proofGateResult
+            ? { failedGates: result.proofGateResult.failedGates, warnings: result.proofGateResult.warnings }
+            : null,
+        mutation: collector.mutation,
+        finalVerdict: result.verdict,
+        finalReason: result.reason,
+    });
+    if (artifactPath && result.proofEvidence) result.proofEvidence.artifactPath = artifactPath;
+    return result;
+}
+
 export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoopResult> {
     const { finding, filePath, code, relatedFiles, workspaceRoot, language, client, onProgress } = opts;
     const tracker = opts.budgetTracker;
@@ -154,10 +179,13 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
     }
     if (tracker) tracker.findingsAttempted += 1;
 
+    const collector: ProofArtifactCollector = { rounds: [], mutation: null };
+    const finish = (result: VerifyLoopResult): VerifyLoopResult => withProofArtifact(result, opts, collector);
+
     for (let round = 1; round <= maxRounds; round++) {
         // Per-round budget check (need at least generate + analyze = 2 calls).
         if (tracker && !tracker.canAttemptRound()) {
-            return {
+            return finish({
                 verdict: 'INCONCLUSIVE',
                 reason: `Verification budget exhausted mid-finding (llmCalls=${tracker.llmCallsUsed}/${tracker.budget.maxLlmCalls}, wallClock=${tracker.wallClockElapsedMs}ms/${tracker.budget.maxWallClockMs}ms).`,
                 roundsUsed: round - 1,
@@ -165,19 +193,19 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 testOutput: lastTestOutput,
                 budgetExhaustedReason: 'aggregate',
                 subVerdict: 'budget-exhausted',
-            };
+            });
         }
         if (tracker) tracker.roundsUsed += 1;
 
         if (opts.signal?.aborted) {
-            return {
+            return finish({
                 verdict: 'INCONCLUSIVE',
                 reason: 'Cancelled by user.',
                 roundsUsed: round - 1,
                 testScript: lastTestScript,
                 testOutput: lastTestOutput,
                 subVerdict: 'aborted',
-            };
+            });
         }
 
         onProgress?.(round, maxRounds, `Round ${round}: generating test...`);
@@ -209,33 +237,33 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 ...(opts.runId ? { runId: opts.runId } : {}),
             });
         } catch (err) {
-            if (isAgentScanBudgetExhausted(err)) return scanBudgetExhaustedResult(round - 1, lastTestScript, lastTestOutput);
+            if (isAgentScanBudgetExhausted(err)) return finish(scanBudgetExhaustedResult(round - 1, lastTestScript, lastTestOutput));
             throw err;
         }
         if (tracker) tracker.recordLlmCall((genRespRaw as any).costUsd ?? 0);
 
         const genValidation = validateVerifyGenerateResponse(genRespRaw);
         if (!genValidation.ok) {
-            return {
+            return finish({
                 verdict: 'INCONCLUSIVE',
                 reason: `API returned a malformed verify/generate response: ${genValidation.error}`,
                 roundsUsed: round,
                 testScript: '',
                 testOutput: '',
                 subVerdict: 'analyzed',
-            };
+            });
         }
         const genResp = genValidation.value;
 
         if (!genResp.canTest || !genResp.testScript) {
-            return {
+            return finish({
                 verdict: 'INCONCLUSIVE',
                 reason: genResp.skipReason || 'Could not generate a test for this vulnerability type.',
                 roundsUsed: round,
                 testScript: '',
                 testOutput: '',
                 subVerdict: 'cannot-test',
-            };
+            });
         }
 
         lastTestScript = genResp.testScript;
@@ -260,13 +288,21 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         );
 
         lastTestOutput = testResult.output;
+        collector.rounds.push({
+            round,
+            testScript: genResp.testScript,
+            setupScript: genResp.setupScript || '',
+            runner,
+            verdict: testResult.verdict,
+            output: testResult.output,
+        });
 
         // Handle non-LLM-judged verdicts that should short-circuit the loop.
         if (testResult.verdict === 'sandbox-unavailable') {
             // No isolation backend on the user's machine. We must NOT run
             // the script with host privileges — return INCONCLUSIVE so the
             // finding keeps its non-PROVEN status but isn't buried as UNPROVEN.
-            return {
+            return finish({
                 verdict: 'INCONCLUSIVE',
                 reason: testResult.output,
                 roundsUsed: round,
@@ -274,46 +310,46 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 testOutput: lastTestOutput,
                 backend: testResult.backend || '',
                 subVerdict: 'sandbox-unavailable',
-            };
+            });
         }
         if (testResult.verdict === 'blocked') {
             previousErrors.push(`Round ${round}: test script rejected by the static safety check — ${testResult.output.slice(0, 300)}. Remove that construct (payload text inside string literals is fine).`);
             if (round >= maxRounds) {
-                return {
+                return finish({
                     verdict: 'INCONCLUSIVE',
                     reason: `Test script rejected by safety check: ${testResult.output}`,
                     roundsUsed: round,
                     testScript: lastTestScript,
                     testOutput: lastTestOutput,
                     subVerdict: 'blocked',
-                };
+                });
             }
             continue;
         }
         if (testResult.verdict === 'cancelled') {
             // User aborted the scan. Do NOT retry — return immediately so the
             // cancellation propagates up to toolAgentScan, which stops the loop.
-            return {
+            return finish({
                 verdict: 'INCONCLUSIVE',
                 reason: `Verification cancelled by user at round ${round}.`,
                 roundsUsed: round,
                 testScript: lastTestScript,
                 testOutput: lastTestOutput,
                 subVerdict: 'cancelled',
-            };
+            });
         }
         if (testResult.verdict === 'timeout') {
             // Treat as a retryable error — feed it back to the LLM.
             previousErrors.push(`Round ${round}: timed out — ${testResult.output.slice(0, 500)}`);
             if (round >= maxRounds) {
-                return {
+                return finish({
                     verdict: 'INCONCLUSIVE',
                     reason: `Test timed out after ${round} round(s).`,
                     roundsUsed: round,
                     testScript: lastTestScript,
                     testOutput: lastTestOutput,
                     subVerdict: 'analyzed',
-                };
+                });
             }
             continue;
         }
@@ -337,14 +373,14 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 ...(opts.runId ? { runId: opts.runId } : {}),
             });
         } catch (err) {
-            if (isAgentScanBudgetExhausted(err)) return scanBudgetExhaustedResult(round, lastTestScript, lastTestOutput, testResult.backend || '');
+            if (isAgentScanBudgetExhausted(err)) return finish(scanBudgetExhaustedResult(round, lastTestScript, lastTestOutput, testResult.backend || ''));
             throw err;
         }
         if (tracker) tracker.recordLlmCall((analyzeRespRaw as any).costUsd ?? 0);
 
         const analyzeValidation = validateVerifyAnalyzeResponse(analyzeRespRaw);
         if (!analyzeValidation.ok) {
-            return {
+            return finish({
                 verdict: 'INCONCLUSIVE',
                 reason: `API returned a malformed verify/analyze response: ${analyzeValidation.error}`,
                 roundsUsed: round,
@@ -352,7 +388,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 testOutput: lastTestOutput,
                 backend: testResult.backend || '',
                 subVerdict: 'analyzed',
-            };
+            });
         }
         const analyzeResp = analyzeValidation.value;
 
@@ -407,6 +443,14 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                         { setupScript: genResp.setupScript || null, timeoutMs: tracker ? Math.min(30_000, tracker.remainingWallClockMs()) : 30_000, signal: opts.signal },
                     );
                     lastRepOutput = repResult.output;
+                    collector.rounds.push({
+                        round,
+                        testScript: genResp.testScript,
+                        setupScript: genResp.setupScript || '',
+                        runner,
+                        verdict: `repeat-${rep}:${repResult.verdict}`,
+                        output: repResult.output,
+                    });
                     const repMarker = parseProofMarker(repResult.output);
                     lastRepMarker = repMarker;
                     runResults.push({
@@ -450,7 +494,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                               repeatPasses: totalPasses,
                           })
                         : proofEvidence;
-                    return {
+                    return finish({
                         verdict: 'INCONCLUSIVE',
                         reason: `Repeatability check failed: ${totalPasses}/${runResults.length} runs passed. ${repGateResult.warnings.join(' ')}`,
                         roundsUsed: round,
@@ -461,7 +505,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                         proofGateResult: repGateResult,
                         proofSubVerdict: 'gate-rejected',
                         subVerdict: 'analyzed',
-                    };
+                    });
                 }
 
                 if (proofEvidence) {
@@ -482,10 +526,15 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                     timeoutMs: tracker ? Math.min(30_000, tracker.remainingWallClockMs()) : 30_000,
                     signal: opts.signal,
                 });
+                collector.mutation = {
+                    description: (mutationResult as { description?: string }).description ?? mutationResult.reason,
+                    mutatedVerdict: mutationResult.mutatedVerdict,
+                    reason: mutationResult.skipCause ? `${mutationResult.reason} [skipCause: ${mutationResult.skipCause}]` : mutationResult.reason,
+                };
 
                 if (mutationResult.mutatedVerdict === 'not-run' && mutationResult.skipCause === 'no-operator') {
                     if (proofEvidence) proofEvidence.assumptions.push(`mutation-unavailable: ${mutationResult.reason}`);
-                    return {
+                    return finish({
                         verdict: 'PROVEN',
                         reason: `${analyzeResp.reason} [mutation-unavailable: ${mutationResult.reason}]`,
                         roundsUsed: round,
@@ -495,18 +544,18 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                         proofEvidence,
                         proofGateResult: { ...gateResult, warnings: [...gateResult.warnings, 'mutation-unavailable'] },
                         proofSubVerdict: 'gate-passed',
-                    };
+                    });
                 }
 
                 if (mutationResult.skipCause === 'cancelled') {
-                    return {
+                    return finish({
                         verdict: 'INCONCLUSIVE',
                         reason: `Verification cancelled by user at round ${round}.`,
                         roundsUsed: round,
                         testScript: lastTestScript,
                         testOutput: lastTestOutput,
                         subVerdict: 'cancelled',
-                    };
+                    });
                 }
 
                 if (!mutationResult.discriminating) {
@@ -514,7 +563,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                     if (proofEvidence) {
                         proofEvidence.assumptions.push(`mutation-test: ${mutationResult.reason}`);
                     }
-                    return {
+                    return finish({
                         verdict: 'INCONCLUSIVE',
                         reason: `Proof gate passed but mutation test was non-discriminating: ${mutationResult.reason}`,
                         roundsUsed: round,
@@ -525,10 +574,10 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                         proofGateResult: { ...gateResult, failedGates: [...gateResult.failedGates, 'mutation-non-discriminating'] },
                         proofSubVerdict: 'gate-rejected',
                         subVerdict: 'analyzed',
-                    };
+                    });
                 }
 
-                return {
+                return finish({
                     verdict: 'PROVEN',
                     reason: `${analyzeResp.reason} [mutation: ${mutationResult.reason}]`,
                     roundsUsed: round,
@@ -538,10 +587,10 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                     proofEvidence,
                     proofGateResult: gateResult,
                     proofSubVerdict: 'gate-passed',
-                };
+                });
             }
             console.warn(`[Verify Loop] LLM said PROVEN but proof gate rejected: ${gateResult.failedGates.join(', ')}`);
-            return {
+            return finish({
                 verdict: gateResult.downgradedVerdict === 'UNPROVEN' ? 'UNPROVEN' : 'INCONCLUSIVE',
                 reason: `Proof gate rejected: ${gateResult.failedGates.join(', ')}. ${gateResult.warnings.join(' ')}. LLM reason: ${analyzeResp.reason}`,
                 roundsUsed: round,
@@ -552,20 +601,20 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 proofGateResult: gateResult,
                 proofSubVerdict: 'gate-rejected',
                 subVerdict: gateResult.downgradedVerdict === 'UNPROVEN' ? undefined : 'analyzed',
-            };
+            });
         }
         if (analyzeResp.verdict === 'UNPROVEN') {
-            return { verdict: 'UNPROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', proofEvidence, proofGateResult: gateResult };
+            return finish({ verdict: 'UNPROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', proofEvidence, proofGateResult: gateResult });
         }
 
         if (!analyzeResp.shouldRetry || round >= maxRounds) {
-            return { verdict: 'INCONCLUSIVE', reason: analyzeResp.reason || `Could not verify after ${round} round(s).`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed', proofEvidence, proofGateResult: gateResult };
+            return finish({ verdict: 'INCONCLUSIVE', reason: analyzeResp.reason || `Could not verify after ${round} round(s).`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed', proofEvidence, proofGateResult: gateResult });
         }
 
         previousErrors.push(`Round ${round}: ${testResult.verdict} — ${testResult.output.slice(0, 500)}`);
     }
 
-    return { verdict: 'INCONCLUSIVE', reason: `Exhausted all ${maxRounds} rounds.`, roundsUsed: maxRounds, testScript: lastTestScript, testOutput: lastTestOutput, subVerdict: 'analyzed' };
+    return finish({ verdict: 'INCONCLUSIVE', reason: `Exhausted all ${maxRounds} rounds.`, roundsUsed: maxRounds, testScript: lastTestScript, testOutput: lastTestOutput, subVerdict: 'analyzed' });
 }
 
 export { VerifyBudgetTracker, defaultVerifyBudget, type VerifyBudget };

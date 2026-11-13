@@ -7,7 +7,7 @@ vi.mock('../src/utils/localTestRunner', () => ({
     runLocalTest: vi.fn(),
 }));
 
-import { runMutationTest, redirectImportSpecifier } from '../src/attack/mutationTest';
+import { runMutationTest, redirectImportSpecifier, treeSitterSyntaxProblems } from '../src/attack/mutationTest';
 import { runLocalTest } from '../src/utils/localTestRunner';
 
 const VULN = 'function handler(req, res) {\n  res.json({ data });\n}\nmodule.exports = { handler };';
@@ -181,6 +181,87 @@ describe('runMutationTest', () => {
 
         expect(result.mutatedVerdict).toBe('error');
         expect(fs.readdirSync(path.join(ws, 'src'))).toEqual(['app.js']);
+    });
+
+    const PATH_VULN = "const path = require('path');\nfunction read(name) { return require('fs').readFileSync(path.join(__dirname, 'files', name), 'utf8'); }\nmodule.exports = { read };";
+    const pathOpts = (vulnerabilityType = 'path_traversal') => ({
+        ...baseOpts(),
+        vulnerableCode: PATH_VULN,
+        vulnerabilityType,
+        testScript: 'const { read } = require("../src/app.js");\nconsole.log("PASS: " + read("../../etc/passwd"));',
+    });
+
+    it('treats a filesystem not-found error on a path traversal mutation as attack blocked', async () => {
+        (runLocalTest as any).mockResolvedValue({
+            verdict: 'error',
+            output: "Error: ENOENT: no such file or directory, open '/ws/src/files/etc/passwd'",
+            exitCode: 1,
+        });
+
+        for (const type of ['path_traversal', 'directory_traversal']) {
+            const result = await runMutationTest(pathOpts(type));
+            expect(result.discriminating).toBe(true);
+            expect(result.mutatedVerdict).toBe('fail');
+            expect(result.reason).toContain('attack blocked: the fixed code could not reach the file outside the base directory');
+            expect(result.reason).toContain('ENOENT');
+        }
+    });
+
+    it('keeps other path traversal errors INCONCLUSIVE', async () => {
+        (runLocalTest as any).mockResolvedValue({
+            verdict: 'error',
+            output: "TypeError: Cannot read properties of undefined (reading 'slice')",
+            exitCode: 1,
+        });
+
+        const result = await runMutationTest(pathOpts());
+
+        expect(result.discriminating).toBe(false);
+        expect(result.mutatedVerdict).toBe('error');
+        expect(result.reason).toContain('INCONCLUSIVE');
+    });
+
+    it('keeps ENOENT errors INCONCLUSIVE for non path traversal mutations', async () => {
+        (runLocalTest as any).mockResolvedValue({ verdict: 'error', output: 'Error: ENOENT: no such file', exitCode: 1 });
+
+        const result = await runMutationTest(baseOpts());
+
+        expect(result.discriminating).toBe(false);
+        expect(result.mutatedVerdict).toBe('error');
+        expect(result.reason).toContain('INCONCLUSIVE');
+    });
+
+    it('skips without running when the access-control finding is outside any function', async () => {
+        const result = await runMutationTest({ ...baseOpts(), line: 4 });
+
+        expect(result.mutatedVerdict).toBe('not-run');
+        expect(result.skipCause).toBe('no-operator');
+        expect(result.reason).toContain('not inside a function');
+        expect(runLocalTest).not.toHaveBeenCalled();
+    });
+
+    it('skips without running when the mutation would produce invalid code', async () => {
+        const result = await runMutationTest({
+            ...baseOpts(),
+            vulnerableCode: "const re = /'/; const s = x + 'y';\nmodule.exports = s;",
+            vulnerabilityType: 'sql_injection',
+            line: 1,
+        });
+
+        expect(result.mutatedVerdict).toBe('not-run');
+        expect(result.skipCause).toBe('no-operator');
+        expect(result.reason).toContain('Mutation produced invalid code — skipped');
+        expect(runLocalTest).not.toHaveBeenCalled();
+    });
+});
+
+describe('treeSitterSyntaxProblems', () => {
+    it('counts parse errors and return statements outside functions', async () => {
+        expect(await treeSitterSyntaxProblems('function f() {\n  return 1;\n}', 'a.js')).toBe(0);
+        expect(await treeSitterSyntaxProblems('const a = 1;\nreturn a;', 'a.js')).toBe(1);
+        expect(await treeSitterSyntaxProblems('export function f(x: string): boolean {\n  return true;\n}\nconst y = ;', 'a.ts')).toBeGreaterThan(0);
+        expect(await treeSitterSyntaxProblems('export const ok = (x: number): number => x + 1;', 'a.ts')).toBe(0);
+        expect(await treeSitterSyntaxProblems('x = 1', 'a.py')).toBeNull();
     });
 });
 

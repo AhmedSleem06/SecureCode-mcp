@@ -334,6 +334,61 @@ describe('runAgentScan — evidence gate', () => {
         expect(rejections(result).length).toBeLessThanOrEqual(4);
     });
 
+    describe('finish label after floor rejections', () => {
+        const big = { filePath: 'big.ts', language: 'typescript', fileContent: linesContent(3000, { 2500: 'const token = authenticate(req.headers.authorization);' }) };
+        const finish = (summary: string, remaining: number, extra: Record<string, unknown> = {}) =>
+            step({ type: 'finish', findings: [], summary, selfCritique: 'ok' }, remaining, extra);
+        const readAll = (remaining: number) => step({ type: 'read_file', path: 'big.ts', startLine: 1, endLine: 3000, rationale: 'read what the gate asked for' }, remaining);
+        const loopDetected = (result: any) => result.transcript.some((t: any) => String(t.observation).startsWith('[FINISH GATE LOOP DETECTED]'));
+
+        it('two floor rejections, then the agent reads the ranges: the third finish ends as agent_finish', async () => {
+            setupExecutors(3000);
+            mockPostJson([startResp(evidenceHarness), finish('early-1', 39), finish('early-2', 38), readAll(37), finish('done', 36)]);
+
+            const result = await runAgentScan(ctx, big, {});
+
+            const rejected = rejections(result);
+            expect(rejected).toHaveLength(2);
+            for (const r of rejected) expect(r.observation).toContain('of lines 1–3000 have been read');
+            expect(result.terminationReason).toBe('agent_finish');
+            expect(result.summary).toBe('done');
+            expect(loopDetected(result)).toBe(false);
+        });
+
+        it('a passing finish on the escape count is not labelled forced', async () => {
+            setupExecutors(3000);
+            mockPostJson([startResp(evidenceHarness), finish('early-1', 39), finish('early-2', 38), finish('early-3', 37), readAll(36), finish('done', 35)]);
+
+            const result = await runAgentScan(ctx, big, {});
+
+            expect(rejections(result)).toHaveLength(3);
+            expect(result.terminationReason).toBe('agent_finish');
+            expect(loopDetected(result)).toBe(false);
+        });
+
+        it('a third finish that still fails the gate in the landing window is forced_incomplete', async () => {
+            setupExecutors(3000);
+            mockPostJson([startResp(evidenceHarness), finish('early-1', 39), finish('early-2', 38), finish('still-early', 37, { landing: true })]);
+
+            const result = await runAgentScan(ctx, big, {});
+
+            expect(rejections(result)).toHaveLength(2);
+            expect(result.terminationReason).toBe('forced_incomplete');
+            expect(result.coverageGaps.some(g => g.title.startsWith('Unread high-priority range: lines'))).toBe(true);
+        });
+
+        it('a finish that still fails when the escape threshold is reached is forced_incomplete', async () => {
+            setupExecutors(3000);
+            mockPostJson([startResp(evidenceHarness), finish('early-1', 39), finish('early-2', 38), finish('early-3', 37), finish('early-4', 36)]);
+
+            const result = await runAgentScan(ctx, big, {});
+
+            expect(rejections(result)).toHaveLength(3);
+            expect(result.terminationReason).toBe('forced_incomplete');
+            expect(loopDetected(result)).toBe(true);
+        });
+    });
+
     it('floor blocks a one-read finish on a large file with unread auth code', async () => {
         setupExecutors(3000);
         const big = { filePath: 'big.ts', language: 'typescript', fileContent: linesContent(3000, { 2500: 'const token = authenticate(req.headers.authorization);' }) };

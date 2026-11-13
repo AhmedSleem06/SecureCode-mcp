@@ -362,6 +362,7 @@ export function validateVerifyGenerateResponse(raw: unknown): ValidationResult<V
 // infinite retries or a wrong verdict.
 
 const VALID_VERIFY_VERDICTS = new Set(['PROVEN', 'UNPROVEN', 'INCONCLUSIVE']);
+let warnedDefinitiveRetryCoercion = false;
 
 export function validateVerifyAnalyzeResponse(raw: unknown): ValidationResult<VerifyAnalyzeResponse> {
     if (!isObject(raw)) return err('verify analyze response is not an object');
@@ -373,17 +374,22 @@ export function validateVerifyAnalyzeResponse(raw: unknown): ValidationResult<Ve
     }
     if (!isBool(raw.shouldRetry)) return err('verify analyze response: shouldRetry must be a boolean');
 
-    // PROVEN and UNPROVEN are definitive — retrying makes no sense.
-    if ((raw.verdict === 'PROVEN' || raw.verdict === 'UNPROVEN') && raw.shouldRetry === true) {
-        return err(`verify analyze response: verdict "${raw.verdict}" cannot have shouldRetry=true (definitive verdict)`);
-    }
-
     if (raw.scanCredits !== undefined && raw.scanCredits !== null) {
         if (!isNumber(raw.scanCredits)) return err('verify analyze response: scanCredits must be a number or null');
     }
 
     if (raw.costUsd !== undefined && raw.costUsd !== null) {
         if (!isNumber(raw.costUsd)) return err('verify analyze response: costUsd must be a number or null');
+    }
+
+    // PROVEN and UNPROVEN are definitive — older APIs sometimes still send
+    // shouldRetry=true; coerce instead of rejecting the verdict.
+    if ((raw.verdict === 'PROVEN' || raw.verdict === 'UNPROVEN') && raw.shouldRetry === true) {
+        if (!warnedDefinitiveRetryCoercion) {
+            warnedDefinitiveRetryCoercion = true;
+            console.warn(`[protocolValidator] verify analyze response: verdict "${raw.verdict}" had shouldRetry=true; coercing to false (definitive verdict)`);
+        }
+        return ok({ ...raw, shouldRetry: false } as unknown as VerifyAnalyzeResponse);
     }
 
     return ok(raw as unknown as VerifyAnalyzeResponse);

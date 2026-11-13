@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
     validateVerifyGenerateResponse,
     validateVerifyAnalyzeResponse,
@@ -334,24 +334,55 @@ describe('validateVerifyAnalyzeResponse', () => {
         if (!r.ok) expect(r.error).toContain('shouldRetry');
     });
 
-    it('rejects PROVEN with shouldRetry=true (definitive verdict cannot retry)', () => {
+    it('coerces PROVEN with shouldRetry=true to shouldRetry=false (warns once)', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         const r = validateVerifyAnalyzeResponse({
             verdict: 'PROVEN',
             reason: 'exploit worked',
             shouldRetry: true,
         });
-        expect(r.ok).toBe(false);
-        if (!r.ok) expect(r.error).toContain('PROVEN');
+        expect(r.ok).toBe(true);
+        if (r.ok) {
+            expect(r.value.verdict).toBe('PROVEN');
+            expect(r.value.shouldRetry).toBe(false);
+        }
+        const again = validateVerifyAnalyzeResponse({ verdict: 'PROVEN', reason: 'again', shouldRetry: true });
+        expect(again.ok).toBe(true);
+        expect(warn.mock.calls.filter((c) => String(c[0]).includes('coercing')).length).toBeLessThanOrEqual(1);
+        warn.mockRestore();
     });
 
-    it('rejects UNPROVEN with shouldRetry=true (definitive verdict cannot retry)', () => {
+    it('coerces UNPROVEN with shouldRetry=true to shouldRetry=false', () => {
         const r = validateVerifyAnalyzeResponse({
             verdict: 'UNPROVEN',
             reason: 'guard held',
             shouldRetry: true,
         });
+        expect(r.ok).toBe(true);
+        if (r.ok) {
+            expect(r.value.verdict).toBe('UNPROVEN');
+            expect(r.value.shouldRetry).toBe(false);
+        }
+    });
+
+    it('still rejects a definitive verdict with shouldRetry=true when costUsd is malformed', () => {
+        const r = validateVerifyAnalyzeResponse({
+            verdict: 'PROVEN',
+            reason: 'ok',
+            shouldRetry: true,
+            costUsd: 'free',
+        });
         expect(r.ok).toBe(false);
-        if (!r.ok) expect(r.error).toContain('UNPROVEN');
+    });
+
+    it('keeps INCONCLUSIVE with shouldRetry=true unchanged', () => {
+        const r = validateVerifyAnalyzeResponse({
+            verdict: 'INCONCLUSIVE',
+            reason: 'import error',
+            shouldRetry: true,
+        });
+        expect(r.ok).toBe(true);
+        if (r.ok) expect(r.value.shouldRetry).toBe(true);
     });
 
     it('rejects scanCredits that is not a number', () => {

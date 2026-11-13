@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import * as vm from 'node:vm';
+import * as ts from 'typescript';
 import { applyMutation } from '../src/attack/mutationOperators';
 
 function compiles(code: string): boolean {
@@ -50,7 +51,8 @@ describe('applyMutation', () => {
         const result = applyMutation(code, 'sql_injection', 1);
         expect(result.mutated).toBe(true);
         expect(result.mutatedCode).toContain('?');
-        expect(result.mutatedCode).not.toContain('${userId}');
+        expect(result.mutatedCode).toBe('const q = `SELECT * FROM users WHERE id = ?`;');
+        expect(compiles(result.mutatedCode)).toBe(true);
     });
 
     it('sanitizes user-controlled path segments for path_traversal using names from the target line', () => {
@@ -200,12 +202,233 @@ describe('applyMutation', () => {
         expect(result.mutated).toBe(false);
     });
 
-    it('preserves indentation of the target line', () => {
-        const code = 'function handler() {\n  if (true) {\n    doSomething();\n  }\n}';
+    it('inserts the guard at the first body line of the enclosing handler with its indentation', () => {
+        const code = 'function handler(req, res) {\n  if (true) {\n    doSomething();\n  }\n}';
         const result = applyMutation(code, 'missing_auth', 3);
         expect(result.mutated).toBe(true);
         const mutatedLines = result.mutatedCode.split('\n');
-        const guardLine = mutatedLines[2];
-        expect(guardLine.startsWith('    ')).toBe(true);
+        expect(mutatedLines[0]).toBe('function handler(req, res) {');
+        expect(mutatedLines[1].startsWith('  if (typeof res')).toBe(true);
+        expect(mutatedLines[2]).toBe('  if (true) {');
+        expect(compiles(result.mutatedCode)).toBe(true);
+    });
+});
+
+const FIVE_BUG_FILE = [
+    "const express = require('express');",
+    "const { exec } = require('child_process');",
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const db = require('./db');",
+    '',
+    'const app = express();',
+    "const STRIPE_SECRET_KEY = 'sk_" + "live_" + "FAKEtestFIXTUREnotArealKEY0000';",
+    '',
+    "app.get('/user', (req, res) => {",
+    '    const query = "SELECT * FROM users WHERE id = \'" + req.query.id + "\'";',
+    '    db.query(query, (err, rows) => {',
+    "        if (err) return res.status(500).send('error');",
+    '        res.json(rows);',
+    '    });',
+    '});',
+    '',
+    "app.get('/ping', (req, res) => {",
+    '    exec(`ping -c 1 ${req.query.host}`, (err, stdout) => {',
+    '        res.send(stdout);',
+    '    });',
+    '});',
+    '',
+    "app.get('/file', (req, res) => {",
+    "    const filePath = path.join(__dirname, 'uploads', req.query.name);",
+    "    res.send(fs.readFileSync(filePath, 'utf8'));",
+    '});',
+    '',
+    "app.get('/calc', (req, res) => {",
+    '    const result = eval(req.query.expr);',
+    '    res.send(String(result));',
+    '});',
+    '',
+    "app.get('/charge', (req, res) => {",
+    '    res.json({ key: STRIPE_SECRET_KEY.slice(0, 7) });',
+    '});',
+    '',
+    'module.exports = app;',
+    '',
+    'if (require.main === module) {',
+    '    app.listen(3000);',
+    '}',
+].join('\n');
+
+function tsParses(code: string, fileName: string): boolean {
+    const sf = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true);
+    return ((sf as any).parseDiagnostics as unknown[]).length === 0;
+}
+
+function loadFiveBugApp(code: string, modules: Record<string, unknown> = {}): Record<string, (req: unknown, res: unknown) => unknown> {
+    const handlers: Record<string, (req: unknown, res: unknown) => unknown> = {};
+    const app = { get: (p: string, h: (req: unknown, res: unknown) => unknown) => { handlers[p] = h; }, listen: () => {} };
+    const stubRequire = (m: string) => (m === 'express' ? () => app : (modules[m] ?? {}));
+    const mod = { exports: {} };
+    const factory = vm.runInNewContext(`(function (require, module, exports, __dirname) {\n${code}\n})`, { process: { env: {} }, String });
+    factory(stubRequire, mod, mod.exports, '/srv/app');
+    return handlers;
+}
+
+describe('applyMutation on the real 5-bug file', () => {
+    it('replaces the secret with a string so the /charge handler still runs', () => {
+        const result = applyMutation(FIVE_BUG_FILE, 'hardcoded_secret', 8, 'test-vulnerable.js');
+        expect(result.mutated).toBe(true);
+        expect(result.syntaxCheck).toBe('typescript');
+        expect(result.mutatedCode).not.toContain('sk_live_');
+        expect(result.mutatedCode).toContain("process.env.SECRET_KEY ?? ''");
+        expect(compiles(result.mutatedCode)).toBe(true);
+        const handlers = loadFiveBugApp(result.mutatedCode);
+        let sent: any;
+        expect(() => handlers['/charge']({}, { json: (b: unknown) => { sent = b; } })).not.toThrow();
+        expect(sent).toEqual({ key: '' });
+    });
+
+    it('keeps the path traversal mutation behaviour', () => {
+        const result = applyMutation(FIVE_BUG_FILE, 'path_traversal', 25, 'test-vulnerable.js');
+        expect(result.mutated).toBe(true);
+        expect(result.mutatedCode.split('\n')[24]).toBe(
+            "    const filePath = path.join(__dirname, 'uploads', String(req.query.name).replace(/\\.\\.[\\/\\\\]?/g, '').replace(/^[\\/\\\\]+/, ''));",
+        );
+        let read = '';
+        const handlers = loadFiveBugApp(result.mutatedCode, {
+            path: { join: (...p: string[]) => p.join('/') },
+            fs: { readFileSync: (p: string) => { read = p; return 'x'; } },
+        });
+        handlers['/file']({ query: { name: '../../etc/passwd' } }, { send: () => {} });
+        expect(read).toBe('/srv/app/uploads/etc/passwd');
+    });
+
+    it('puts the access-control guard inside the Express arrow handler', () => {
+        const result = applyMutation(FIVE_BUG_FILE, 'missing_auth', 35, 'test-vulnerable.js');
+        expect(result.mutated).toBe(true);
+        const lines = result.mutatedCode.split('\n');
+        expect(lines[33]).toBe("app.get('/charge', (req, res) => {");
+        expect(lines[34].startsWith("    if (typeof res !== 'undefined'")).toBe(true);
+        const handlers = loadFiveBugApp(result.mutatedCode);
+        const codes: number[] = [];
+        handlers['/charge']({}, { status: (c: number) => { codes.push(c); return { json: () => 'denied' }; }, json: () => 'leaked' });
+        expect(codes).toEqual([403]);
+    });
+
+    it('guards the outer handler when the finding is inside a callback without res', () => {
+        const result = applyMutation(FIVE_BUG_FILE, 'missing_auth', 13, 'test-vulnerable.js');
+        expect(result.mutated).toBe(true);
+        const lines = result.mutatedCode.split('\n');
+        expect(lines[9]).toBe("app.get('/user', (req, res) => {");
+        expect(lines[10].startsWith("    if (typeof res !== 'undefined'")).toBe(true);
+        expect(compiles(result.mutatedCode)).toBe(true);
+    });
+
+    it('refuses an access-control mutation on a top-level statement', () => {
+        const result = applyMutation(FIVE_BUG_FILE, 'broken_access_control', 7, 'test-vulnerable.js');
+        expect(result.mutated).toBe(false);
+        expect(result.mutatedCode).toBe(FIVE_BUG_FILE);
+        expect(result.description).toContain('not inside a function');
+    });
+});
+
+describe('applyMutation access control by function shape', () => {
+    const HTTP_TS = [
+        "import { timingSafeEqual } from 'node:crypto';",
+        '',
+        'export function isLegacyTokenAuthorized(input: {',
+        '  token: string | undefined;',
+        '  expected: string | undefined;',
+        '  allowQueryToken: boolean;',
+        '}): boolean {',
+        '  if (!input.expected) return true;',
+        "  const url = `/x?token=${input.token ?? ''}`;",
+        '  return input.token === input.expected && url.length > 0;',
+        '}',
+        '',
+        'export const other = 1;',
+    ].join('\n');
+
+    it('inserts return false as the first body line of a multi-line TS signature returning boolean', () => {
+        for (const line of [3, 5, 8, 10]) {
+            const result = applyMutation(HTTP_TS, 'broken_access_control', line, 'apps/server/src/http.ts');
+            expect(result.mutated).toBe(true);
+            const lines = result.mutatedCode.split('\n');
+            expect(lines[6]).toBe('}): boolean {');
+            expect(lines[7]).toBe('  return false;');
+            expect(lines[8]).toBe('  if (!input.expected) return true;');
+            expect(tsParses(result.mutatedCode, 'http.ts')).toBe(true);
+        }
+    });
+
+    it('uses return false when the body returns booleans and there is no response parameter', () => {
+        const code = 'function canEdit(user, doc) {\n  if (!user) return false;\n  return true;\n}\nmodule.exports = { canEdit };';
+        const result = applyMutation(code, 'missing_ownership', 3, 'perm.js');
+        expect(result.mutated).toBe(true);
+        const sandbox: any = { module: { exports: {} } };
+        vm.runInNewContext(result.mutatedCode, sandbox);
+        expect(sandbox.module.exports.canEdit({ id: 1 }, {})).toBe(false);
+    });
+
+    it('uses a reply parameter for the deny guard', () => {
+        const code = "fastify.get('/doc/:id', async (request, reply) => {\n  return db.doc(request.params.id);\n});";
+        const result = applyMutation(code, 'missing_auth', 2, 'routes.ts');
+        expect(result.mutated).toBe(true);
+        expect(result.mutatedCode.split('\n')[1]).toContain("typeof reply.status === 'function'");
+        expect(tsParses(result.mutatedCode, 'routes.ts')).toBe(true);
+    });
+
+    it('handles a single-line body by inserting right after the opening brace', () => {
+        const code = 'module.exports = function (req, res) { res.json(secret); };';
+        const result = applyMutation(code, 'missing_auth', 1, 'one.js');
+        expect(result.mutated).toBe(true);
+        expect(result.mutatedCode.startsWith('module.exports = function (req, res) { if (typeof res')).toBe(true);
+        expect(compiles(result.mutatedCode)).toBe(true);
+    });
+
+    it('ignores braces inside strings, comments, regexes and templates', () => {
+        const code = [
+            "app.post('/x', (req, res) => {",
+            "  const a = '{'; // }",
+            '  const b = /\\}/.test(req.body.s);',
+            '  const c = `${req.body.t} }`;',
+            '  res.json({ a, b, c });',
+            '});',
+        ].join('\n');
+        const result = applyMutation(code, 'missing_auth', 5, 'x.js');
+        expect(result.mutated).toBe(true);
+        expect(result.mutatedCode.split('\n')[1].startsWith("  if (typeof res !== 'undefined'")).toBe(true);
+        expect(compiles(result.mutatedCode)).toBe(true);
+    });
+
+    it('does not mutate a function with no response parameter and no boolean result', () => {
+        const code = 'function loadProject(id) {\n  return db.find(id);\n}';
+        const result = applyMutation(code, 'missing_ownership', 2, 'p.js');
+        expect(result.mutated).toBe(false);
+        expect(result.description).toBe('No safe access-control mutation for this function shape');
+    });
+});
+
+describe('applyMutation syntax check', () => {
+    it('skips a mutation that produces code that does not parse', () => {
+        const code = "const re = /'/; const s = x + 'y';\nmodule.exports = s;";
+        const result = applyMutation(code, 'sql_injection', 1, 'q.js');
+        expect(result.mutated).toBe(false);
+        expect(result.mutatedCode).toBe(code);
+        expect(result.description.startsWith('Mutation produced invalid code — skipped')).toBe(true);
+        expect(result.syntaxCheck).toBe('typescript');
+    });
+
+    it('does not reject a mutation because the original already had parse problems', () => {
+        const code = 'const apiKey = "sk-1234567890abcdef";\nconst broken = ;';
+        const result = applyMutation(code, 'secrets_in_source', 1, 'k.ts');
+        expect(result.mutated).toBe(true);
+    });
+
+    it('skips the parser for Python files', () => {
+        const code = 'API_KEY = "sk-1234567890abcdef"';
+        const result = applyMutation(code, 'secrets_in_source', 1, 'app.py');
+        expect(result.mutated).toBe(true);
+        expect(result.syntaxCheck).toBe('none');
     });
 });

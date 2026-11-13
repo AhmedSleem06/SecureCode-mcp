@@ -126,8 +126,8 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
         expect(result.reason).toContain('verdict');
     });
 
-    it('returns INCONCLUSIVE when analyze response has PROVEN+shouldRetry=true', async () => {
-        vi.mocked(runLocalTest).mockResolvedValueOnce({
+    it('coerces analyze response PROVEN+shouldRetry=true to a definitive PROVEN (old API answers)', async () => {
+        vi.mocked(runLocalTest).mockResolvedValue({
             verdict: 'pass', output: `PASS: ok\n${VALID_PROOF_MARKER}`, exitCode: 0,
         });
         const client = makeClient();
@@ -143,9 +143,9 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
             client,
         });
 
-        expect(result.verdict).toBe('INCONCLUSIVE');
-        expect(result.reason).toContain('malformed');
-        expect(result.reason).toContain('PROVEN');
+        expect(result.verdict).toBe('PROVEN');
+        expect(result.reason).not.toContain('malformed');
+        expect(vi.mocked(client.postJson)).toHaveBeenCalledTimes(2);
     });
 
     it('returns INCONCLUSIVE when analyze response has empty reason', async () => {
