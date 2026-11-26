@@ -1267,6 +1267,9 @@ export async function runAgentScan(
                 qualityTracker.recordFinishAttempt();
                 lastFinishAction = action;
                 lastFinishRejectionReasons = [];
+                if (assuranceGrid && Array.isArray((action as any).cellUpdates)) {
+                    assuranceGrid.applyCellUpdates((action as any).cellUpdates, targetDeliveredRanges(), assuranceScope);
+                }
                 const scopedFinish = partitionSegmentFindings(action.findings, segment, target.filePath);
 
                 // Register candidates from findings — each finding becomes a
