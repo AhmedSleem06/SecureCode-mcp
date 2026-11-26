@@ -1428,37 +1428,37 @@ async function scanTarget(
                 progress: (msg) => { if (progress) progress(0, 1, msg); },
             });
             grid.applyAttackOutcome(attackOutcome);
+            const SEV_RANK: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2 };
+            const RANK_SEV: Record<number, string> = { 5: 'critical', 4: 'high', 3: 'medium', 2: 'low' };
+            const normalizeType = (t: string) => t.toLowerCase().replace(/[-\s]+/g, '_');
+            const TYPE_FAMILIES: [string, RegExp][] = [
+                ['secret-config', /secret|credential_exposure|insecure_default|config_default|misconfig|default_config|weak_key|hardcoded/],
+                ['access', /access_control|authori[sz]ation|privilege|mass_assignment|idor|auth_bypass|ownership|permission/],
+                ['authn', /authentication|session|password|token|credential|login|jwt/],
+                ['dos', /denial_of_service|redos|rate_limit|resource_exhaustion|unbounded|backtracking/],
+                ['enumeration', /enumeration|information_disclosure|info_leak|disclosure/],
+            ];
+            const familyOf = (t: string) => {
+                const n = normalizeType(t);
+                return TYPE_FAMILIES.find(([, re]) => re.test(n))?.[0] ?? n;
+            };
             for (const ef of attackOutcome.exploitedFindings ?? []) {
                 const efType = ef.observedType ?? ef.type;
-                const cellRisk = grid.getCell(ef.cellId)?.risk;
-                const efSeverity: string = ef.severity ?? (
-                    cellRisk === 5 ? 'critical' : cellRisk === 4 ? 'high' : cellRisk === 3 ? 'medium' : 'low'
-                );
+                const cellRisk = grid.getCell(ef.cellId)?.risk ?? 3;
+                const riskRank = Math.max(2, Math.min(5, cellRisk));
+                const observedRank = ef.severity ? (SEV_RANK[ef.severity] ?? riskRank) : riskRank;
+                const efSeverity = RANK_SEV[Math.min(observedRank, riskRank)];
                 const efConfidence = ef.confidence ?? 85;
-                const efReason = `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId})`;
+                const efReason = `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId}${efType !== ef.type ? `, observed ${efType}` : ''})`;
 
-                const normalizeType = (t: string) => t.toLowerCase().replace(/[-\s]+/g, '_');
-                const RELATED_TYPES = new Set([
-                    'mass_assignment', 'privilege_escalation', 'broken_access_control',
-                ]);
-                const isRelated = (a: string, b: string) => {
-                    const na = normalizeType(a);
-                    const nb = normalizeType(b);
-                    if (na === nb) return true;
-                    return RELATED_TYPES.has(na) && RELATED_TYPES.has(nb);
-                };
-
-                const existing = provenFindings.find(f =>
-                    Math.abs(f.line - ef.line) <= 3 && isRelated(f.type, efType)
-                );
+                const sameFamily = (f: { line: number; type: string }) =>
+                    Math.abs(f.line - ef.line) <= 3 && familyOf(f.type) === familyOf(efType);
+                const sameSpot = (f: { line: number }) => Math.abs(f.line - ef.line) <= 1;
+                const existing = provenFindings.find(sameFamily) ?? provenFindings.find(sameSpot);
 
                 if (existing) {
                     if (existing.proven !== 'PROVEN') existing.proven = 'PROVEN';
                     existing.provenReason = [existing.provenReason, efReason].filter(Boolean).join('; ');
-                    const SEV_RANK: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2 };
-                    if ((SEV_RANK[efSeverity] ?? 0) > (SEV_RANK[existing.severity] ?? 0)) {
-                        (existing as any).severity = efSeverity;
-                    }
                     if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
                 } else {
                     provenFindings.push({

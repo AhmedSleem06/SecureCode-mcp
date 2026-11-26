@@ -414,7 +414,7 @@ describe('toolAgentScan — exploited-finding mapping', () => {
         const sqlFindings = result.agentFindings.filter((f: any) => f.type === 'sql_injection');
         expect(sqlFindings).toHaveLength(1);
         expect(sqlFindings[0].proven).toBe('PROVEN');
-        expect(sqlFindings[0].severity).toBe('critical');
+        expect(sqlFindings[0].severity).toBe('high');
         expect(sqlFindings[0].provenReason).toContain('Attack test exploited');
 
         vi.restoreAllMocks();
@@ -457,6 +457,48 @@ describe('toolAgentScan — exploited-finding mapping', () => {
         expect(bacFindings).toHaveLength(1);
         expect(bacFindings[0].proven).toBe('PROVEN');
         expect(bacFindings[0].provenReason).toContain('Attack test exploited');
+
+        vi.restoreAllMocks();
+    });
+
+    it.each([
+        ['hardcoded_secret', 7, 'insecure_default_configuration', 7, 'critical'],
+        ['broken_authentication', 105, 'missing_authorization', 106, 'high'],
+    ])('merges %s L%i with attack-test %s L%i and does not raise severity above the cell risk', async (agentType, agentLine, observedType, testLine, observedSeverity) => {
+        const attackMod = await import('../src/assurance/attackTests');
+        vi.spyOn(attackMod, 'runAssuranceAttackTests').mockResolvedValue({
+            scenarioUpdates: [],
+            cellUpdates: [],
+            exploitedFindings: [{
+                cellId: 'c1', scenarioId: 's1', type: 'auth_bypass', line: testLine as number,
+                title: 'attack', why: 'exploited',
+                observedType: observedType as string, severity: observedSeverity as any,
+            }],
+            approval: { granted: true, reason: 'ok' },
+            ran: 1, blocked: 0, exploited: 1, untestable: 0, skipped: 0, costUsd: 0,
+        });
+        vi.mocked(runAgentScan).mockResolvedValue({
+            status: 'completed',
+            findings: [makeFinding({ type: agentType as string, line: agentLine as number, severity: 'medium' })],
+            transcript: [], investigationNotes: [], coverageGaps: [],
+            stepsUsed: 5, stepsGranted: 40, extensionsGranted: 0, costSpentUsd: 0.05, summary: 'done',
+            assurance: makeAssuranceCells(),
+        } as any);
+        vi.mocked(runVerifyLoop).mockResolvedValue({
+            verdict: 'INCONCLUSIVE', reason: 'could not reproduce', roundsUsed: 2,
+            testScript: '', testOutput: '', subVerdict: 'analyzed',
+        } as any);
+        const postJson = vi.fn();
+        vi.mocked(ApiClient).mockImplementation(() => ({ postJson }) as any);
+
+        const ctx: any = { workspaceRoot, apiUrl: 'https://api.usesecurecode.tech', apiToken: 'test-token' };
+        const result: any = await toolAgentScan(ctx, { filePath: 'routes.ts', language: 'typescript' });
+
+        expect(result.agentFindings).toHaveLength(1);
+        expect(result.agentFindings[0].type).toBe(agentType);
+        expect(result.agentFindings[0].severity).toBe('medium');
+        expect(result.agentFindings[0].proven).toBe('PROVEN');
+        expect(result.agentFindings[0].provenReason).toContain(`observed ${observedType}`);
 
         vi.restoreAllMocks();
     });
