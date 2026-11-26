@@ -45,6 +45,9 @@ import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishL
 import { redactText } from './report';
 import { QualityMetricsTracker } from './qualityMetrics';
 import { extractFunctionBoundaries } from './agentScanExecutor';
+import { GridState, type LineRange as GridLineRange, type AssuranceResult, type AttackTestSummary } from '../assurance/gridState';
+import { buildFileInventory } from '../assurance/fileInventory';
+import type { FileInventory } from '../assurance/types';
 import {
     validateStartResponse,
     validateStepResponse,
@@ -248,6 +251,36 @@ export async function runAgentScan(
         const investigationState = new InvestigationState(harness.fullReadWindow);
         if (segment) {
             investigationState.setScope(target.filePath, { start: segment.startLine, end: segment.endLine });
+        }
+
+        const isAssurance = harness.scanMode === 'assurance';
+        let assuranceGrid: GridState | null = null;
+        let assuranceScope: Set<string> | undefined;
+        let assuranceRedteamDone = false;
+        let assuranceRedteamRounds = 0;
+        const assuranceWarnings: string[] = [];
+
+        if (isAssurance) {
+            try {
+                const inventory = await buildFileInventory(ctx.workspaceRoot, target.filePath, target.fileContent);
+                const planBody = {
+                    runId: startResp.runId,
+                    target: { filePath: target.filePath, language: target.language, fileContent: target.fileContent, ...(segment ? { segment: { startLine: segment.startLine, endLine: segment.endLine } } : {}) },
+                    inventory,
+                    architectureContext: target.architectureContext,
+                };
+                const planResp = await client.postJson<{ cells: unknown[]; scenarios: unknown[]; costUsd?: number; warnings?: string[] }>('/agent/scan/assurance/plan', planBody, options.signal);
+                if (typeof planResp.costUsd === 'number') costSpentUsd += planResp.costUsd;
+                assuranceGrid = new GridState(planResp.cells ?? [], planResp.scenarios ?? [], inventory);
+                for (const w of planResp.warnings ?? []) assuranceGrid.addWarning(String(w));
+                if (segment) assuranceScope = assuranceGrid.scopeForRange({ startLine: segment.startLine, endLine: segment.endLine });
+                console.log(`[Agent Scan Loop] Assurance plan: ${assuranceGrid.size} cells, ${assuranceGrid.scenarios.length} scenarios`);
+            } catch (planErr: any) {
+                const msg = planErr?.message || String(planErr);
+                const warning = `Assurance plan failed: ${msg}`;
+                assuranceWarnings.push(warning);
+                console.warn(`[Agent Scan Loop] ${warning} — continuing in standard behaviour.`);
+            }
         }
         // Pre-compute function boundaries for chunk alignment, profile
         // selection (types-only detection) and the split-file function map.
@@ -870,6 +903,7 @@ export async function runAgentScan(
                 actionConstraint,
                 harness,
                 ...(evidenceMode && transcript.length === 0 ? { suggestedChecks: suggestedChecks(profile) } : {}),
+                ...(assuranceGrid ? { assurance: assuranceGrid.stepView(assuranceScope) } : {}),
             };
 
             // Spiral-capture instrument: when a blocked-read streak forms,
@@ -1349,6 +1383,13 @@ export async function runAgentScan(
                             findings: scopedFinish.inRange,
                         },
                     } : {}),
+                    ...(assuranceGrid ? {
+                        assuranceGate: {
+                            problems: assuranceGrid.gateProblems(assuranceScope),
+                            isFullyClosed: assuranceGrid.isFullyClosed(assuranceScope),
+                            redteamDone: assuranceRedteamDone,
+                        },
+                    } : {}),
                 });
 
                 // Finish-loop escape: when the identical gate reasons have
@@ -1375,6 +1416,47 @@ export async function runAgentScan(
                 }
 
                 if (gateResult.accepted) {
+                    if (assuranceGrid && assuranceGrid.isFullyClosed(assuranceScope) && !assuranceRedteamDone && assuranceRedteamRounds < 2) {
+                        const round = (assuranceRedteamRounds + 1) as 1 | 2;
+                        try {
+                            const readRanges = targetDeliveredRanges().map(r => ({ startLine: r.start, endLine: r.end }));
+                            const rtBody = {
+                                runId: startResp.runId,
+                                target: { filePath: target.filePath, language: target.language, fileContent: target.fileContent },
+                                inventory: assuranceGrid.inventory ?? {},
+                                cells: assuranceGrid.cells,
+                                scenarios: assuranceGrid.scenarios,
+                                notes: (action.investigationNotes ?? []).map(n => ({ title: n.title, line: n.line, detail: n.detail })),
+                                findings: (action.findings ?? []).map(f => ({ type: f.type, line: f.line, title: f.why?.slice(0, 120) })),
+                                readRanges,
+                                round,
+                            };
+                            const rtResp = await client.postJson<{ newCells?: unknown[]; newScenarios?: unknown[]; nothingMissed?: boolean; justification?: string; costUsd?: number }>('/agent/scan/assurance/redteam', rtBody, options.signal);
+                            if (typeof rtResp.costUsd === 'number') costSpentUsd += rtResp.costUsd;
+                            assuranceRedteamRounds = round;
+                            assuranceGrid.redteamRounds = round;
+                            const addedCells = assuranceGrid.addCells(rtResp.newCells ?? []);
+                            assuranceGrid.addScenarios(rtResp.newScenarios ?? []);
+                            if (addedCells.length > 0 && round < 2) {
+                                console.log(`[Agent Scan Loop] Red team round ${round}: added ${addedCells.length} cell(s) — reopening investigation.`);
+                                const rtNote = `RED TEAM ROUND ${round}: ${addedCells.length} new cell(s) added. ${rtResp.justification ?? 'Continue investigating the new cells.'}`;
+                                transcript.push({
+                                    action: { type: 'system_event', eventType: 'finish_gate', message: rtNote } as any,
+                                    observation: rtNote,
+                                });
+                                continue;
+                            }
+                            assuranceRedteamDone = true;
+                            console.log(`[Agent Scan Loop] Red team round ${round}: ${addedCells.length > 0 ? `${addedCells.length} new cell(s) (max rounds reached)` : 'nothing missed'}. ${rtResp.justification ?? ''}`);
+                        } catch (rtErr: any) {
+                            const msg = rtErr?.message || String(rtErr);
+                            assuranceRedteamDone = true;
+                            assuranceGrid.addWarning(`Red team round ${round} failed: ${msg}`);
+                            console.warn(`[Agent Scan Loop] Red team round ${round} failed: ${msg} — continuing without it.`);
+                        }
+                    } else if (assuranceGrid) {
+                        assuranceRedteamDone = true;
+                    }
                     trace.logRunCompleted('completed');
                     if (gateResult.mode === 'forced-incomplete') {
                         terminateScan(scanState, 'forced_incomplete', 'Budget exhausted with incomplete investigation');
@@ -1431,6 +1513,7 @@ export async function runAgentScan(
                         terminationReason: gateResult.mode === 'forced-incomplete' ? 'forced_incomplete' : 'agent_finish',
                         summary: action.summary,
                         qualityMetrics: qualityTracker.getMetrics(),
+                        ...(assuranceGrid ? { assurance: assuranceGrid.toResult(assuranceScope) } : {}),
                     });
                 }
 
@@ -1826,6 +1909,10 @@ export async function runAgentScan(
             // We don't need a separate system_event for blocked (unlike
             // critique, the blocked case is tied to an action the agent took).
             transcript.push({ action, observation });
+
+            if (assuranceGrid && Array.isArray((action as any).cellUpdates)) {
+                assuranceGrid.applyCellUpdates((action as any).cellUpdates, targetDeliveredRanges(), assuranceScope);
+            }
 
             // Link evidence to candidates: when the agent runs a verification
             // action (trace_flow, check_guard, check_policy, trace_flow_cross_file)

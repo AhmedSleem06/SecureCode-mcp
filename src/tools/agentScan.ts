@@ -82,6 +82,8 @@ import {
     type FindingReviewItem,
 } from '../audit/findingReviewQueue';
 import type { SandboxProveResponse, FixResponse, VerifyProbePlanResponse } from '../api/types';
+import { runAssuranceAttackTests, type AssuranceAttackTestOutcome } from '../assurance/attackTests';
+import { GridState, type AssuranceResult } from '../assurance/gridState';
 
 interface ProvenFinding extends AgentScanFinding {
     proven: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'NOT_REPRODUCIBLE' | 'SKIPPED';
@@ -1398,6 +1400,47 @@ async function scanTarget(
         // best-effort — memory persistence failure must not block results
     }
 
+    let assuranceResult: AssuranceResult | undefined;
+    const assuranceData = (agentResult as any).assurance as AssuranceResult | undefined;
+    if (assuranceData && assuranceData.cells && assuranceData.cells.length > 0) {
+        const grid = new GridState(assuranceData.cells, assuranceData.scenarios);
+        grid.redteamRounds = assuranceData.redteamRounds ?? 0;
+        for (const w of assuranceData.warnings ?? []) grid.addWarning(String(w));
+
+        try {
+            if (progress) progress(0, 1, 'Running assurance attack tests...');
+            const attackOutcome = await runAssuranceAttackTests({
+                ctx,
+                runId: scanRunId || '',
+                target: { filePath: filePath || 'inline-code', language, fileContent: code },
+                cells: grid.cells,
+                scenarios: grid.scenarios,
+                signal: abortSignal,
+                progress: (msg) => { if (progress) progress(0, 1, msg); },
+            });
+            grid.applyAttackOutcome(attackOutcome);
+            for (const ef of attackOutcome.exploitedFindings ?? []) {
+                provenFindings.push({
+                    line: ef.line,
+                    type: ef.type,
+                    severity: 'high' as any,
+                    confidence: 85,
+                    evidence: ef.title,
+                    why: ef.why,
+                    proven: 'PROVEN' as any,
+                    provenReason: `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId})`,
+                    ...(ef.artifactPath ? { proofArtifact: ef.artifactPath } : {}),
+                } as any);
+            }
+        } catch (atkErr: any) {
+            grid.addWarning(`Attack tests failed: ${atkErr?.message || atkErr}`);
+            console.warn(`[Agent Scan] Assurance attack tests failed: ${atkErr?.message || atkErr}`);
+        }
+
+        grid.persist(ctx.workspaceRoot, scanRunId || `scan-${Date.now()}`);
+        assuranceResult = grid.toResult();
+    }
+
     const settlement = await runCloser.close();
     const baseCredits = agentResult.baseCredits ?? AGENT_SCAN_DEFAULTS.creditsPerRun;
     const creditsUsed = settlement?.creditsUsed ?? agentResult.creditsUsed;
@@ -1457,6 +1500,7 @@ async function scanTarget(
                 pendingCount: provenFindings.filter(f => f.reviewStatus === 'pending').length,
             },
             ...(part ? { segment: part.segment } : {}),
+            ...(assuranceResult ? { assurance: assuranceResult } : {}),
         },
     };
 }
@@ -1752,6 +1796,7 @@ function mergeSegmentResults(
     const transcript: any[] = [];
     const verifyHints: string[] = [];
     const reviewAdded: string[] = [];
+    let mergedAssurance: AssuranceResult | undefined;
     for (const p of ran) {
         const r = p.result!;
         const tag = { index: p.segment.index, total: info.total, startLine: p.segment.startLine, endLine: p.segment.endLine };
@@ -1761,6 +1806,31 @@ function mergeSegmentResults(
         transcript.push(...(r.transcript ?? []));
         if (r.verifyHint && !verifyHints.includes(r.verifyHint)) verifyHints.push(r.verifyHint);
         reviewAdded.push(...(r.reviewQueue?.added ?? []));
+        if (r.assurance) {
+            const prefix = `p${p.segment.index}.`;
+            const cells = (r.assurance.cells ?? []).map((c: any) => ({ ...c, id: prefix + c.id }));
+            const scenarios = (r.assurance.scenarios ?? []).map((s: any) => ({ ...s, id: prefix + s.id, cellId: prefix + s.cellId }));
+            if (!mergedAssurance) {
+                mergedAssurance = { ...r.assurance, cells, scenarios, warnings: [...(r.assurance.warnings ?? [])] };
+            } else {
+                mergedAssurance.cells.push(...cells);
+                mergedAssurance.scenarios.push(...scenarios);
+                mergedAssurance.redteamRounds = Math.max(mergedAssurance.redteamRounds, r.assurance.redteamRounds ?? 0);
+                const a = mergedAssurance.attackTests;
+                const b = r.assurance.attackTests;
+                if (b) {
+                    mergedAssurance.attackTests = !a ? { ...b } : {
+                        approval: { granted: a.approval.granted || b.approval.granted, reason: a.approval.granted ? a.approval.reason : b.approval.reason },
+                        ran: a.ran + b.ran, blocked: a.blocked + b.blocked, exploited: a.exploited + b.exploited,
+                        untestable: a.untestable + b.untestable, skipped: a.skipped + b.skipped, costUsd: a.costUsd + b.costUsd,
+                    };
+                }
+                for (const w of r.assurance.warnings ?? []) {
+                    if (!mergedAssurance.warnings.includes(w)) mergedAssurance.warnings.push(w);
+                }
+            }
+            mergedAssurance!.counts = new GridState(mergedAssurance!.cells, mergedAssurance!.scenarios).counts();
+        }
     }
     for (const p of notStarted) {
         coverageGaps.push({
@@ -1906,6 +1976,7 @@ function mergeSegmentResults(
         cached: false,
         segmentGroupId: info.groupId,
         segments: segmentsField,
+        ...(mergedAssurance ? { assurance: mergedAssurance } : {}),
     };
 }
 

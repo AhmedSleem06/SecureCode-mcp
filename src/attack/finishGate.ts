@@ -18,9 +18,10 @@
  * coverage gaps for every unresolved item.
  */
 
-import type { AgentLead, AgentScanAction, AgentScanFinding, AgentScanFinishAction } from './agentScanProtocol';
+import type { AgentLead, AgentScanAction, AgentScanFinding, AgentScanFinishAction, GridCell } from './agentScanProtocol';
 import { AGENT_SCAN_DEFAULTS } from './agentScanProtocol';
 import type { ScanRunState } from './scanState';
+import type { GridGateProblems } from '../assurance/gridState';
 import type { EvidenceLedger } from './evidenceLedger';
 import type { WorkItemQueue } from './workItem';
 import type { HandlerInventory } from '../project-map/handlerInventory';
@@ -179,6 +180,13 @@ export interface FinishGateInput {
     landing?: boolean;
     gateMode?: 'checklist' | 'evidence';
     evidenceGate?: EvidenceGateInput;
+    assuranceGate?: AssuranceGateInput;
+}
+
+export interface AssuranceGateInput {
+    problems: GridGateProblems;
+    isFullyClosed: boolean;
+    redteamDone: boolean;
 }
 
 export const INVESTIGATION_FLOOR_FRACTION = 0.5;
@@ -513,6 +521,27 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
 
     if (evidenceGate) {
         evaluateEvidenceChecks(input, evidenceGate, hasBudget && hasWallClock, reasons, coverageGaps);
+    }
+
+    const assuranceGate = input.assuranceGate;
+    if (assuranceGate) {
+        if (!assuranceGate.isFullyClosed) {
+            for (const cell of assuranceGate.problems.open.slice(0, 10)) {
+                reasons.push({
+                    code: 'assurance-open-cell',
+                    description: `Threat-grid cell still open: ${cell.id} [risk ${cell.risk}] ${cell.attackType}: ${cell.title}`,
+                });
+            }
+            if (assuranceGate.problems.open.length > 10) {
+                reasons.push({ code: 'assurance-open-cell', description: `…and ${assuranceGate.problems.open.length - 10} more open cell(s)` });
+            }
+        }
+        for (const cell of assuranceGate.problems.weak.slice(0, 5)) {
+            reasons.push({
+                code: 'assurance-weak-cell',
+                description: `Risk ${cell.risk} safe cell ${cell.id} needs traced or tested closure (currently ${cell.closure ?? 'none'}): ${cell.title}`,
+            });
+        }
     }
 
     // Decision:
