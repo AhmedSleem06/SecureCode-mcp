@@ -11,6 +11,7 @@ import {
 import { validateVerifyGenerateResponse, validateVerifyAnalyzeResponse } from './protocolValidator';
 import { parseProofMarker, type ProofRunResult } from './proofTypes';
 import { evaluateProofGate, buildProofEvidence } from './proofGate';
+import { testValidity } from './testValidity';
 import { runMutationTest } from './mutationTest';
 import { detectSandbox } from '../utils/verificationSandbox';
 import { isAgentScanBudgetExhausted, VERIFY_BUDGET_EXHAUSTED_REASON } from './agentScanCredits';
@@ -394,6 +395,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         const analyzeResp = analyzeValidation.value;
 
         const proofMarker = parseProofMarker(lastTestOutput);
+        const validity = testValidity(lastTestOutput, { kind: 'proof' });
         const gateResult = evaluateProofGate(proofMarker, {
             sandboxBackend: testResult.backend || 'unknown',
             targetFile: filePath || '',
@@ -403,6 +405,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             llmVerdict: analyzeResp.verdict,
             sourceMode: proofMarker.sourceMode,
             minimumRepeatRuns: 1,
+            testValid: validity.valid,
         });
 
         const proofEvidence = proofMarker.found
@@ -605,6 +608,13 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             });
         }
         if (analyzeResp.verdict === 'UNPROVEN') {
+            if (!validity.valid) {
+                previousErrors.push(`Round ${round}: test was invalid — ${validity.reason}. Rewrite the test to avoid this.`);
+                if (round >= maxRounds) {
+                    return finish({ verdict: 'INCONCLUSIVE', reason: `Test invalid: ${validity.reason}`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed', proofEvidence, proofGateResult: gateResult });
+                }
+                continue;
+            }
             return finish({ verdict: 'UNPROVEN', reason: analyzeResp.reason, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', proofEvidence, proofGateResult: gateResult });
         }
 

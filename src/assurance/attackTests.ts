@@ -11,6 +11,7 @@ import { validateVerifyAnalyzeResponse, validateVerifyGenerateResponse } from '.
 import { isAgentScanBudgetExhausted, VERIFY_BUDGET_EXHAUSTED_REASON } from '../attack/agentScanCredits';
 import { saveProofArtifact, type ProofArtifactRound } from '../attack/proofArtifacts';
 import { getRelatedFilesForFile } from '../project-map/mapContext';
+import { testValidity } from '../attack/testValidity';
 
 export interface AssuranceAttackTestInput {
     ctx: ServerContext;
@@ -163,6 +164,10 @@ export function decideScenarioVerdict(
         return { verdict: 'UNTESTABLE', reason: `test did not reach the real target code (${analyze.reason})`, retryable: true };
     }
     if (marker.controlOk === false) return { verdict: 'UNTESTABLE', reason: `control step failed (${analyze.reason})`, retryable: true };
+    const harnessValidity = apiVerdict === 'BLOCKED' ? testValidity(run.output, { kind: 'scenario', controlOk: marker.controlOk }) : { valid: true };
+    if (!harnessValidity.valid) {
+        return { verdict: 'UNTESTABLE', reason: `${harnessValidity.reason} (${analyze.reason})`, retryable: true };
+    }
     if (marker.verdict !== apiVerdict) {
         return { verdict: 'UNTESTABLE', reason: `test result ${marker.verdict} disagrees with analysis ${apiVerdict} (${analyze.reason})`, retryable: true };
     }

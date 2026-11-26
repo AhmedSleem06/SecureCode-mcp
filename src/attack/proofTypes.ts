@@ -47,6 +47,8 @@ export interface ParsedProofMarker {
     assertion?: 'deterministic' | 'llm-only';
     mockedVulnerablePath?: boolean;
     sourceMode?: ProofSourceMode;
+    setup?: 'pass' | 'fail';
+    setupNote?: string;
 }
 
 /**
@@ -88,8 +90,52 @@ export function parseProofMarker(output: string): ParsedProofMarker {
             assertion: parsed.assertion,
             mockedVulnerablePath: parsed.mockedVulnerablePath,
             sourceMode: parsed.sourceMode,
+            ...(parsed.setup === 'pass' || parsed.setup === 'fail' ? { setup: parsed.setup } : {}),
+            ...(typeof parsed.setupNote === 'string' ? { setupNote: parsed.setupNote } : {}),
         };
     } catch {
         return { found: false };
+    }
+}
+
+export const HARNESS_LOG_START = 'SECURECODE_HARNESS_LOG:';
+export const HARNESS_LOG_END = ':SECURECODE_HARNESS_END';
+
+export interface HarnessCall {
+    method: string;
+    path: string;
+    matched: boolean;
+    sent: boolean;
+    status: number | undefined;
+    timedOut: boolean;
+}
+
+export interface HarnessLog {
+    found: boolean;
+    calls: HarnessCall[];
+}
+
+export function parseHarnessLog(output: string): HarnessLog {
+    const startIdx = output.indexOf(HARNESS_LOG_START);
+    if (startIdx === -1) return { found: false, calls: [] };
+    const endIdx = output.indexOf(HARNESS_LOG_END, startIdx);
+    if (endIdx === -1) return { found: false, calls: [] };
+    const jsonStr = output.slice(startIdx + HARNESS_LOG_START.length, endIdx).trim();
+    try {
+        const parsed = JSON.parse(jsonStr);
+        if (!Array.isArray(parsed.calls)) return { found: true, calls: [] };
+        return {
+            found: true,
+            calls: parsed.calls.map((c: any) => ({
+                method: String(c.method ?? ''),
+                path: String(c.path ?? ''),
+                matched: c.matched === true,
+                sent: c.sent === true,
+                status: typeof c.status === 'number' ? c.status : undefined,
+                timedOut: c.timedOut === true,
+            })),
+        };
+    } catch {
+        return { found: false, calls: [] };
     }
 }

@@ -18,6 +18,7 @@ export function evaluateProofGate(
         llmVerdict: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE';
         sourceMode?: ProofSourceMode;
         minimumRepeatRuns?: number;
+        testValid?: boolean;
     },
 ): ProofGateResult {
     const failedGates: string[] = [];
@@ -96,7 +97,12 @@ export function evaluateProofGate(
     let downgradedVerdict: ProofGateResult['downgradedVerdict'];
     if (eligibleForProven) {
         downgradedVerdict = 'PROVEN';
-    } else if (failedGates.includes('exploit-failed') || failedGates.includes('impact-not-observed')) {
+    } else if (context.testValid === false) {
+        downgradedVerdict = 'INCONCLUSIVE';
+    } else if (
+        (failedGates.includes('exploit-failed') || failedGates.includes('impact-not-observed'))
+        && !failedGates.includes('baseline-failed')
+    ) {
         downgradedVerdict = 'UNPROVEN';
     } else if (failedGates.includes('synthetic-source') || failedGates.includes('extracted-logic-source')) {
         downgradedVerdict = 'INCONCLUSIVE';

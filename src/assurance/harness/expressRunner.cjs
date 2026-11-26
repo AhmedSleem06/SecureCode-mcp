@@ -8,6 +8,9 @@ var _loaded = false;
 var _appStack = [];
 var _routeIndex = [];
 var _originalLoad = Module._load;
+var _callLog = [];
+var _callLogCap = 50;
+var _harnessUsed = false;
 
 function pathToRegex(pattern) {
   var paramNames = [];
@@ -449,9 +452,26 @@ function load(targetPath) {
   }
 }
 
+function routeMatches(method, reqPath) {
+  var upper = method.toUpperCase();
+  for (var i = 0; i < _routeIndex.length; i++) {
+    var entry = _routeIndex[i];
+    if (entry.method !== 'ALL' && entry.method !== upper) continue;
+    if (matchPath(entry.path, reqPath)) return true;
+  }
+  return false;
+}
+
+function recordCall(entry) {
+  _harnessUsed = true;
+  if (_callLog.length < _callLogCap) _callLog.push(entry);
+}
+
 function invoke(method, routePath, reqOverrides) {
   var upperMethod = method.toUpperCase();
   reqOverrides = reqOverrides || {};
+
+  var matched = routeMatches(upperMethod, reqOverrides.path || routePath);
 
   var req = {
     method: upperMethod,
@@ -492,14 +512,17 @@ function invoke(method, routePath, reqOverrides) {
     var timer = setTimeout(function () {
       if (settled) return;
       settled = true;
-      resolve({
+      var result = {
         sent: false,
         status: res._status,
         body: res._body,
         headers: res._headers,
         error: 'timeout: handler did not respond within ' + TIMEOUT_MS + 'ms',
-        timedOut: true
-      });
+        timedOut: true,
+        matched: matched
+      };
+      recordCall({ method: upperMethod, path: reqOverrides.path || routePath, matched: matched, sent: false, status: res._status, timedOut: true });
+      resolve(result);
     }, TIMEOUT_MS);
 
     var origSend = res.send;
@@ -512,14 +535,17 @@ function invoke(method, routePath, reqOverrides) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({
+      var result = {
         sent: res._sent,
         status: res._status,
         body: res._body,
         headers: res._headers,
         error: res._error,
-        timedOut: false
-      });
+        timedOut: false,
+        matched: matched
+      };
+      recordCall({ method: upperMethod, path: reqOverrides.path || routePath, matched: matched, sent: res._sent, status: res._status, timedOut: false });
+      resolve(result);
     }
 
     res.send = function () { origSend.apply(res, arguments); finish(); return res; };
@@ -554,7 +580,53 @@ function routes() {
   });
 }
 
+function jwtIdentities(map) {
+  if (_loaded) throw new Error('sc.jwtIdentities() must be called before sc.load()');
+  var identities = {};
+  for (var key in map) {
+    identities[key] = JSON.parse(JSON.stringify(map[key]));
+  }
+  var JwtError = function (msg) {
+    var e = new Error(msg);
+    e.name = 'JsonWebTokenError';
+    return e;
+  };
+  mock('jsonwebtoken', {
+    verify: function (token, secretOrKey, optionsOrCb, cb) {
+      var callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+      var raw = token;
+      if (typeof raw === 'string' && raw.startsWith('Bearer ')) raw = raw.slice(7);
+      if (identities.hasOwnProperty(raw)) {
+        var claims = JSON.parse(JSON.stringify(identities[raw]));
+        if (typeof callback === 'function') { callback(null, claims); return; }
+        return claims;
+      }
+      var err = JwtError('invalid token');
+      if (typeof callback === 'function') { callback(err); return; }
+      throw err;
+    },
+    decode: function (token) {
+      var raw = token;
+      if (typeof raw === 'string' && raw.startsWith('Bearer ')) raw = raw.slice(7);
+      if (identities.hasOwnProperty(raw)) return JSON.parse(JSON.stringify(identities[raw]));
+      return null;
+    },
+    sign: function (payload) {
+      return 'signed-' + (payload && payload.sub ? payload.sub : 'token');
+    }
+  });
+}
+
+process.on('exit', function () {
+  if (!_harnessUsed) return;
+  try {
+    var data = JSON.stringify({ calls: _callLog });
+    require('fs').writeSync(1, '\nSECURECODE_HARNESS_LOG:' + data + ':SECURECODE_HARNESS_END\n');
+  } catch (e) {}
+});
+
 exports.mock = mock;
 exports.load = load;
 exports.invoke = invoke;
 exports.routes = routes;
+exports.jwtIdentities = jwtIdentities;

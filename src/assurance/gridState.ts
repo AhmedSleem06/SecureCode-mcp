@@ -5,6 +5,7 @@ import {
     GRID_CELL_CLOSURES,
     GRID_CELL_SOURCES,
     GRID_CELL_STATUSES,
+    SCENARIO_OPTIONAL_FIELDS,
     SCENARIO_TEST_STATUSES,
     type AssuranceCounts,
     type AssuranceStepView,
@@ -117,7 +118,7 @@ function normalizeScenario(raw: unknown): Scenario | null {
     const s = raw as Record<string, any>;
     if (typeof s.id !== 'string' || !s.id || typeof s.cellId !== 'string' || !s.cellId) return null;
     const list = (v: unknown) => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-    return {
+    const base: Scenario = {
         id: s.id,
         cellId: s.cellId,
         actor: typeof s.actor === 'string' ? s.actor : '',
@@ -126,9 +127,18 @@ function normalizeScenario(raw: unknown): Scenario | null {
         payloads: list(s.payloads),
         expectSecure: typeof s.expectSecure === 'string' ? s.expectSecure : '',
         risk: RISKS.has(s.risk) ? s.risk : 3,
-        ...(TESTS.has(s.test) ? { test: s.test } : {}),
-        ...(typeof s.testNote === 'string' && s.testNote ? { testNote: redact(s.testNote) } : {}),
     };
+    for (const field of SCENARIO_OPTIONAL_FIELDS) {
+        const v = s[field];
+        if (field === 'classification') {
+            if (v === 'weakness' || v === 'hardening') (base as any)[field] = v;
+        } else if (field === 'test') {
+            if (TESTS.has(v)) (base as any)[field] = v;
+        } else if (field === 'testNote') {
+            if (typeof v === 'string' && v) (base as any)[field] = redact(v);
+        }
+    }
+    return base;
 }
 
 function safeRunId(runId: string): string {

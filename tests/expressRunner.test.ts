@@ -38,6 +38,17 @@ function runInFreshProcess(scriptBody: string, fixtureFiles?: Record<string, str
   }
 }
 
+function parseJsonLine(stdout: string): any {
+  const lines = stdout.trim().split('\n');
+  for (const line of lines) {
+    const t = line.trim();
+    if (t.startsWith('{') || t.startsWith('[')) {
+      try { return JSON.parse(t); } catch {}
+    }
+  }
+  throw new Error('No JSON line found in stdout: ' + stdout.slice(0, 200));
+}
+
 describe('expressRunner.cjs', () => {
   describe('single handler', () => {
     it('invokes a sync GET handler and returns the response', () => {
@@ -63,7 +74,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(true);
       expect(out.status).toBe(200);
       expect(out.body).toEqual({ greeting: 'Hello world' });
@@ -93,7 +104,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(false);
     });
   });
@@ -138,7 +149,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(true);
       expect(out.status).toBe(200);
       expect(out.body).toEqual({ saved: true, userId: 1, value: 42 });
@@ -180,7 +191,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(true);
       expect(out.status).toBe(401);
       expect(out.body).toEqual({ error: 'unauthorized' });
@@ -216,7 +227,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(true);
       expect(out.status).toBe(500);
       expect(out.body).toEqual({ error: 'kaboom' });
@@ -246,7 +257,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(true);
       expect(out.status).toBe(500);
       expect(out.error).toBe('kaboom');
@@ -277,7 +288,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(true);
       expect(out.status).toBe(500);
       expect(out.error).toBe('async boom');
@@ -328,7 +339,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.status).toBe(200);
       expect(out.body).toEqual({ user: 'user1' });
       expect(out.calls).toHaveLength(1);
@@ -356,7 +367,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const routes = JSON.parse(result.stdout.trim());
+      const routes = parseJsonLine(result.stdout);
       expect(routes).toContain('GET /a');
       expect(routes).toContain('POST /b');
       expect(routes).toContain('DELETE /c/:id');
@@ -386,7 +397,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.status).toBe(200);
       expect(out.body).toEqual({ id: '42' });
     });
@@ -415,7 +426,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(true);
       expect(out.status).toBe(204);
     });
@@ -450,7 +461,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.status).toBe(200);
       expect(out.body.order).toEqual(['mw1', 'mw2', 'mw3']);
     });
@@ -508,7 +519,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(true);
       expect(out.status).toBe(200);
       expect(out.body.success).toBe(true);
@@ -539,7 +550,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(true);
       expect(out.status).toBe(301);
       expect(out.headers.location).toBe('/new');
@@ -567,7 +578,7 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.sent).toBe(false);
     });
   });
@@ -606,9 +617,317 @@ describe('expressRunner.cjs', () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const out = JSON.parse(result.stdout.trim());
+      const out = parseJsonLine(result.stdout);
       expect(out.status).toBe(200);
       expect(out.body).toEqual({ authed: true, role: 'admin' });
+    });
+  });
+
+  describe('matched field', () => {
+    it('returns matched:true when a registered route matches', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.load('./app.cjs');
+
+        (async () => {
+          const res = await sc.invoke('GET', '/hello');
+          console.log(JSON.stringify({ matched: res.matched, sent: res.sent, status: res.status }));
+        })();
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const app = express();
+          app.get('/hello', (req, res) => { res.json({ ok: true }); });
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      const out = parseJsonLine(result.stdout);
+      expect(out.matched).toBe(true);
+      expect(out.sent).toBe(true);
+    });
+
+    it('returns matched:false when no registered route matches', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.load('./app.cjs');
+
+        (async () => {
+          const res = await sc.invoke('POST', '/wallet/create');
+          console.log(JSON.stringify({ matched: res.matched, sent: res.sent, status: res.status }));
+        })();
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const app = express();
+          app.get('/hello', (req, res) => { res.json({ ok: true }); });
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      const out = parseJsonLine(result.stdout);
+      expect(out.matched).toBe(false);
+      expect(out.sent).toBe(false);
+    });
+
+    it('matched:true even when middleware sends a response before the route', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.load('./app.cjs');
+
+        (async () => {
+          const res = await sc.invoke('GET', '/hello');
+          console.log(JSON.stringify({ matched: res.matched, sent: res.sent, status: res.status }));
+        })();
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const app = express();
+          app.use((req, res, next) => { res.status(401).json({ error: 'no auth' }); });
+          app.get('/hello', (req, res) => { res.json({ ok: true }); });
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      const out = parseJsonLine(result.stdout);
+      expect(out.matched).toBe(true);
+      expect(out.status).toBe(401);
+    });
+  });
+
+  describe('harness log at process exit', () => {
+    it('prints SECURECODE_HARNESS_LOG with correct calls at exit', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.load('./app.cjs');
+
+        (async () => {
+          await sc.invoke('GET', '/hello');
+          await sc.invoke('POST', '/nonexistent');
+        })();
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const app = express();
+          app.get('/hello', (req, res) => { res.json({ ok: true }); });
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      const logMatch = result.stdout.match(/SECURECODE_HARNESS_LOG:(\{.*\}):SECURECODE_HARNESS_END/);
+      expect(logMatch).toBeTruthy();
+      const log = JSON.parse(logMatch[1]);
+      expect(log.calls).toHaveLength(2);
+      expect(log.calls[0]).toMatchObject({ method: 'GET', path: '/hello', matched: true, sent: true, status: 200, timedOut: false });
+      expect(log.calls[1]).toMatchObject({ method: 'POST', path: '/nonexistent', matched: false, sent: false, timedOut: false });
+    });
+
+    it('does not print harness log when helper was not used', () => {
+      const result = runInFreshProcess(`
+        console.log('hello');
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain('SECURECODE_HARNESS_LOG');
+    });
+  });
+
+  describe('sc.jwtIdentities()', () => {
+    it('known token returns claims, unknown token throws JsonWebTokenError', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.jwtIdentities({
+          alice: { sub: 'alice', role: 'admin' },
+          bob: { sub: 'bob', role: 'user' }
+        });
+
+        sc.load('./app.cjs');
+
+        (async () => {
+          const r1 = await sc.invoke('GET', '/profile', {
+            headers: { authorization: 'Bearer alice' }
+          });
+          const r2 = await sc.invoke('GET', '/profile', {
+            headers: { authorization: 'Bearer evil' }
+          });
+          console.log(JSON.stringify({ r1: { status: r1.status, body: r1.body }, r2: { status: r2.status, body: r2.body } }));
+        })();
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const jwt = require('jsonwebtoken');
+          const app = express();
+
+          app.get('/profile', (req, res) => {
+            try {
+              const token = (req.headers.authorization || '').replace('Bearer ', '');
+              const decoded = jwt.verify(token, 'secret');
+              res.json({ user: decoded.sub, role: decoded.role });
+            } catch (e) {
+              if (e.name === 'JsonWebTokenError') {
+                return res.status(401).json({ error: e.message });
+              }
+              res.status(500).json({ error: 'unknown' });
+            }
+          });
+
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      const out = parseJsonLine(result.stdout);
+      expect(out.r1.status).toBe(200);
+      expect(out.r1.body).toEqual({ user: 'alice', role: 'admin' });
+      expect(out.r2.status).toBe(401);
+      expect(out.r2.body.error).toBe('invalid token');
+    });
+
+    it('verify works with callback style', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.jwtIdentities({ alice: { sub: 'alice' } });
+
+        sc.load('./app.cjs');
+
+        (async () => {
+          const res = await sc.invoke('GET', '/check', {
+            headers: { authorization: 'Bearer alice' }
+          });
+          console.log(JSON.stringify({ status: res.status, body: res.body }));
+        })();
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const jwt = require('jsonwebtoken');
+          const app = express();
+
+          app.get('/check', (req, res) => {
+            const token = (req.headers.authorization || '').replace('Bearer ', '');
+            jwt.verify(token, 'secret', (err, decoded) => {
+              if (err) return res.status(401).json({ error: err.message });
+              res.json({ sub: decoded.sub });
+            });
+          });
+
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      const out = parseJsonLine(result.stdout);
+      expect(out.status).toBe(200);
+      expect(out.body).toEqual({ sub: 'alice' });
+    });
+
+    it('decode returns claims for known token and null for unknown', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.jwtIdentities({ alice: { sub: 'alice' } });
+
+        sc.load('./app.cjs');
+
+        (async () => {
+          const res = await sc.invoke('GET', '/decode', {
+            headers: { 'x-token': 'alice', 'x-bad': 'unknown' }
+          });
+          console.log(JSON.stringify(res.body));
+        })();
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const jwt = require('jsonwebtoken');
+          const app = express();
+
+          app.get('/decode', (req, res) => {
+            const good = jwt.decode(req.headers['x-token']);
+            const bad = jwt.decode(req.headers['x-bad']);
+            res.json({ good, bad });
+          });
+
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      const out = parseJsonLine(result.stdout);
+      expect(out.good).toEqual({ sub: 'alice' });
+      expect(out.bad).toBeNull();
+    });
+
+    it('throws if called after sc.load()', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.load('./app.cjs');
+
+        try {
+          sc.jwtIdentities({ alice: { sub: 'alice' } });
+          console.log('NO_ERROR');
+        } catch (e) {
+          console.log('ERROR:' + e.message);
+        }
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const app = express();
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toContain('ERROR:');
+      expect(result.stdout.trim()).toContain('before sc.load');
+    });
+
+    it('strips Bearer prefix from token in verify and decode', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.jwtIdentities({ alice: { sub: 'alice' } });
+
+        sc.load('./app.cjs');
+
+        (async () => {
+          const res = await sc.invoke('GET', '/profile', {
+            headers: { authorization: 'Bearer alice' }
+          });
+          console.log(JSON.stringify(res.body));
+        })();
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const jwt = require('jsonwebtoken');
+          const app = express();
+
+          app.get('/profile', (req, res) => {
+            try {
+              const raw = req.headers.authorization;
+              const decoded = jwt.verify(raw, 'secret');
+              res.json({ sub: decoded.sub });
+            } catch (e) {
+              res.status(401).json({ error: e.message });
+            }
+          });
+
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      const out = parseJsonLine(result.stdout);
+      expect(out.sub).toBe('alice');
     });
   });
 });

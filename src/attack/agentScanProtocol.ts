@@ -152,6 +152,8 @@ export interface GridCell {
 
 export type ScenarioClassification = 'weakness' | 'hardening';
 
+export const SCENARIO_OPTIONAL_FIELDS = ['test', 'testNote', 'classification'] as const;
+
 export interface Scenario {
     id: string;
     cellId: string;

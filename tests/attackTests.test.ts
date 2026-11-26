@@ -446,4 +446,27 @@ describe('runAssuranceAttackTests', () => {
         expect(out.exploitedFindings[0].repeatable).toBe(false);
         expect(mocks.runLocalTest).toHaveBeenCalledTimes(1);
     });
+
+    it('BLOCKED with unmatched-route harness log → UNTESTABLE via decideScenarioVerdict', () => {
+        const harnessLog = '\nSECURECODE_HARNESS_LOG:{"calls":[{"method":"POST","path":"/wallet/create","matched":false,"sent":false,"timedOut":false}]}:SECURECODE_HARNESS_END\n';
+        const blockedMarkerOutput = `FAIL: blocked — 403\n${marker({ verdict: 'BLOCKED', targetReached: true, targetCalls: 2, controlOk: true })}${harnessLog}`;
+        const decision = decideScenarioVerdict(AN.blocked as any, { verdict: 'fail', output: blockedMarkerOutput });
+        expect(decision.verdict).toBe('UNTESTABLE');
+        expect(decision.reason).toContain('/wallet/create');
+        expect(decision.retryable).toBe(true);
+    });
+
+    it('BLOCKED with valid harness log stays BLOCKED', () => {
+        const harnessLog = '\nSECURECODE_HARNESS_LOG:{"calls":[{"method":"GET","path":"/doc/1","matched":true,"sent":true,"status":403,"timedOut":false}]}:SECURECODE_HARNESS_END\n';
+        const blockedMarkerOutput = `FAIL: blocked — 403\n${marker({ verdict: 'BLOCKED', targetReached: true, targetCalls: 2, controlOk: true })}${harnessLog}`;
+        const decision = decideScenarioVerdict(AN.blocked as any, { verdict: 'fail', output: blockedMarkerOutput });
+        expect(decision.verdict).toBe('BLOCKED');
+    });
+
+    it('BLOCKED with controlOk=false in marker → UNTESTABLE (existing behavior preserved)', () => {
+        const badControlOutput = `FAIL: blocked\n${marker({ verdict: 'BLOCKED', targetReached: true, controlOk: false })}`;
+        const decision = decideScenarioVerdict(AN.blocked as any, { verdict: 'fail', output: badControlOutput });
+        expect(decision.verdict).toBe('UNTESTABLE');
+        expect(decision.reason).toContain('control step failed');
+    });
 });

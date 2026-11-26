@@ -164,3 +164,47 @@ describe('buildProofEvidence', () => {
         expect(evidence.sourceMode).toBe('synthetic');
     });
 });
+
+describe('evaluateProofGate — testValid and baseline-failed interaction', () => {
+    it('exploit-failed + baseline-failed → INCONCLUSIVE (not UNPROVEN)', () => {
+        const marker = { ...validMarker(), baseline: 'fail' as const, exploit: 'fail' as const };
+        const result = evaluateProofGate(marker, validContext);
+        expect(result.failedGates).toContain('baseline-failed');
+        expect(result.failedGates).toContain('exploit-failed');
+        expect(result.downgradedVerdict).toBe('INCONCLUSIVE');
+    });
+
+    it('impact-not-observed + baseline-failed → INCONCLUSIVE', () => {
+        const marker = { ...validMarker(), baseline: 'fail' as const, impact: 'not-observed' as const };
+        const result = evaluateProofGate(marker, validContext);
+        expect(result.failedGates).toContain('baseline-failed');
+        expect(result.failedGates).toContain('impact-not-observed');
+        expect(result.downgradedVerdict).toBe('INCONCLUSIVE');
+    });
+
+    it('exploit-failed without baseline-failed → UNPROVEN', () => {
+        const marker = { ...validMarker(), exploit: 'fail' as const };
+        const result = evaluateProofGate(marker, validContext);
+        expect(result.failedGates).toContain('exploit-failed');
+        expect(result.failedGates).not.toContain('baseline-failed');
+        expect(result.downgradedVerdict).toBe('UNPROVEN');
+    });
+
+    it('testValid=false → INCONCLUSIVE regardless of exploit/impact', () => {
+        const marker = { ...validMarker(), exploit: 'fail' as const };
+        const result = evaluateProofGate(marker, { ...validContext, testValid: false });
+        expect(result.downgradedVerdict).toBe('INCONCLUSIVE');
+    });
+
+    it('testValid=true with exploit-failed → UNPROVEN (unchanged)', () => {
+        const marker = { ...validMarker(), exploit: 'fail' as const };
+        const result = evaluateProofGate(marker, { ...validContext, testValid: true });
+        expect(result.downgradedVerdict).toBe('UNPROVEN');
+    });
+
+    it('testValid=undefined (old caller) with exploit-failed → UNPROVEN (backward compat)', () => {
+        const marker = { ...validMarker(), exploit: 'fail' as const };
+        const result = evaluateProofGate(marker, validContext);
+        expect(result.downgradedVerdict).toBe('UNPROVEN');
+    });
+});

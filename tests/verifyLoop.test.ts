@@ -403,3 +403,129 @@ describe('runVerifyLoop — scan budget (runId)', () => {
         await expect(runVerifyLoop({ ...baseOpts, client: { postJson } as unknown as ApiClient, runId: 'run-9' })).rejects.toThrow('server down');
     });
 });
+
+describe('runVerifyLoop — testValidity guard on UNPROVEN', () => {
+    beforeEach(() => {
+        vi.mocked(runLocalTest).mockReset();
+    });
+
+    const baseOpts = {
+        finding: { type: 'race_condition', line: 69, evidence: 'concurrent transfer', why: 'no lock', severity: 'high' },
+        filePath: 'src/wallet.ts',
+        code: 'const x = 1;',
+        relatedFiles: [],
+        workspaceRoot: '/tmp/workspace',
+        language: 'javascript',
+    };
+
+    const HARNESS_LOG_UNMATCHED = '\nSECURECODE_HARNESS_LOG:{"calls":[{"method":"POST","path":"/wallet/create","matched":false,"sent":false,"timedOut":false}]}:SECURECODE_HARNESS_END\n';
+    const PROOF_BASELINE_PASS = 'SECURECODE_PROOF_RESULT:{"baseline":"pass","exploit":"fail","impact":"not-observed","targetReached":true}:SECURECODE_PROOF_END';
+    const HARNESS_LOG_GOOD = '\nSECURECODE_HARNESS_LOG:{"calls":[{"method":"GET","path":"/transfer","matched":true,"sent":true,"status":200,"timedOut":false}]}:SECURECODE_HARNESS_END\n';
+
+    it('UNPROVEN with unmatched-route harness log → retries then INCONCLUSIVE, never UNPROVEN', async () => {
+        vi.mocked(runLocalTest).mockResolvedValue({
+            verdict: 'fail',
+            output: `FAIL: blocked\n${PROOF_BASELINE_PASS}\n${HARNESS_LOG_UNMATCHED}`,
+            exitCode: 0,
+        });
+
+        const postJson = vi.fn();
+        postJson.mockImplementation(async (p: string) => {
+            if (p === '/verify/generate') return { canTest: true, testScript: 'console.log("test")', runner: 'node', description: 'test' };
+            if (p === '/verify/analyze') return { verdict: 'UNPROVEN', reason: 'guard held', shouldRetry: false };
+            throw new Error(`unexpected ${p}`);
+        });
+
+        const { VerifyBudgetTracker, defaultVerifyBudget } = await import('../src/attack/agentScanProtocol');
+        const budget = defaultVerifyBudget();
+        budget.maxRoundsPerFinding = 3;
+        budget.maxLlmCalls = 100;
+        const tracker = new VerifyBudgetTracker(budget);
+
+        const result = await runVerifyLoop({
+            ...baseOpts,
+            client: { postJson } as unknown as ApiClient,
+            budgetTracker: tracker,
+        });
+
+        expect(result.verdict).not.toBe('UNPROVEN');
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.reason).toContain('invalid');
+        expect(result.subVerdict).toBe('analyzed');
+
+        const generateCalls = postJson.mock.calls.filter((c: any) => c[0] === '/verify/generate');
+        expect(generateCalls.length).toBeGreaterThan(1);
+        const lastGenBody = generateCalls[generateCalls.length - 1][1];
+        expect(lastGenBody.previousErrors.some((e: string) => e.includes('/wallet/create'))).toBe(true);
+    });
+
+    it('UNPROVEN with a valid log + baseline pass stays UNPROVEN', async () => {
+        vi.mocked(runLocalTest).mockResolvedValueOnce({
+            verdict: 'fail',
+            output: `FAIL: guard blocked\n${PROOF_BASELINE_PASS}\n${HARNESS_LOG_GOOD}`,
+            exitCode: 0,
+        });
+
+        const postJson = vi.fn()
+            .mockResolvedValueOnce({ canTest: true, testScript: 'console.log("test")', runner: 'node', description: 'test' })
+            .mockResolvedValueOnce({ verdict: 'UNPROVEN', reason: 'guard held', shouldRetry: false });
+
+        const result = await runVerifyLoop({
+            ...baseOpts,
+            client: { postJson } as unknown as ApiClient,
+        });
+
+        expect(result.verdict).toBe('UNPROVEN');
+    });
+
+    it('missing setup field does not invalidate an UNPROVEN result', async () => {
+        const PROOF_NO_SETUP = 'SECURECODE_PROOF_RESULT:{"baseline":"pass","exploit":"fail","impact":"not-observed","targetReached":true}:SECURECODE_PROOF_END';
+        vi.mocked(runLocalTest).mockResolvedValueOnce({
+            verdict: 'fail',
+            output: `FAIL: guard held\n${PROOF_NO_SETUP}\n${HARNESS_LOG_GOOD}`,
+            exitCode: 0,
+        });
+
+        const postJson = vi.fn()
+            .mockResolvedValueOnce({ canTest: true, testScript: 'console.log("test")', runner: 'node', description: 'test' })
+            .mockResolvedValueOnce({ verdict: 'UNPROVEN', reason: 'guard held', shouldRetry: false });
+
+        const result = await runVerifyLoop({
+            ...baseOpts,
+            client: { postJson } as unknown as ApiClient,
+        });
+
+        expect(result.verdict).toBe('UNPROVEN');
+    });
+
+    it('UNPROVEN with setup=fail → retries then INCONCLUSIVE', async () => {
+        const PROOF_SETUP_FAIL = 'SECURECODE_PROOF_RESULT:{"baseline":"pass","exploit":"fail","setup":"fail","setupNote":"POST /wallet/create returned 404"}:SECURECODE_PROOF_END';
+        vi.mocked(runLocalTest).mockResolvedValue({
+            verdict: 'fail',
+            output: `FAIL: guard held\n${PROOF_SETUP_FAIL}\n${HARNESS_LOG_GOOD}`,
+            exitCode: 0,
+        });
+
+        const postJson = vi.fn();
+        postJson.mockImplementation(async (p: string) => {
+            if (p === '/verify/generate') return { canTest: true, testScript: 'console.log("test")', runner: 'node', description: 'test' };
+            if (p === '/verify/analyze') return { verdict: 'UNPROVEN', reason: 'guard held', shouldRetry: false };
+            throw new Error(`unexpected ${p}`);
+        });
+
+        const { VerifyBudgetTracker, defaultVerifyBudget } = await import('../src/attack/agentScanProtocol');
+        const budget = defaultVerifyBudget();
+        budget.maxRoundsPerFinding = 2;
+        budget.maxLlmCalls = 100;
+        const tracker = new VerifyBudgetTracker(budget);
+
+        const result = await runVerifyLoop({
+            ...baseOpts,
+            client: { postJson } as unknown as ApiClient,
+            budgetTracker: tracker,
+        });
+
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.reason).toContain('setup failed');
+    });
+});

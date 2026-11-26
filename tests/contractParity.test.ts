@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
     AGENT_SCAN_PROTOCOL_VERSION,
+    SCENARIO_OPTIONAL_FIELDS,
     type AgentScanRunStatus,
     type TerminationReason,
 } from '../src/attack/agentScanProtocol';
+
+import {
+    SCENARIO_OPTIONAL_FIELDS as API_SCENARIO_OPTIONAL_FIELDS,
+} from '../../api/src/attacker/agentScanProtocol';
 
 describe('agent scan protocol — canonical status contract', () => {
     it('AgentScanRunStatus has exactly 4 values', () => {
@@ -70,5 +75,15 @@ describe('agent scan protocol — status classification rules', () => {
         for (const r of cancelledReasons) {
             expect(r).toBe('cancelled');
         }
+    });
+});
+
+describe('agent scan protocol — SCENARIO_OPTIONAL_FIELDS parity', () => {
+    it('MCP and API export identical SCENARIO_OPTIONAL_FIELDS', () => {
+        expect([...SCENARIO_OPTIONAL_FIELDS]).toEqual([...API_SCENARIO_OPTIONAL_FIELDS]);
+    });
+
+    it('list is non-empty', () => {
+        expect(SCENARIO_OPTIONAL_FIELDS.length).toBeGreaterThan(0);
     });
 });
