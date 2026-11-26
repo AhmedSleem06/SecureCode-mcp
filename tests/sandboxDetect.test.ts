@@ -72,18 +72,20 @@ describe('detectSandbox — SECURECODE_SANDBOX override', () => {
 });
 
 describe('bundleScript', () => {
-    it('bundles a simple TS file into CJS with inline sourcemap', () => {
+    it('bundles a simple TS file into ESM .mjs with inline sourcemap', () => {
         const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-bundle-'));
         try {
             fs.writeFileSync(path.join(ws, 'test.ts'), 'const x: number = 42;\nconsole.log("PASS: " + x);');
             const result = bundleScript(path.join(ws, 'test.ts'), ws);
             expect(result.ok).toBe(true);
+            expect(result.outPath).toMatch(/\.mjs$/);
             expect(result.code).toContain('PASS:');
             expect(result.code).toContain('sourceMappingURL=data:application/json;base64,');
+            fs.unlinkSync(result.outPath!);
         } finally { fs.rmSync(ws, { recursive: true, force: true }); }
     });
 
-    it('bundles a TS file that imports another TS file', () => {
+    it('bundles a TS file that imports another TS file (inlined)', () => {
         const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-bundle-'));
         try {
             fs.mkdirSync(path.join(ws, 'src'));
@@ -94,6 +96,7 @@ describe('bundleScript', () => {
             expect(result.ok).toBe(true);
             expect(result.code).toContain('Hello');
             expect(result.code).toContain('PASS:');
+            fs.unlinkSync(result.outPath!);
         } finally { fs.rmSync(ws, { recursive: true, force: true }); }
     });
 
@@ -103,7 +106,30 @@ describe('bundleScript', () => {
             fs.writeFileSync(path.join(ws, 'test.ts'), 'import * as path from "path";\nconsole.log("PASS: " + path.sep);');
             const result = bundleScript(path.join(ws, 'test.ts'), ws);
             expect(result.ok).toBe(true);
-            expect(result.code).toContain('require("path")');
+            expect(result.code).not.toContain('node:path');
+            fs.unlinkSync(result.outPath!);
+        } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+    });
+
+    it('adds require shim banner when script uses require()', () => {
+        const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-bundle-'));
+        try {
+            fs.writeFileSync(path.join(ws, 'test.ts'), 'const x = require("path");\nconsole.log("PASS: " + x.sep);');
+            const result = bundleScript(path.join(ws, 'test.ts'), ws);
+            expect(result.ok).toBe(true);
+            expect(result.code).toContain('createRequire');
+            fs.unlinkSync(result.outPath!);
+        } finally { fs.rmSync(ws, { recursive: true, force: true }); }
+    });
+
+    it('supports top-level await', () => {
+        const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-bundle-'));
+        try {
+            fs.writeFileSync(path.join(ws, 'test.ts'), 'const x: number = await Promise.resolve(42);\nconsole.log("PASS: " + x);');
+            const result = bundleScript(path.join(ws, 'test.ts'), ws);
+            expect(result.ok).toBe(true);
+            expect(result.code).toContain('await');
+            fs.unlinkSync(result.outPath!);
         } finally { fs.rmSync(ws, { recursive: true, force: true }); }
     });
 

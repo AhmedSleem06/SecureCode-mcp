@@ -293,6 +293,7 @@ export class LocalSandbox implements SandboxBackend {
         const runner = opts.runner || 'node';
         const needsBundle = runner === 'tsx';
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'securecode-local-'));
+        const srcCleanup: string[] = [];
         try {
             copyWorkspace(opts.workspaceRoot, tmpDir, { bytes: 0, files: 0 });
             const linked = linkNodeModules(opts.workspaceRoot, tmpDir);
@@ -308,29 +309,34 @@ export class LocalSandbox implements SandboxBackend {
             if (needsBundle) {
                 const srcScDir = path.join(opts.workspaceRoot, '.securecode');
                 if (!fs.existsSync(srcScDir)) fs.mkdirSync(srcScDir, { recursive: true });
+
                 const srcTest = path.join(srcScDir, `verify-test-${suffix}${ext}`);
                 fs.writeFileSync(srcTest, opts.script || '', 'utf8');
-                try {
-                    const tb = bundleScript(srcTest, opts.workspaceRoot);
-                    if (!tb.ok) {
-                        return { verdict: 'error', output: `TypeScript bundle failed: ${tb.error}`, exitCode: -1, backend: this.isolationLabel() };
-                    }
-                    testFile = path.join(scDir, `verify-test-${suffix}.cjs`);
-                    fs.writeFileSync(testFile, tb.code!, 'utf8');
+                srcCleanup.push(srcTest);
 
-                    if (opts.setupScript) {
-                        const srcSetup = path.join(srcScDir, `verify-setup-${suffix}${ext}`);
-                        fs.writeFileSync(srcSetup, opts.setupScript, 'utf8');
-                        try {
-                            const sb = bundleScript(srcSetup, opts.workspaceRoot);
-                            if (!sb.ok) {
-                                return { verdict: 'error', output: `TypeScript setup bundle failed: ${sb.error}`, exitCode: -1, backend: this.isolationLabel() };
-                            }
-                            setupFile = path.join(scDir, `verify-setup-${suffix}.cjs`);
-                            fs.writeFileSync(setupFile, sb.code!, 'utf8');
-                        } finally { try { fs.unlinkSync(srcSetup); } catch { /* */ } }
+                const tb = bundleScript(srcTest, opts.workspaceRoot, srcScDir);
+                if (!tb.ok) {
+                    return { verdict: 'error', output: `TypeScript bundle failed: ${tb.error}`, exitCode: -1, backend: this.isolationLabel() };
+                }
+                srcCleanup.push(tb.outPath!);
+                const bundleName = path.basename(tb.outPath!);
+                testFile = path.join(scDir, bundleName);
+                fs.copyFileSync(tb.outPath!, testFile);
+
+                if (opts.setupScript) {
+                    const srcSetup = path.join(srcScDir, `verify-setup-${suffix}${ext}`);
+                    fs.writeFileSync(srcSetup, opts.setupScript, 'utf8');
+                    srcCleanup.push(srcSetup);
+
+                    const sb = bundleScript(srcSetup, opts.workspaceRoot, srcScDir);
+                    if (!sb.ok) {
+                        return { verdict: 'error', output: `TypeScript setup bundle failed: ${sb.error}`, exitCode: -1, backend: this.isolationLabel() };
                     }
-                } finally { try { fs.unlinkSync(srcTest); } catch { /* */ } }
+                    srcCleanup.push(sb.outPath!);
+                    const setupBundleName = path.basename(sb.outPath!);
+                    setupFile = path.join(scDir, setupBundleName);
+                    fs.copyFileSync(sb.outPath!, setupFile);
+                }
             } else {
                 testFile = path.join(scDir, `verify-test-${suffix}${ext}`);
                 fs.writeFileSync(testFile, opts.script || '', 'utf8');
@@ -366,6 +372,7 @@ export class LocalSandbox implements SandboxBackend {
             );
             return result;
         } finally {
+            for (const f of srcCleanup) { try { fs.unlinkSync(f); } catch { /* */ } }
             try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
         }
     }

@@ -46,31 +46,58 @@ import { LocalSandbox } from './localSandbox';
 export interface BundleResult {
     ok: boolean;
     code?: string;
+    outPath?: string;
     error?: string;
+}
+
+function needsBanner(src: string, name: string): boolean {
+    const declRe = new RegExp(`(?:const|let|var|function)\\s+${name}\\b`);
+    if (declRe.test(src)) return false;
+    const useRe = new RegExp(`\\b${name}\\b`);
+    return useRe.test(src);
 }
 
 export function bundleScript(
     scriptPath: string,
     workspaceRoot: string,
+    outDir?: string,
 ): BundleResult {
     try {
         const esbuild: typeof import('esbuild') = require('esbuild');
-        const result = esbuild.buildSync({
+        const src = fs.readFileSync(scriptPath, 'utf8');
+
+        const bannerLines: string[] = [];
+        if (needsBanner(src, 'require')) {
+            bannerLines.push('import { createRequire as __scCR } from "node:module"; const require = __scCR(import.meta.url);');
+        }
+        if (needsBanner(src, '__dirname')) {
+            bannerLines.push('import { fileURLToPath as __scFU } from "node:url"; import { dirname as __scDN } from "node:path"; const __filename = __scFU(import.meta.url); const __dirname = __scDN(__filename);');
+        } else if (needsBanner(src, '__filename')) {
+            bannerLines.push('import { fileURLToPath as __scFU } from "node:url"; const __filename = __scFU(import.meta.url);');
+        }
+
+        const writeDir = outDir || path.dirname(scriptPath);
+        const baseName = path.basename(scriptPath, path.extname(scriptPath));
+        const outFile = path.join(writeDir, `${baseName}.bundle-${Date.now()}.mjs`);
+
+        esbuild.buildSync({
             entryPoints: [scriptPath],
             bundle: true,
             platform: 'node',
-            format: 'cjs',
+            format: 'esm',
             target: 'node20',
             packages: 'external',
             sourcemap: 'inline',
-            write: false,
+            outfile: outFile,
             absWorkingDir: workspaceRoot,
             logLevel: 'silent',
+            banner: bannerLines.length > 0 ? { js: bannerLines.join('\n') } : undefined,
         });
-        if (result.outputFiles && result.outputFiles.length > 0) {
-            return { ok: true, code: result.outputFiles[0].text };
+
+        if (!fs.existsSync(outFile)) {
+            return { ok: false, error: 'esbuild produced no output file' };
         }
-        return { ok: false, error: 'esbuild produced no output' };
+        return { ok: true, outPath: outFile, code: fs.readFileSync(outFile, 'utf8') };
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return { ok: false, error: `esbuild bundle failed: ${msg.slice(0, 500)}` };
@@ -454,35 +481,34 @@ class DockerSandbox implements SandboxBackend {
             ? path.join(sandboxDir, `verify-setup-${srcSuffix}${setupExt}`)
             : null;
 
-        let bundledTestFile: string | null = null;
-        let bundledSetupFile: string | null = null;
+        const cleanupFiles: string[] = [];
 
         try {
             fs.writeFileSync(srcTestFile, opts.script || '', 'utf8');
+            cleanupFiles.push(srcTestFile);
             if (srcSetupFile && opts.setupScript) {
                 fs.writeFileSync(srcSetupFile, opts.setupScript, 'utf8');
+                cleanupFiles.push(srcSetupFile);
             }
 
             let testFile = srcTestFile;
             let setupFile = srcSetupFile;
 
             if (needsBundle) {
-                const tb = bundleScript(srcTestFile, opts.workspaceRoot);
+                const tb = bundleScript(srcTestFile, opts.workspaceRoot, sandboxDir);
                 if (!tb.ok) {
                     return { verdict: 'error', output: `TypeScript bundle failed: ${tb.error}`, exitCode: -1, backend: this.name };
                 }
-                bundledTestFile = path.join(sandboxDir, `verify-test-${srcSuffix}.cjs`);
-                fs.writeFileSync(bundledTestFile, tb.code!, 'utf8');
-                testFile = bundledTestFile;
+                testFile = tb.outPath!;
+                cleanupFiles.push(testFile);
 
                 if (srcSetupFile) {
-                    const sb = bundleScript(srcSetupFile, opts.workspaceRoot);
+                    const sb = bundleScript(srcSetupFile, opts.workspaceRoot, sandboxDir);
                     if (!sb.ok) {
                         return { verdict: 'error', output: `TypeScript setup bundle failed: ${sb.error}`, exitCode: -1, backend: this.name };
                     }
-                    bundledSetupFile = path.join(sandboxDir, `verify-setup-${srcSuffix}.cjs`);
-                    fs.writeFileSync(bundledSetupFile, sb.code!, 'utf8');
-                    setupFile = bundledSetupFile;
+                    setupFile = sb.outPath!;
+                    cleanupFiles.push(setupFile);
                 }
             }
 
@@ -531,10 +557,7 @@ class DockerSandbox implements SandboxBackend {
 
             return await runSandboxedProcess('docker', dockerArgs, opts, this.name);
         } finally {
-            safeUnlink(srcTestFile);
-            safeUnlink(srcSetupFile);
-            safeUnlink(bundledTestFile);
-            safeUnlink(bundledSetupFile);
+            for (const f of cleanupFiles) safeUnlink(f);
         }
     }
 }
