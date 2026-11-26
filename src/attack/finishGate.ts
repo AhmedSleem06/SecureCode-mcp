@@ -80,7 +80,7 @@ function candidateLinesDelivered(
 function candidateClaimHasActorAndEffect(candidate: Candidate): boolean {
     const claim = (candidate.claim || '').toLowerCase();
     const actorTerms = ['attacker', 'user', 'member', 'caller', 'client', 'unauthenticated', 'authenticated', 'any user', 'actor', 'adversary', 'requester', 'anyone', 'anonymous', 'someone', 'visitor', 'tenant', 'account', 'request', 'public'];
-    const effectTerms = ['escalat', 'elevat', 'overwrit', 'bypass', 'impersonat', 'admin', 'role', 'permission', 'privilege', 'unauthoriz', 'access', 'modify', 'manipulat', 'tamper', 'inject', 'assign', 'set', 'update', 'change', 'forge', 'leak', 'expos', 'disclos', 'enumerat', 'reveal', 'find out', 'learn', 'crash', 'denial', 'exhaust', 'hang', 'block', 'delete', 'duplicate', 'take over', 'takeover', 'steal', 'read', 'sign', 'gain', 'grant', 'give', 'upgrade', 'obtain', 'without pay', 'for free', 'unlock'];
+    const effectTerms = ['escalat', 'elevat', 'overwrit', 'bypass', 'impersonat', 'admin', 'role', 'permission', 'privilege', 'unauthoriz', 'access', 'modify', 'manipulat', 'tamper', 'inject', 'assign', 'set', 'update', 'change', 'forge', 'leak', 'expos', 'disclos', 'enumerat', 'reveal', 'find out', 'learn', 'crash', 'denial', 'exhaust', 'hang', 'block', 'delete', 'duplicate', 'take over', 'takeover', 'steal', 'read', 'sign', 'gain', 'grant', 'give', 'upgrade', 'obtain', 'without pay', 'for free', 'unlock', 'backtrack', 'freez', 'stall', 'slow', 'cpu', 'memory', 'event loop', 'timeout', 'capabilit'];
     const hasActor = actorTerms.some(t => claim.includes(t));
     const hasEffect = effectTerms.some(t => claim.includes(t));
     return hasActor && hasEffect;

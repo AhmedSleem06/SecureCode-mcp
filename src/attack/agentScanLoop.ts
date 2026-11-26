@@ -1286,7 +1286,11 @@ export async function runAgentScan(
                             type: finding.type,
                             severity: finding.severity as any,
                             locations: [{ filePath: target.filePath, line: finding.line }],
-                            claim: finding.why,
+                            claim: [
+                                finding.why,
+                                finding.capabilityBaseline?.role ? `Actor: ${finding.capabilityBaseline.role}.` : '',
+                                finding.capabilityBaseline?.isEscalation ? 'Effect: gains a capability the actor did not have.' : '',
+                            ].filter(Boolean).join(' '),
                             requiredEvidence: [
                                 {
                                     id: `${rootCauseId}-flow`,
