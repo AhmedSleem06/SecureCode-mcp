@@ -17,7 +17,7 @@ import {
     type SessionApprovalTool,
 } from './types';
 import { appendAudit } from './auditLog';
-import { resolveSessionApprovalPolicy, SESSION_APPROVAL_POLICY_NAMES } from './policy';
+import { resolveSessionApprovalPolicy, SESSION_APPROVAL_POLICY_NAMES, TOOL_POLICIES } from './policy';
 
 const MAX_PENDING = 16;
 const MAX_BODY_BYTES = 4096;
@@ -142,6 +142,7 @@ interface SessionRecord {
     runId: string;
     tool: SessionApprovalTool;
     policyName: string;
+    category: OperationCategory;
     requestId: string;
     operationHash: string;
     workspaceId: string | null;
@@ -220,7 +221,7 @@ function auditSession(rec: SessionRecord, approved: boolean, reason: AuditReason
         requestId: rec.requestId,
         tool: rec.policyName,
         operationHash: rec.operationHash,
-        category: 'sandboxed-verification',
+        category: rec.category,
         workspaceId: rec.workspaceId,
         approved,
         reason,
@@ -376,10 +377,12 @@ export class ApprovalBroker {
         const ttlMs = Number.isFinite(rawTtl) ? Math.min(Math.floor(rawTtl), SESSION_APPROVAL_MAX_TTL_MS) : 0;
         const promptTimeoutMs = opts.timeoutMs ?? SESSION_APPROVAL_PROMPT_TIMEOUT_MS;
         const operationParts = [runId, tool, maxTests, ttlMs];
+        const policyCategory = TOOL_POLICIES[policyName]?.category ?? 'paid-generation';
         const base: SessionRecord = {
             runId,
             tool,
             policyName,
+            category: policyCategory as import('./types').OperationCategory,
             requestId: crypto.randomUUID(),
             operationHash: hashOperation(policyName, ...operationParts),
             workspaceId: workspaceIdFromRoot(opts.workspaceRoot ?? null),

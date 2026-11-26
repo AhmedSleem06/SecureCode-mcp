@@ -135,10 +135,17 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
         requiresApproval: true,
         approvalNote: 'Deep scan attack tests run code in the sandbox. One approval per scan covers a fixed number of runs for a limited time.',
     },
+    'securecode.fix-generation': {
+        name: 'securecode.fix-generation',
+        category: 'paid-generation',
+        requiresApproval: true,
+        approvalNote: 'Fix generation calls /fix for each fixable finding (consumes credits). One approval per scan covers all findings.',
+    },
 };
 
 export const SESSION_APPROVAL_POLICY_NAMES: Record<SessionApprovalTool, string> = {
     'assurance-tests': 'securecode.assurance-tests',
+    'fix-generation': 'securecode.fix-generation',
 };
 
 export type SessionApprovalPolicyDecision =

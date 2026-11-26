@@ -28,7 +28,13 @@ vi.mock('../src/approval/broker', () => ({
         start: vi.fn().mockResolvedValue(0),
         stop: vi.fn().mockResolvedValue(undefined),
         requestApproval: vi.fn().mockResolvedValue({ approved: true, reason: 'ok', requestId: 'fix-approval', duration: 0 }),
+        requestSessionApproval: vi.fn().mockResolvedValue({
+            granted: true, state: 'granted', reason: 'ok', detail: '', requestId: 'sess-1',
+            runId: 'r', maxTests: 100, remaining: 100, expiresAt: Date.now() + 600_000,
+        }),
     })),
+    consumeSessionApproval: vi.fn().mockReturnValue(true),
+    revokeSessionApproval: vi.fn().mockReturnValue(true),
 }));
 
 vi.mock('../src/project-map/mapContext', () => ({

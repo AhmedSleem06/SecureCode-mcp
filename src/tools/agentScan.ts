@@ -72,7 +72,7 @@ import {
 } from '../attack/agentScanCredits';
 import type { AgentScanFinding, AgentScanSegment, AgentScanTarget, VerificationLevel } from '../attack/agentScanProtocol';
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
-import { ApprovalBroker } from '../approval/broker';
+import { ApprovalBroker, consumeSessionApproval, revokeSessionApproval } from '../approval/broker';
 import { getGitChangedFiles } from '../utils/gitContext';
 import { computeBlastRadius } from '../project-map/blastRadius';
 import { recordScanAuditSample } from '../audit/scanAuditLog';
@@ -91,7 +91,7 @@ interface ProvenFinding extends AgentScanFinding {
     evidenceLevel?: string;
     originalConfidence?: number;
     verificationLevel?: VerificationLevel;
-    fixStatus?: 'fix-generated' | 'fix-denied' | 'fix-error'
+    fixStatus?: 'available' | 'fix-generated' | 'fix-denied' | 'fix-error'
         | 'fix-verified-closed' | 'fix-still-vulnerable'
         | 'fix-verification-inconclusive' | 'fix-syntax-invalid';
     fixDeniedReason?: string;
@@ -1080,12 +1080,20 @@ async function scanTarget(
     }
 
     // 4b. Generate fixes for proven/suspected findings (requires approval)
+    const isAssuranceMode = !!(agentResult as any).assurance?.cells?.length;
+    const generateFixesRequested = !!(args as any).generateFixes;
     if (skipFix) {
         console.log('[Agent Scan] Skipping fix generation (_skipFix=true)');
     } else {
     const fixableFindings = provenFindings.filter(f =>
         f.proven === 'PROVEN' || (f.proven !== 'UNPROVEN' && f.confidence >= 60)
     );
+
+    if (isAssuranceMode && !generateFixesRequested) {
+        for (const finding of fixableFindings) {
+            finding.fixStatus = 'available';
+        }
+    } else {
 
     if (fixableFindings.length > 0 && progress) {
         progress(0, fixableFindings.length, `Generating fixes for ${fixableFindings.length} finding(s)...`);
@@ -1094,43 +1102,52 @@ async function scanTarget(
     let fixIdx = 0;
     const fixBroker = fixableFindings.length > 0 ? new ApprovalBroker() : null;
     if (fixBroker) await fixBroker.start();
+    const fixRunId = scanRunId || `fix-${Date.now()}`;
 
     try {
+        let fixSessionGranted = false;
+        let fixSessionDeniedReason = '';
+        if (fixableFindings.length > 0 && fixBroker) {
+            const fixSummary = `Generate fixes for ${fixableFindings.length} finding(s):\n` +
+                fixableFindings.map((f, i) => `  ${i + 1}. ${f.type} at line ${f.line} (${f.severity}, ${f.confidence}% confidence)`).join('\n') +
+                `\n\nEach fix consumes one credit. If verification fails, the fixer re-runs ONCE with the failure feedback (a second fix credit applies only if the first attempt fails).`;
+            const sessionResult = await fixBroker.requestSessionApproval(
+                { runId: fixRunId, tool: 'fix-generation', maxTests: fixableFindings.length * 2, ttlMs: 30 * 60 * 1000 },
+                fixSummary,
+                {
+                    workspaceRoot: ctx.workspaceRoot,
+                    onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required for ${fixableFindings.length} fix(es) — open ${url}`) : undefined,
+                },
+            );
+            fixSessionGranted = sessionResult.granted;
+            fixSessionDeniedReason = sessionResult.reason;
+        }
+
+        if (!fixSessionGranted && fixableFindings.length > 0) {
+            for (const finding of fixableFindings) {
+                finding.fixStatus = 'fix-denied';
+                finding.fixDeniedReason = fixSessionDeniedReason || 'Fix approval not granted';
+            }
+        } else {
         for (const finding of fixableFindings) {
             if (progress) {
                 fixIdx++;
                 progress(fixIdx, fixableFindings.length, `Fixing ${finding.type} at line ${finding.line}...`);
             }
 
-            const fixSummary = `Generate fix for ${finding.type} at line ${finding.line}${finding.lineEnd ? `-${finding.lineEnd}` : ''}\nSeverity: ${finding.severity} | Confidence: ${finding.confidence}%\nEvidence: ${finding.evidence?.substring(0, 200) || '(none)'}\n\nIf verification fails, the fixer re-runs ONCE with the failure feedback (a second fix credit applies only if the first attempt fails).`;
+            if (!consumeSessionApproval(fixRunId)) {
+                finding.fixStatus = 'fix-denied';
+                finding.fixDeniedReason = 'Fix approval budget exhausted';
+                continue;
+            }
 
             try {
-                const approval = await fixBroker!.requestApproval(
-                    'securecode.agent-scan (fix generation)',
-                    fixSummary,
-                    [code, language, finding.type, finding.line, finding.lineEnd, finding.evidence, finding.severity, finding.confidence],
-                    120_000,
-                    'paid-generation',
-                    ctx.workspaceRoot,
-                    { onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required — open ${url} (expires in 120s)`) : undefined },
-                );
-
-                if (!approval.approved) {
-                    finding.fixStatus = 'fix-denied';
-                    finding.fixDeniedReason = approval.reason;
-                    continue;
-                }
-
-                // Ground the fixer in everything the scanner proved.
                 const verificationEvidenceParts: string[] = [];
                 if (finding.provenReason) verificationEvidenceParts.push(`Original verification: ${finding.provenReason}`);
                 if (finding.probeEvidence) verificationEvidenceParts.push(`Runtime probe (${finding.probeRule}): ${String(finding.probeEvidence).slice(0, 1200)}`);
                 if (finding.proofEvidence) verificationEvidenceParts.push(`Proof evidence: ${JSON.stringify(finding.proofEvidence).slice(0, 1200)}`);
                 const verificationEvidence = verificationEvidenceParts.join('\n\n');
 
-                // Generate → apply-check → differential gate → sandbox verify.
-                // A failed verification triggers ONE regeneration with the
-                // failure feedback appended, under the same approval.
                 const MAX_FIX_ATTEMPTS = 2;
                 const replaceRange = { start_line: finding.line, end_line: finding.lineEnd || finding.line };
                 const sinkLanguage = (['javascript', 'typescript', 'tsx', 'python'] as const).includes(language as any)
@@ -1141,6 +1158,11 @@ async function scanTarget(
 
                 while (true) {
                     attempt++;
+                    if (attempt > 1 && !consumeSessionApproval(fixRunId)) {
+                        finding.fixStatus = 'fix-denied';
+                        finding.fixDeniedReason = 'Fix approval budget exhausted for regeneration';
+                        break;
+                    }
                     const attemptEvidence = attempt > 1 && lastFeedback
                         ? `${verificationEvidence ? verificationEvidence + '\n\n' : ''}PREVIOUS FIX ATTEMPT FAILED: ${lastFeedback}\nProduce a DIFFERENT fix that addresses this exact failure.`
                         : verificationEvidence;
@@ -1172,13 +1194,9 @@ async function scanTarget(
                         confidence: fixResp.confidence,
                     };
                     finding.fixStatus = 'fix-generated';
-                    finding.fixApprovalId = approval.requestId;
+                    finding.fixApprovalId = fixRunId;
                     finding.fixAttempts = attempt;
 
-                    // Cheap local differential gate before the expensive
-                    // sandbox verify: syntax + sink diff + regressions, all
-                    // tree-sitter (no LLM). A hard failure regenerates
-                    // immediately instead of burning sandbox rounds.
                     const merge = mergeFixedCode(code, fixResp.fixed_code, replaceRange);
                     if (merge.ok && sinkLanguage) {
                         try {
@@ -1199,14 +1217,6 @@ async function scanTarget(
                         } catch { /* differential gate is best-effort */ }
                     }
 
-                    // 4c. Re-verify the fix — re-run the exploit against the
-                    // merged fixed code to prove the fix actually closed the
-                    // vulnerability. Uses a separate, smaller budget so a
-                    // single fix verification cannot consume the entire
-                    // original scan verification budget. No second approval
-                    // needed: the user already approved fix generation, and
-                    // this runs inside the existing sandbox without modifying
-                    // any workspace files.
                     try {
                         if (scanBudgetExhausted) {
                             finding.fixVerification = {
@@ -1256,7 +1266,6 @@ async function scanTarget(
 
                         if (fixVerifyResult.scanBudgetExhausted) scanBudgetExhausted = true;
                         finding.fixVerification = fixVerifyResult;
-                        // Map the fix verification status to the fixStatus field.
                         switch (fixVerifyResult.status) {
                             case 'closed':
                                 finding.fixStatus = 'fix-verified-closed';
@@ -1277,11 +1286,8 @@ async function scanTarget(
                             case 'inconclusive':
                                 finding.fixStatus = 'fix-verification-inconclusive';
                                 break;
-                            // sandbox-unavailable and cancelled leave fixStatus as 'fix-generated'
                         }
                     } catch (fixVerifyErr: any) {
-                        // Fix verification failure must not block the scan — the
-                        // fix is still generated, just not re-verified.
                         console.warn(`[Agent Scan] Fix verification failed for ${finding.type} at L${finding.line}: ${fixVerifyErr?.message || fixVerifyErr}`);
                     }
                     break;
@@ -1292,9 +1298,12 @@ async function scanTarget(
                 console.warn(`[Agent Scan] Fix generation failed for ${finding.type} at L${finding.line}: ${err.message}`);
             }
         }
+        } // end else (fixSessionGranted)
     } finally {
+        revokeSessionApproval(fixRunId);
         if (fixBroker) await fixBroker.stop();
     }
+    } // end else (assurance mode without generateFixes)
     } // end else (skipFix)
 
     // 5. Write to cache before returning — only fully-successful scans:
@@ -1420,17 +1429,50 @@ async function scanTarget(
             });
             grid.applyAttackOutcome(attackOutcome);
             for (const ef of attackOutcome.exploitedFindings ?? []) {
-                provenFindings.push({
-                    line: ef.line,
-                    type: ef.type,
-                    severity: 'high' as any,
-                    confidence: 85,
-                    evidence: ef.title,
-                    why: ef.why,
-                    proven: 'PROVEN' as any,
-                    provenReason: `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId})`,
-                    ...(ef.artifactPath ? { proofArtifact: ef.artifactPath } : {}),
-                } as any);
+                const efType = ef.observedType ?? ef.type;
+                const cellRisk = grid.getCell(ef.cellId)?.risk;
+                const efSeverity: string = ef.severity ?? (
+                    cellRisk === 5 ? 'critical' : cellRisk === 4 ? 'high' : cellRisk === 3 ? 'medium' : 'low'
+                );
+                const efConfidence = ef.confidence ?? 85;
+                const efReason = `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId})`;
+
+                const normalizeType = (t: string) => t.toLowerCase().replace(/[-\s]+/g, '_');
+                const RELATED_TYPES = new Set([
+                    'mass_assignment', 'privilege_escalation', 'broken_access_control',
+                ]);
+                const isRelated = (a: string, b: string) => {
+                    const na = normalizeType(a);
+                    const nb = normalizeType(b);
+                    if (na === nb) return true;
+                    return RELATED_TYPES.has(na) && RELATED_TYPES.has(nb);
+                };
+
+                const existing = provenFindings.find(f =>
+                    Math.abs(f.line - ef.line) <= 3 && isRelated(f.type, efType)
+                );
+
+                if (existing) {
+                    if (existing.proven !== 'PROVEN') existing.proven = 'PROVEN';
+                    existing.provenReason = [existing.provenReason, efReason].filter(Boolean).join('; ');
+                    const SEV_RANK: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2 };
+                    if ((SEV_RANK[efSeverity] ?? 0) > (SEV_RANK[existing.severity] ?? 0)) {
+                        (existing as any).severity = efSeverity;
+                    }
+                    if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
+                } else {
+                    provenFindings.push({
+                        line: ef.line,
+                        type: efType,
+                        severity: efSeverity as any,
+                        confidence: efConfidence,
+                        evidence: ef.title,
+                        why: ef.why,
+                        proven: 'PROVEN' as any,
+                        provenReason: efReason,
+                        ...(ef.artifactPath ? { proofArtifact: ef.artifactPath } : {}),
+                    } as any);
+                }
             }
         } catch (atkErr: any) {
             grid.addWarning(`Attack tests failed: ${atkErr?.message || atkErr}`);
@@ -1461,7 +1503,18 @@ async function scanTarget(
         : {};
     const creditText = formatCreditUsage(creditFields);
     const approvalText = approvalSkippedCount > 0 ? formatApprovalSkipped(approvalSkippedCount) : '';
-    const summary = [agentResult.summary, creditText, approvalText].filter(Boolean).join(' ') || agentResult.summary;
+    const availableFixes = provenFindings.filter(f => f.fixStatus === 'available');
+    const fixesAvailableField = availableFixes.length > 0
+        ? {
+            fixesAvailable: {
+                count: availableFixes.length,
+                findings: availableFixes.map(f => ({ type: f.type, line: f.line, severity: f.severity, proven: f.proven })),
+                next: 'call securecode.fix (or re-run with generateFixes: true) to generate verified fixes',
+            },
+        }
+        : {};
+    const fixAvailText = availableFixes.length > 0 ? `${availableFixes.length} fix(es) available — re-run with generateFixes: true or call securecode.fix.` : '';
+    const summary = [agentResult.summary, creditText, approvalText, fixAvailText].filter(Boolean).join(' ') || agentResult.summary;
 
     return {
         agentSummary: agentResult.summary,
@@ -1501,6 +1554,7 @@ async function scanTarget(
             },
             ...(part ? { segment: part.segment } : {}),
             ...(assuranceResult ? { assurance: assuranceResult } : {}),
+            ...fixesAvailableField,
         },
     };
 }

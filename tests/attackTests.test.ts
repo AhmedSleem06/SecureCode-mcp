@@ -335,4 +335,63 @@ describe('runAssuranceAttackTests', () => {
         expect(mocks.requestSessionApproval).not.toHaveBeenCalled();
         expect(out).toMatchObject({ scenarioUpdates: [], cellUpdates: [], exploitedFindings: [], costUsd: 0, approval: { granted: false } });
     });
+
+    it('exploited finding includes observedType, severity, confidence when API returns observedWeakness', async () => {
+        const cells = [cell('c1', 5, 'safe', 'traced')];
+        const scenarios = [scen('s1', 'c1')];
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN);
+        setupApi([{
+            ...AN.exploited,
+            observedWeakness: { type: 'idor', severity: 'high', matchesCell: true, summary: 'User B read doc 1 without auth' },
+        }]);
+        const out = await runAssuranceAttackTests(baseInput(cells, scenarios));
+        expect(out.exploitedFindings).toHaveLength(1);
+        expect(out.exploitedFindings[0]).toMatchObject({
+            observedType: 'idor',
+            severity: 'high',
+            confidence: 85,
+        });
+        expect(out.cellUpdates).toEqual([expect.objectContaining({ cellId: 'c1', status: 'vulnerable', closure: 'tested' })]);
+    });
+
+    it('exploited finding omits observedType/severity/confidence when API returns no observedWeakness', async () => {
+        const cells = [cell('c1', 5, 'safe', 'traced')];
+        const scenarios = [scen('s1', 'c1')];
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN);
+        setupApi([AN.exploited]);
+        const out = await runAssuranceAttackTests(baseInput(cells, scenarios));
+        expect(out.exploitedFindings).toHaveLength(1);
+        expect(out.exploitedFindings[0].observedType).toBeUndefined();
+        expect(out.exploitedFindings[0].severity).toBeUndefined();
+        expect(out.exploitedFindings[0].confidence).toBeUndefined();
+        expect(out.cellUpdates).toEqual([expect.objectContaining({ cellId: 'c1', status: 'vulnerable', closure: 'tested' })]);
+    });
+
+    it('matchesCell=false does NOT mark the cell as vulnerable', async () => {
+        const cells = [cell('c1', 5, 'safe', 'traced')];
+        const scenarios = [scen('s1', 'c1')];
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN);
+        setupApi([{
+            ...AN.exploited,
+            observedWeakness: { type: 'missing_rate_limiting', severity: 'medium', matchesCell: false, summary: 'No rate limit on signup' },
+        }]);
+        const out = await runAssuranceAttackTests(baseInput(cells, scenarios));
+        expect(out.exploitedFindings).toHaveLength(1);
+        expect(out.exploitedFindings[0]).toMatchObject({ observedType: 'missing_rate_limiting', severity: 'medium' });
+        expect(out.cellUpdates).toEqual([]);
+    });
+
+    it('matchesCell=false with a blocked scenario on the same cell marks the cell safe/tested', async () => {
+        const cells = [cell('c1', 5, 'safe', 'traced')];
+        const scenarios = [scen('s1', 'c1', 5), scen('s2', 'c1', 4)];
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN).mockResolvedValueOnce(BLOCKED_RUN);
+        setupApi([
+            { ...AN.exploited, observedWeakness: { type: 'other_weakness', severity: 'low', matchesCell: false, summary: 'different weakness' } },
+            AN.blocked,
+        ]);
+        const out = await runAssuranceAttackTests(baseInput(cells, scenarios));
+        expect(out.exploitedFindings).toHaveLength(1);
+        expect(out.cellUpdates).toEqual([expect.objectContaining({ cellId: 'c1', status: 'safe', closure: 'tested' })]);
+        expect(out.cellUpdates[0].note).toContain('mismatched exploit');
+    });
 });

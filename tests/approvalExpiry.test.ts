@@ -21,6 +21,8 @@ vi.mock('../src/api/client', async (importOriginal) => {
 
 vi.mock('../src/approval/broker', () => ({
     ApprovalBroker: vi.fn(),
+    consumeSessionApproval: vi.fn().mockReturnValue(true),
+    revokeSessionApproval: vi.fn().mockReturnValue(true),
 }));
 
 vi.mock('../src/project-map/mapContext', () => ({

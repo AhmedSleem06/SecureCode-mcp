@@ -232,6 +232,15 @@ export interface VerifyAnalyzeResponse {
     scanCredits?: number;
     /** Dollar cost the API charged for this analyze call (credits → USD). */
     costUsd?: number;
+    scenarioVerdict?: 'BLOCKED' | 'EXPLOITED' | 'UNTESTABLE';
+    targetReached?: boolean;
+    failureLine?: number | null;
+    observedWeakness?: {
+        type: string;
+        severity: 'critical' | 'high' | 'medium' | 'low';
+        matchesCell: boolean;
+        summary: string;
+    } | null;
 }
 
 export interface VerifyProbePlanRequest {

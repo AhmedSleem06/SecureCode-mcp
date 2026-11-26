@@ -26,7 +26,7 @@ export interface AssuranceAttackTestInput {
 export interface AssuranceAttackTestOutcome {
     scenarioUpdates: { scenarioId: string; test: 'blocked' | 'exploited' | 'untestable' | 'skipped'; testNote: string; artifactPath?: string; backend?: string; isolation?: string }[];
     cellUpdates: CellUpdate[];
-    exploitedFindings: { cellId: string; scenarioId: string; type: string; line: number; title: string; why: string; artifactPath?: string }[];
+    exploitedFindings: { cellId: string; scenarioId: string; type: string; line: number; title: string; why: string; artifactPath?: string; observedType?: string; severity?: 'critical' | 'high' | 'medium' | 'low'; confidence?: number }[];
     approval: { granted: boolean; reason: string };
     costUsd: number;
 }
@@ -146,7 +146,7 @@ export function parseScenarioMarker(output: string): ScenarioMarker {
     }
 }
 
-type AnalyzeWithScenario = VerifyAnalyzeResponse & { scenarioVerdict?: ScenarioVerdict; targetReached?: boolean; failureLine?: number | null };
+type AnalyzeWithScenario = VerifyAnalyzeResponse & { scenarioVerdict?: ScenarioVerdict; targetReached?: boolean; failureLine?: number | null; observedWeakness?: { type: string; severity: 'critical' | 'high' | 'medium' | 'low'; matchesCell: boolean; summary: string } | null };
 
 /** The run's own marker and sandbox verdict must agree with the analyzer before BLOCKED/EXPLOITED is accepted. */
 export function decideScenarioVerdict(
@@ -176,6 +176,7 @@ interface ScenarioRunResult {
     test: ScenarioTestResult;
     note: string;
     failureLine: number | null;
+    observedWeakness?: { type: string; severity: 'critical' | 'high' | 'medium' | 'low'; matchesCell: boolean; summary: string } | null;
     rounds: ProofArtifactRound[];
     stop?: 'budget' | 'sandbox' | 'cancelled';
 }
@@ -346,7 +347,8 @@ async function runScenarioTest(env: RunEnv, cell: GridCell, scenario: Scenario):
         }
         if (decision.verdict === 'EXPLOITED') {
             const fl = typeof analyze.failureLine === 'number' && Number.isInteger(analyze.failureLine) ? analyze.failureLine : null;
-            return { test: 'exploited', note: `Attack test exploited: ${decision.reason}`, failureLine: fl, rounds };
+            const ow = analyze.observedWeakness && typeof analyze.observedWeakness === 'object' ? analyze.observedWeakness : null;
+            return { test: 'exploited', note: `Attack test exploited: ${decision.reason}`, failureLine: fl, observedWeakness: ow, rounds };
         }
         lastNote = decision.reason;
         if (!decision.retryable) break;
@@ -370,7 +372,7 @@ function clip(text: string): string {
 
 export function buildAssuranceCellUpdates(
     cells: GridCell[],
-    results: Array<{ cell: GridCell; scenario: Scenario; test: ScenarioTestResult; note: string; line?: number }>,
+    results: Array<{ cell: GridCell; scenario: Scenario; test: ScenarioTestResult; note: string; line?: number; observedWeakness?: ScenarioRunResult['observedWeakness'] }>,
 ): CellUpdate[] {
     const byCell = new Map<string, typeof results>();
     for (const r of results) {
@@ -382,28 +384,32 @@ export function buildAssuranceCellUpdates(
     const updates: CellUpdate[] = [];
     for (const [cellId, list] of byCell) {
         const cell = list[0].cell;
-        const exploited = list.filter((r) => r.test === 'exploited');
+        const matchingExploited = list.filter((r) => r.test === 'exploited' && r.observedWeakness?.matchesCell !== false);
+        const mismatchExploited = list.filter((r) => r.test === 'exploited' && r.observedWeakness?.matchesCell === false);
         const blocked = list.filter((r) => r.test === 'blocked');
         const untestable = list.filter((r) => r.test === 'untestable');
         const ids = (rs: typeof list) => rs.map((r) => r.scenario.id).join(', ');
-        if (exploited.length > 0) {
-            const lines = [...new Set(exploited.map((r) => r.line).filter((n): n is number => typeof n === 'number' && n > 0))];
+        if (matchingExploited.length > 0) {
+            const lines = [...new Set(matchingExploited.map((r) => r.line).filter((n): n is number => typeof n === 'number' && n > 0))];
             updates.push({
                 cellId,
                 status: 'vulnerable',
                 closure: 'tested',
                 ...(lines.length > 0 ? { evidenceLines: lines } : cell.evidenceLines?.length ? { evidenceLines: cell.evidenceLines } : {}),
-                note: clip(`Attack test exploited (scenario ${ids(exploited)}): ${exploited[0].note.replace(/^Attack test exploited:\s*/, '')}`),
+                note: clip(`Attack test exploited (scenario ${ids(matchingExploited)}): ${matchingExploited[0].note.replace(/^Attack test exploited:\s*/, '')}`),
             });
         } else if (blocked.length > 0) {
             const extra = untestable.length > 0 ? `; untestable: ${ids(untestable)}` : '';
+            const mismatch = mismatchExploited.length > 0 ? `; mismatched exploit: ${ids(mismatchExploited)}` : '';
             updates.push({
                 cellId,
                 status: 'safe',
                 closure: 'tested',
                 ...(cell.evidenceLines?.length ? { evidenceLines: cell.evidenceLines } : {}),
-                note: clip(`Attack test blocked (scenario ${ids(blocked)}${extra}): ${blocked[0].note.replace(/^Attack test blocked:\s*/, '')}`),
+                note: clip(`Attack test blocked (scenario ${ids(blocked)}${extra}${mismatch}): ${blocked[0].note.replace(/^Attack test blocked:\s*/, '')}`),
             });
+        } else if (mismatchExploited.length > 0) {
+            // exploited a different weakness than what the cell describes — do not mark vulnerable
         } else if (untestable.length > 0 && (!cell.closure || cell.closure === 'untestable') && cell.status !== 'depends') {
             updates.push({
                 cellId,
@@ -440,7 +446,7 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
     const runtimeInfo = detectRuntime(ctx.workspaceRoot, target.filePath || undefined);
     const sandbox = detectSandbox();
 
-    const results: Array<{ cell: GridCell; scenario: Scenario; test: ScenarioTestResult; note: string; line?: number; artifactPath?: string }> = [];
+    const results: Array<{ cell: GridCell; scenario: Scenario; test: ScenarioTestResult; note: string; line?: number; artifactPath?: string; observedWeakness?: ScenarioRunResult['observedWeakness'] }> = [];
     const finalize = (): AssuranceAttackTestOutcome => {
         const backend = sandbox?.name;
         const isolation = backend === 'docker' ? 'full' : (backend === 'local' ? 'reduced' : undefined);
@@ -573,10 +579,11 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
                     isolation: env.sandboxIsolation,
                 }) ?? undefined;
             }
-            results.push({ cell, scenario, test: r.test, note: r.note, line, ...(artifactPath ? { artifactPath } : {}) });
+            results.push({ cell, scenario, test: r.test, note: r.note, line, ...(artifactPath ? { artifactPath } : {}), ...(r.observedWeakness ? { observedWeakness: r.observedWeakness } : {}) });
             if (r.test === 'exploited') {
                 consecutiveUntestable = 0;
                 lastFailureClass = '';
+                const ow = r.observedWeakness;
                 outcome.exploitedFindings.push({
                     cellId: cell.id,
                     scenarioId: scenario.id,
@@ -585,6 +592,7 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
                     title: cell.title,
                     why: `Attack scenario ${scenario.id} (${scenario.actor}): ${scenario.steps.join(' → ')}. Expected: ${scenario.expectSecure}. ${r.note}`.slice(0, 1500),
                     ...(artifactPath ? { artifactPath } : {}),
+                    ...(ow ? { observedType: ow.type, severity: ow.severity, confidence: 85 } : {}),
                 });
             } else if (r.test === 'blocked') {
                 consecutiveUntestable = 0;

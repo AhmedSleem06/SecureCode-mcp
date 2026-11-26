@@ -65,6 +65,51 @@ describe('buildAssuranceCellUpdates', () => {
         const updates = buildAssuranceCellUpdates(cells, results);
         expect(updates).toHaveLength(0);
     });
+
+    it('matchesCell=false does not mark the cell as vulnerable', () => {
+        const cells = [cell('a', 5)];
+        const results = [{
+            cell: cells[0], scenario: scenario('s1', 'a'), test: 'exploited' as const, note: 'exploited but different weakness', line: 10,
+            observedWeakness: { type: 'missing_rate_limiting', severity: 'medium' as const, matchesCell: false, summary: 'No rate limiting' },
+        }];
+        const updates = buildAssuranceCellUpdates(cells, results);
+        expect(updates).toHaveLength(0);
+    });
+
+    it('matchesCell=true (or absent) marks the cell as vulnerable normally', () => {
+        const cells = [cell('a', 5)];
+        const results = [{
+            cell: cells[0], scenario: scenario('s1', 'a'), test: 'exploited' as const, note: 'exploited', line: 10,
+            observedWeakness: { type: 'sqli', severity: 'critical' as const, matchesCell: true, summary: 'SQL injection found' },
+        }];
+        const updates = buildAssuranceCellUpdates(cells, results);
+        expect(updates).toHaveLength(1);
+        expect(updates[0].status).toBe('vulnerable');
+    });
+
+    it('no observedWeakness still marks cell as vulnerable (backward compat)', () => {
+        const cells = [cell('a', 5)];
+        const results = [{ cell: cells[0], scenario: scenario('s1', 'a'), test: 'exploited' as const, note: 'exploited', line: 10 }];
+        const updates = buildAssuranceCellUpdates(cells, results);
+        expect(updates).toHaveLength(1);
+        expect(updates[0].status).toBe('vulnerable');
+    });
+
+    it('mixed: matchesCell=false exploit + blocked on same cell yields safe/tested', () => {
+        const cells = [cell('a', 5)];
+        const results = [
+            {
+                cell: cells[0], scenario: scenario('s1', 'a'), test: 'exploited' as const, note: 'different weakness', line: 10,
+                observedWeakness: { type: 'other', severity: 'low' as const, matchesCell: false, summary: 'mismatch' },
+            },
+            { cell: cells[0], scenario: scenario('s2', 'a'), test: 'blocked' as const, note: 'blocked', line: 10 },
+        ];
+        const updates = buildAssuranceCellUpdates(cells, results);
+        expect(updates).toHaveLength(1);
+        expect(updates[0].status).toBe('safe');
+        expect(updates[0].closure).toBe('tested');
+        expect(updates[0].note).toContain('mismatched exploit');
+    });
 });
 
 describe('constants', () => {

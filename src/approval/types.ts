@@ -56,7 +56,7 @@ export interface AuditEntry {
     remaining?: number;
 }
 
-export type SessionApprovalTool = 'assurance-tests';
+export type SessionApprovalTool = 'assurance-tests' | 'fix-generation';
 
 export interface SessionApprovalScope {
     runId: string;
