@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import type { SandboxBackend, SandboxExecuteOptions, SandboxExecuteResult } from './verificationSandbox';
-import { fileExtFor, parseVerdictCommandMode, bundleScript } from './verificationSandbox';
+import { fileExtFor, parseVerdictCommandMode, bundleScript, discoverAncestorNodeModules } from './verificationSandbox';
 
 const PASS_PATTERN = /^PASS:\s*(.+)$/m;
 const FAIL_PATTERN = /^FAIL:\s*(.+)$/m;
@@ -52,20 +52,102 @@ function copyWorkspace(src: string, dest: string, stats: CopyStats): void {
     }
 }
 
-function linkNodeModules(workspaceRoot: string, copyDir: string): boolean {
-    const srcModules = path.join(workspaceRoot, 'node_modules');
-    if (!fs.existsSync(srcModules)) return false;
-    const destModules = path.join(copyDir, 'node_modules');
-    try {
-        if (process.platform === 'win32') {
-            fs.symlinkSync(srcModules, destModules, 'junction');
-        } else {
-            fs.symlinkSync(srcModules, destModules, 'dir');
+interface MirroredLayout {
+    tmpRoot: string;
+    workspaceCopy: string;
+    junctions: string[];
+    junctionTargets: string[];
+}
+
+function buildMirroredLayout(workspaceRoot: string): MirroredLayout {
+    const wsNorm = path.resolve(workspaceRoot);
+    const ancestors = discoverAncestorNodeModules(wsNorm);
+    const externalNMs = ancestors.dirs.filter(nm =>
+        path.resolve(nm) !== path.join(wsNorm, 'node_modules')
+    );
+
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'securecode-local-'));
+
+    if (externalNMs.length === 0) {
+        const wsCopy = tmpRoot;
+        copyWorkspace(wsNorm, wsCopy, { bytes: 0, files: 0 });
+        const junctions: string[] = [];
+        const junctionTargets: string[] = [];
+        const wsOwnNM = path.join(wsNorm, 'node_modules');
+        if (fs.existsSync(wsOwnNM)) {
+            const dest = path.join(wsCopy, 'node_modules');
+            try {
+                if (process.platform === 'win32') {
+                    fs.symlinkSync(wsOwnNM, dest, 'junction');
+                } else {
+                    fs.symlinkSync(wsOwnNM, dest, 'dir');
+                }
+                junctions.push(dest);
+                junctionTargets.push(wsOwnNM);
+            } catch { /* */ }
         }
-        return true;
-    } catch {
-        return false;
+        return { tmpRoot, workspaceCopy: wsCopy, junctions, junctionTargets };
     }
+
+    let topDir = wsNorm;
+    for (const nm of externalNMs) {
+        const nmParent = path.dirname(path.resolve(nm));
+        if (nmParent.length < topDir.length) topDir = nmParent;
+    }
+
+    const relWs = path.relative(topDir, wsNorm);
+    const wsCopy = path.join(tmpRoot, relWs);
+    fs.mkdirSync(wsCopy, { recursive: true });
+    copyWorkspace(wsNorm, wsCopy, { bytes: 0, files: 0 });
+
+    const junctions: string[] = [];
+    const junctionTargets: string[] = [];
+
+    const wsOwnNM = path.join(wsNorm, 'node_modules');
+    if (fs.existsSync(wsOwnNM)) {
+        const dest = path.join(wsCopy, 'node_modules');
+        try {
+            if (process.platform === 'win32') {
+                fs.symlinkSync(wsOwnNM, dest, 'junction');
+            } else {
+                fs.symlinkSync(wsOwnNM, dest, 'dir');
+            }
+            junctions.push(dest);
+            junctionTargets.push(wsOwnNM);
+        } catch { /* */ }
+    }
+
+    for (const nm of externalNMs) {
+        const nmNorm = path.resolve(nm);
+        const relNM = path.relative(topDir, nmNorm);
+        const dest = path.join(tmpRoot, relNM);
+        if (fs.existsSync(dest)) continue;
+        try {
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            if (process.platform === 'win32') {
+                fs.symlinkSync(nmNorm, dest, 'junction');
+            } else {
+                fs.symlinkSync(nmNorm, dest, 'dir');
+            }
+            junctions.push(dest);
+            junctionTargets.push(nmNorm);
+        } catch { /* skip */ }
+    }
+
+    return { tmpRoot, workspaceCopy: wsCopy, junctions, junctionTargets };
+}
+
+function cleanupMirroredLayout(layout: MirroredLayout): void {
+    for (const junc of layout.junctions) {
+        try {
+            if (process.platform === 'win32') {
+                fs.rmSync(junc, { recursive: false });
+            } else {
+                fs.unlinkSync(junc);
+            }
+        } catch { /* already gone */ }
+    }
+    try { fs.rmSync(layout.tmpRoot, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
 function detectPermissionModelSupport(): 'full' | 'experimental' | 'none' {
@@ -112,6 +194,53 @@ function getPermissionSupport(): 'full' | 'experimental' | 'none' {
 
 export function _resetPermissionCacheForTests(): void {
     _permissionSupport = undefined;
+    _permProbeWithJunctionResult = undefined;
+}
+
+let _permProbeWithJunctionResult: boolean | undefined;
+
+function permissionModelWorksWithJunction(layout: MirroredLayout): boolean {
+    if (_permProbeWithJunctionResult !== undefined) return _permProbeWithJunctionResult;
+    const support = getPermissionSupport();
+    if (support === 'none') { _permProbeWithJunctionResult = false; return false; }
+    if (layout.junctions.length === 0) { _permProbeWithJunctionResult = true; return true; }
+
+    const flag = support === 'full' ? '--permission' : '--experimental-permission';
+    const sep = process.platform === 'win32' ? ';' : ',';
+    const star = process.platform === 'win32' ? '\\*' : '/*';
+    const nodeDir = path.dirname(process.execPath);
+    const readPaths = [layout.tmpRoot + star, nodeDir + star];
+    for (const t of layout.junctionTargets) readPaths.push(t + star);
+
+    const testPkg = layout.junctionTargets.length > 0
+        ? findAnyPackageInNM(layout.junctionTargets[0])
+        : null;
+    if (!testPkg) { _permProbeWithJunctionResult = true; return true; }
+
+    const r = spawnSync(process.execPath, [
+        flag,
+        `--allow-fs-read=${readPaths.join(sep)}`,
+        `--allow-fs-write=${layout.tmpRoot + star}`,
+        '-e', `try{require("${testPkg}");process.exit(0)}catch{process.exit(1)}`,
+    ], {
+        cwd: layout.workspaceCopy,
+        stdio: 'ignore',
+        timeout: 8000,
+        env: { NODE_ENV: 'test', PATH: process.env.PATH || '', PATHEXT: process.env.PATHEXT || '', SystemRoot: process.env.SystemRoot || '' },
+    });
+    _permProbeWithJunctionResult = r.status === 0;
+    return _permProbeWithJunctionResult;
+}
+
+function findAnyPackageInNM(nmDir: string): string | null {
+    try {
+        const entries = fs.readdirSync(nmDir);
+        for (const e of entries) {
+            if (e.startsWith('.') || e.startsWith('@')) continue;
+            if (fs.existsSync(path.join(nmDir, e, 'package.json'))) return e;
+        }
+    } catch { /* */ }
+    return null;
 }
 
 const NETWORK_BLOCK_PRELUDE = `
@@ -224,8 +353,8 @@ const NETWORK_BLOCK_PRELUDE = `
 })();
 `;
 
-function buildPreludeFile(tmpDir: string): string {
-    const p = path.join(tmpDir, '_securecode_prelude.cjs');
+function buildPreludeFile(dir: string): string {
+    const p = path.join(dir, '_securecode_prelude.cjs');
     fs.writeFileSync(p, NETWORK_BLOCK_PRELUDE, 'utf8');
     return p;
 }
@@ -266,14 +395,11 @@ export class LocalSandbox implements SandboxBackend {
             return { verdict: 'error', output: 'Command mode requires "executable"', exitCode: -1, backend: this.name };
         }
 
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'securecode-local-'));
+        const layout = buildMirroredLayout(opts.workspaceRoot);
         try {
-            copyWorkspace(opts.workspaceRoot, tmpDir, { bytes: 0, files: 0 });
-            const linked = linkNodeModules(opts.workspaceRoot, tmpDir);
-            const prelude = buildPreludeFile(tmpDir);
-
-            const env = this.buildEnv(tmpDir, opts.workspaceRoot, linked);
-            const permArgs = this.buildPermissionArgs(tmpDir, opts.workspaceRoot, linked);
+            const prelude = buildPreludeFile(layout.workspaceCopy);
+            const permArgs = this.buildPermissionArgs(layout);
+            const env = this.buildEnv(layout, permArgs.length > 0);
 
             const args = [...(opts.args || [])];
             const nodeBased = executable === 'npm' || executable === 'npx';
@@ -281,25 +407,22 @@ export class LocalSandbox implements SandboxBackend {
             const result = await this.runProcess(
                 executable,
                 nodeBased ? ['--require', prelude, ...args] : args,
-                tmpDir, env, permArgs, opts, false,
+                layout.workspaceCopy, env, permArgs, opts, false, permArgs.length > 0,
             );
             return result;
         } finally {
-            try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
+            cleanupMirroredLayout(layout);
         }
     }
 
     private async executeScript(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
         const runner = opts.runner || 'node';
         const needsBundle = runner === 'tsx';
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'securecode-local-'));
+        const layout = buildMirroredLayout(opts.workspaceRoot);
         const srcCleanup: string[] = [];
         try {
-            copyWorkspace(opts.workspaceRoot, tmpDir, { bytes: 0, files: 0 });
-            const linked = linkNodeModules(opts.workspaceRoot, tmpDir);
-
             const ext = fileExtFor(runner);
-            const scDir = path.join(tmpDir, '.securecode');
+            const scDir = path.join(layout.workspaceCopy, '.securecode');
             fs.mkdirSync(scDir, { recursive: true });
             const suffix = uniqueSuffix();
 
@@ -316,7 +439,7 @@ export class LocalSandbox implements SandboxBackend {
 
                 const tb = bundleScript(srcTest, opts.workspaceRoot, srcScDir);
                 if (!tb.ok) {
-                    return { verdict: 'error', output: `TypeScript bundle failed: ${tb.error}`, exitCode: -1, backend: this.isolationLabel() };
+                    return { verdict: 'error', output: `TypeScript bundle failed: ${tb.error}`, exitCode: -1, backend: 'local/reduced' };
                 }
                 srcCleanup.push(tb.outPath!);
                 const bundleName = path.basename(tb.outPath!);
@@ -330,7 +453,7 @@ export class LocalSandbox implements SandboxBackend {
 
                     const sb = bundleScript(srcSetup, opts.workspaceRoot, srcScDir);
                     if (!sb.ok) {
-                        return { verdict: 'error', output: `TypeScript setup bundle failed: ${sb.error}`, exitCode: -1, backend: this.isolationLabel() };
+                        return { verdict: 'error', output: `TypeScript setup bundle failed: ${sb.error}`, exitCode: -1, backend: 'local/reduced' };
                     }
                     srcCleanup.push(sb.outPath!);
                     const setupBundleName = path.basename(sb.outPath!);
@@ -347,37 +470,38 @@ export class LocalSandbox implements SandboxBackend {
                 }
             }
 
-            const prelude = buildPreludeFile(tmpDir);
-            const env = this.buildEnv(tmpDir, opts.workspaceRoot, linked);
-            const permArgs = this.buildPermissionArgs(tmpDir, opts.workspaceRoot, linked);
+            const prelude = buildPreludeFile(layout.workspaceCopy);
+            const permArgs = this.buildPermissionArgs(layout);
+            const env = this.buildEnv(layout, permArgs.length > 0);
+            const permApplied = permArgs.length > 0;
 
             if (setupFile) {
                 const setupResult = await this.runProcess(
                     this.resolveRunner(runner), this.buildRunnerArgs(runner, setupFile, prelude, permArgs),
-                    tmpDir, env, [], { ...opts, timeoutMs: Math.min(opts.timeoutMs, 10_000) }, true,
+                    layout.workspaceCopy, env, [], { ...opts, timeoutMs: Math.min(opts.timeoutMs, 10_000) }, true, permApplied,
                 );
                 if (setupResult.verdict === 'error' || setupResult.verdict === 'timeout') {
                     return {
                         verdict: 'error',
                         output: `Setup script failed: ${setupResult.output}`,
                         exitCode: setupResult.exitCode,
-                        backend: this.isolationLabel(),
+                        backend: permApplied ? 'local' : 'local/reduced',
                     };
                 }
             }
 
             const result = await this.runProcess(
                 this.resolveRunner(runner), this.buildRunnerArgs(runner, testFile, prelude, permArgs),
-                tmpDir, env, [], opts, true,
+                layout.workspaceCopy, env, [], opts, true, permApplied,
             );
             return result;
         } finally {
             for (const f of srcCleanup) { try { fs.unlinkSync(f); } catch { /* */ } }
-            try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
+            cleanupMirroredLayout(layout);
         }
     }
 
-    private buildEnv(tmpDir: string, workspaceRoot: string, linked: boolean): Record<string, string> {
+    private buildEnv(layout: MirroredLayout, _permApplied: boolean): Record<string, string> {
         const env: Record<string, string> = {
             NODE_ENV: 'test',
             PATH: process.env.PATH || '',
@@ -385,27 +509,25 @@ export class LocalSandbox implements SandboxBackend {
         };
         if (process.platform === 'win32') {
             env.SystemRoot = process.env.SystemRoot || 'C:\\Windows';
-            env.TEMP = path.join(tmpDir, '_tmp');
-            env.TMP = env.TEMP;
-            try { fs.mkdirSync(env.TEMP, { recursive: true }); } catch { /* */ }
-        }
-        if (!linked) {
-            const srcModules = path.join(workspaceRoot, 'node_modules');
-            if (fs.existsSync(srcModules)) {
-                env.NODE_PATH = srcModules;
-            }
+            const tmpSub = path.join(layout.workspaceCopy, '_tmp');
+            env.TEMP = tmpSub;
+            env.TMP = tmpSub;
+            try { fs.mkdirSync(tmpSub, { recursive: true }); } catch { /* */ }
         }
         return env;
     }
 
-    private buildPermissionArgs(tmpDir: string, workspaceRoot: string, linked: boolean): string[] {
+    private buildPermissionArgs(layout: MirroredLayout): string[] {
         const support = getPermissionSupport();
         if (support === 'none') return [];
+
+        if (!permissionModelWorksWithJunction(layout)) return [];
+
         const flag = support === 'full' ? '--permission' : '--experimental-permission';
         const star = process.platform === 'win32' ? '\\*' : '/*';
-        const readPaths = [tmpDir + star];
-        if (linked) {
-            readPaths.push(path.join(workspaceRoot, 'node_modules') + star);
+        const readPaths = [layout.tmpRoot + star];
+        for (const t of layout.junctionTargets) {
+            readPaths.push(t + star);
         }
         const nodeDir = path.dirname(process.execPath);
         readPaths.push(nodeDir + star);
@@ -413,7 +535,7 @@ export class LocalSandbox implements SandboxBackend {
         return [
             flag,
             `--allow-fs-read=${readPaths.join(sep)}`,
-            `--allow-fs-write=${tmpDir + star}`,
+            `--allow-fs-write=${layout.tmpRoot + star}`,
         ];
     }
 
@@ -432,11 +554,6 @@ export class LocalSandbox implements SandboxBackend {
         return args;
     }
 
-    private isolationLabel(): string {
-        const support = getPermissionSupport();
-        return support !== 'none' ? 'local' : 'local/reduced';
-    }
-
     private runProcess(
         bin: string,
         args: string[],
@@ -445,8 +562,10 @@ export class LocalSandbox implements SandboxBackend {
         _permArgs: string[],
         opts: Pick<SandboxExecuteOptions, 'timeoutMs' | 'signal' | 'mode'>,
         parseMarkers: boolean,
+        permApplied: boolean,
     ): Promise<SandboxExecuteResult> {
         const isCommandMode = opts.mode === 'command';
+        const backendLabel = permApplied ? 'local' : 'local/reduced';
         return new Promise((resolve) => {
             let stdout = '';
             let stderr = '';
@@ -486,7 +605,7 @@ export class LocalSandbox implements SandboxBackend {
                     verdict: 'error',
                     output: `Failed to spawn ${bin}: ${err.message}`,
                     exitCode: -1,
-                    backend: this.isolationLabel(),
+                    backend: backendLabel,
                 });
             });
 
@@ -502,7 +621,7 @@ export class LocalSandbox implements SandboxBackend {
                         verdict: 'cancelled',
                         output: `Test cancelled. Partial output:\n${output.slice(0, 4000)}`,
                         exitCode: -1,
-                        backend: this.isolationLabel(),
+                        backend: backendLabel,
                     });
                     return;
                 }
@@ -516,7 +635,7 @@ export class LocalSandbox implements SandboxBackend {
                         verdict: 'timeout',
                         output: `Test timed out after ${opts.timeoutMs}ms. Partial output:\n${output.slice(0, 4000)}`,
                         exitCode: -1,
-                        backend: this.isolationLabel(),
+                        backend: backendLabel,
                     });
                     return;
                 }
@@ -524,7 +643,7 @@ export class LocalSandbox implements SandboxBackend {
                     verdict,
                     output: output.slice(0, 16000),
                     exitCode,
-                    backend: this.isolationLabel(),
+                    backend: backendLabel,
                 });
             });
         });

@@ -41,6 +41,96 @@ import * as path from 'path';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { LocalSandbox } from './localSandbox';
 
+// ── Ancestor node_modules discovery ─────────────────────────────────────────
+
+export interface AncestorNodeModules {
+    dirs: string[];
+    workspaceRoot: string;
+}
+
+function isGitRoot(dir: string): boolean {
+    return fs.existsSync(path.join(dir, '.git'));
+}
+
+export function discoverAncestorNodeModules(workspaceRoot: string): AncestorNodeModules {
+    const result: string[] = [];
+    const wsNormalized = path.resolve(workspaceRoot);
+    let current = wsNormalized;
+    const MAX_LEVELS = 6;
+    let hitGitRoot = false;
+
+    for (let i = 0; i < MAX_LEVELS; i++) {
+        const nm = path.join(current, 'node_modules');
+        if (fs.existsSync(nm)) {
+            try {
+                const stat = fs.statSync(nm);
+                if (stat.isDirectory()) result.push(nm);
+            } catch { /* skip unreadable */ }
+        }
+
+        if (hitGitRoot) break;
+        if (isGitRoot(current)) hitGitRoot = true;
+
+        const parent = path.dirname(current);
+        if (parent === current) break;
+        current = parent;
+    }
+
+    if (process.env.NODE_PATH) {
+        const sep = process.platform === 'win32' ? ';' : ':';
+        for (const p of process.env.NODE_PATH.split(sep)) {
+            const resolved = path.resolve(p);
+            if (fs.existsSync(resolved) && !result.includes(resolved)) {
+                result.push(resolved);
+            }
+        }
+    }
+
+    return { dirs: result, workspaceRoot: wsNormalized };
+}
+
+export function buildDockerMountsForDeps(workspace: string, ancestorDirs: string[]): { mounts: string[]; workdir: string; toContainerPath: (hostPath: string) => string } {
+    const wsNorm = path.resolve(workspace);
+    const externalNMs = ancestorDirs.filter(nm =>
+        path.resolve(nm) !== path.join(wsNorm, 'node_modules')
+    );
+
+    if (externalNMs.length === 0) {
+        return {
+            mounts: ['-v', `${wsNorm}:/workspace:ro`],
+            workdir: '/workspace',
+            toContainerPath: (hostPath: string) =>
+                '/workspace/' + path.relative(wsNorm, hostPath).replace(/\\/g, '/'),
+        };
+    }
+
+    let topDir = wsNorm;
+    for (const nm of externalNMs) {
+        const nmParent = path.dirname(path.resolve(nm));
+        if (nmParent.length < topDir.length) topDir = nmParent;
+    }
+
+    const relWs = path.relative(topDir, wsNorm).replace(/\\/g, '/');
+    const containerWs = `/w/${relWs}`;
+    const mountArgs: string[] = ['-v', `${wsNorm}:${containerWs}:ro`];
+
+    for (const nm of externalNMs) {
+        const nmNorm = path.resolve(nm);
+        const relNM = path.relative(topDir, nmNorm).replace(/\\/g, '/');
+        const containerNM = `/w/${relNM}`;
+        mountArgs.push('-v', `${nmNorm}:${containerNM}:ro`);
+    }
+
+    return {
+        mounts: mountArgs,
+        workdir: containerWs,
+        toContainerPath: (hostPath: string) => {
+            const rel = path.relative(wsNorm, hostPath).replace(/\\/g, '/');
+            return `${containerWs}/${rel}`;
+        },
+    };
+}
+
 // ── Host-side TypeScript bundler ────────────────────────────────────────────
 
 export interface BundleResult {
@@ -57,6 +147,12 @@ function needsBanner(src: string, name: string): boolean {
     return useRe.test(src);
 }
 
+function outputNeedsRequire(output: string): boolean {
+    if (/\b__require\b/.test(output)) return true;
+    if (/\brequire\(/.test(output)) return true;
+    return false;
+}
+
 export function bundleScript(
     scriptPath: string,
     workspaceRoot: string,
@@ -66,14 +162,14 @@ export function bundleScript(
         const esbuild: typeof import('esbuild') = require('esbuild');
         const src = fs.readFileSync(scriptPath, 'utf8');
 
-        const bannerLines: string[] = [];
-        if (needsBanner(src, 'require')) {
-            bannerLines.push('import { createRequire as __scCR } from "node:module"; const require = __scCR(import.meta.url);');
-        }
+        const srcNeedsBanner = needsBanner(src, 'require');
+
+        let dirnameNeeded = false;
+        let filenameNeeded = false;
         if (needsBanner(src, '__dirname')) {
-            bannerLines.push('import { fileURLToPath as __scFU } from "node:url"; import { dirname as __scDN } from "node:path"; const __filename = __scFU(import.meta.url); const __dirname = __scDN(__filename);');
+            dirnameNeeded = true;
         } else if (needsBanner(src, '__filename')) {
-            bannerLines.push('import { fileURLToPath as __scFU } from "node:url"; const __filename = __scFU(import.meta.url);');
+            filenameNeeded = true;
         }
 
         const writeDir = outDir || path.dirname(scriptPath);
@@ -91,13 +187,35 @@ export function bundleScript(
             outfile: outFile,
             absWorkingDir: workspaceRoot,
             logLevel: 'silent',
-            banner: bannerLines.length > 0 ? { js: bannerLines.join('\n') } : undefined,
         });
 
         if (!fs.existsSync(outFile)) {
             return { ok: false, error: 'esbuild produced no output file' };
         }
-        return { ok: true, outPath: outFile, code: fs.readFileSync(outFile, 'utf8') };
+
+        let outputCode = fs.readFileSync(outFile, 'utf8');
+
+        const requireBanner = 'import { createRequire as __scCR } from "node:module"; const require = __scCR(import.meta.url);';
+        const addRequireBanner = !srcNeedsBanner && outputNeedsRequire(outputCode)
+            ? !needsBanner(outputCode, 'require') ? false : true
+            : srcNeedsBanner;
+
+        const bannerLines: string[] = [];
+        if (addRequireBanner || (outputNeedsRequire(outputCode) && !(/(?:const|let|var|function)\s+require\b/.test(outputCode)))) {
+            bannerLines.push(requireBanner);
+        }
+        if (dirnameNeeded || needsBanner(outputCode, '__dirname')) {
+            bannerLines.push('import { fileURLToPath as __scFU } from "node:url"; import { dirname as __scDN } from "node:path"; const __filename = __scFU(import.meta.url); const __dirname = __scDN(__filename);');
+        } else if (filenameNeeded || needsBanner(outputCode, '__filename')) {
+            bannerLines.push('import { fileURLToPath as __scFU } from "node:url"; const __filename = __scFU(import.meta.url);');
+        }
+
+        if (bannerLines.length > 0) {
+            outputCode = bannerLines.join('\n') + '\n' + outputCode;
+            fs.writeFileSync(outFile, outputCode, 'utf8');
+        }
+
+        return { ok: true, outPath: outFile, code: outputCode };
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return { ok: false, error: `esbuild bundle failed: ${msg.slice(0, 500)}` };
@@ -353,8 +471,9 @@ export function pickImageForRunner(runner: string): { image: string | null; reas
  * required for safety; we still quote defensively in case the workspace
  * path contains spaces.
  */
-export function runnerInvocation(runner: string, scriptPath: string): string {
+export function runnerInvocation(runner: string, scriptPath: string, workdir?: string): string {
     const p = `"${scriptPath}"`;
+    const wd = workdir || '/workspace';
     switch (runner) {
         case 'node':
             return `node ${p}`;
@@ -367,17 +486,11 @@ export function runnerInvocation(runner: string, scriptPath: string): string {
         case 'bun':
             return `bun run ${p}`;
         case 'deno':
-            // Deno in Docker: allow-read the workspace so the test can import
-            // project modules. No network (--no-remote isn't available in the
-            // container deno CLI the same way; we rely on --network=none at the
-            // docker level). ESM-only.
-            return `deno run --allow-read=/workspace --allow-env=NODE_ENV --no-prompt ${p}`;
+            return `deno run --allow-read=${wd} --allow-env=NODE_ENV --no-prompt ${p}`;
         case 'python':
         case 'python3':
             return `python ${p}`;
         default:
-            // Unknown runner — fall back to node rather than exec'ing arbitrary
-            // strings. The validator upstream should have rejected this already.
             return `node ${p}`;
     }
 }
@@ -446,6 +559,9 @@ class DockerSandbox implements SandboxBackend {
             };
         }
 
+        const ancestors = discoverAncestorNodeModules(opts.workspaceRoot);
+        const depInfo = buildDockerMountsForDeps(opts.workspaceRoot, ancestors.dirs);
+
         const dockerArgs: string[] = [
             'run', '--rm', '-i',
             '--network=none',
@@ -455,16 +571,18 @@ class DockerSandbox implements SandboxBackend {
             '--memory-swap=512m',
             '--pids-limit=128',
             '--user', '1000:1000',
-            '--workdir', '/workspace',
+            '--workdir', depInfo.workdir,
             '--env', 'NODE_ENV=test',
             '--env', 'CI=1',
             '--env', 'HOME=/tmp',
             '--env', 'npm_config_cache=/tmp/npm-cache',
-            '-v', `${opts.workspaceRoot}:/workspace:ro`,
+            ...depInfo.mounts,
+        ];
+        dockerArgs.push(
             imageInfo.image,
             executable,
             ...cmdArgs,
-        ];
+        );
 
         return await runSandboxedProcess('docker', dockerArgs, opts, this.name);
     }
@@ -522,11 +640,11 @@ class DockerSandbox implements SandboxBackend {
                 };
             }
 
-            const toContainerPath = (hostPath: string): string =>
-                '/workspace/' + path.relative(opts.workspaceRoot, hostPath).replace(/\\/g, '/');
+            const ancestors = discoverAncestorNodeModules(opts.workspaceRoot);
+            const depInfo = buildDockerMountsForDeps(opts.workspaceRoot, ancestors.dirs);
 
-            const containerTestPath = toContainerPath(testFile);
-            const containerSetupPath = setupFile ? toContainerPath(setupFile) : '';
+            const containerTestPath = depInfo.toContainerPath(testFile);
+            const containerSetupPath = setupFile ? depInfo.toContainerPath(setupFile) : '';
 
             const dockerArgs: string[] = [
                 'run', '--rm', '-i',
@@ -537,20 +655,20 @@ class DockerSandbox implements SandboxBackend {
                 '--memory-swap=256m',
                 '--pids-limit=64',
                 '--user', '1000:1000',
-                '--workdir', '/workspace',
+                '--workdir', depInfo.workdir,
                 '--env', 'NODE_ENV=test',
                 '--env', 'CI=1',
                 '--env', 'HOME=/tmp',
                 '--env', 'npm_config_cache=/tmp/npm-cache',
-                '-v', `${opts.workspaceRoot}:/workspace:ro`,
+                ...depInfo.mounts,
             ];
 
             dockerArgs.push(imageInfo.image);
 
             const effectiveRunner = needsBundle ? 'tsx' : runner;
-            const testCmd = runnerInvocation(effectiveRunner, containerTestPath);
+            const testCmd = runnerInvocation(effectiveRunner, containerTestPath, depInfo.workdir);
             const fullCmd = setupFile
-                ? `${runnerInvocation(effectiveRunner, containerSetupPath)} && ${testCmd}`
+                ? `${runnerInvocation(effectiveRunner, containerSetupPath, depInfo.workdir)} && ${testCmd}`
                 : testCmd;
 
             dockerArgs.push('sh', '-c', fullCmd);
