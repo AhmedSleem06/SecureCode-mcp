@@ -150,6 +150,8 @@ export interface GridCell {
     dependsOn?: string;
 }
 
+export type ScenarioClassification = 'weakness' | 'hardening';
+
 export interface Scenario {
     id: string;
     cellId: string;
@@ -159,6 +161,7 @@ export interface Scenario {
     payloads: string[];
     expectSecure: string;
     risk: AssuranceRisk;
+    classification?: ScenarioClassification;
     test?: ScenarioTestStatus;
     testNote?: string;
 }

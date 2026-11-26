@@ -1,5 +1,5 @@
 /**
- * Verification sandbox — the real security boundary for LLM-generated tests.
+ * Verification sandbox â€” the real security boundary for LLM-generated tests.
  *
  * Phase 2 of the agent scan pipeline takes an LLM-generated test script and
  * executes it on the user's machine. The previous implementation ran the
@@ -7,7 +7,7 @@
  * decorative blocklist (`checkTestSafety`) in front. Prompt-injected code
  * in the scanned source could ride into the verify-generate prompt and
  * produce a test script that exfiltrated secrets, hit the network, or
- * spawned processes — `checkTestSafety` missed `fetch`, `http`, `https`,
+ * spawned processes â€” `checkTestSafety` missed `fetch`, `http`, `https`,
  * `fs`, `dns`, `eval`, `new Function`, dynamic imports, and `process.env`
  * access.
  *
@@ -16,12 +16,12 @@
  *
  *   - DockerSandbox: `docker run --network=none --cpus=1
  *     --memory=256m --pids-limit=64 --user 1000:1000 -v <workspace>:/workspace:ro`
- *     — network disabled at the kernel level, workspace read-only, temp
+ *     â€” network disabled at the kernel level, workspace read-only, temp
  *     dir as tmpfs, no host env, non-root user. Works for any Node/Python
  *     test script unchanged.
  *   - DenoSandbox: `deno run --allow-read=<workspace> --allow-write=<tmp>
  *     --allow-env=NODE_ENV --no-prompt --no-remote --unstable-detect-cjs
- *     --unstable-sloppy-imports` — real permission model, no network, no
+ *     --unstable-sloppy-imports` â€” real permission model, no network, no
  *     subprocesses, no arbitrary fs, no arbitrary env. Runs ESM (.mts) or
  *     CommonJS (.cjs, when the script uses require() and no import/export)
  *     test scripts; the verify-generate prompt is told the backend so it
@@ -29,7 +29,7 @@
  *
  * If neither backend is available, `detectSandbox()` returns null and the
  * caller MUST return INCONCLUSIVE. Never fall back to unrestricted
- * `execFileSync` — that is the bug this module exists to fix.
+ * `execFileSync` â€” that is the bug this module exists to fix.
  *
  * `checkTestSafety()` remains as defense-in-depth (it can reject scripts
  * before we pay for a container start), but it is NOT the security
@@ -41,7 +41,7 @@ import * as path from 'path';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { LocalSandbox } from './localSandbox';
 
-// ── Ancestor node_modules discovery ─────────────────────────────────────────
+// â”€â”€ Ancestor node_modules discovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface AncestorNodeModules {
     dirs: string[];
@@ -131,7 +131,7 @@ export function buildDockerMountsForDeps(workspace: string, ancestorDirs: string
     };
 }
 
-// ── Host-side TypeScript bundler ────────────────────────────────────────────
+// â”€â”€ Host-side TypeScript bundler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface BundleResult {
     ok: boolean;
@@ -222,7 +222,7 @@ export function bundleScript(
     }
 }
 
-// ── Public interface ────────────────────────────────────────────────────────
+// â”€â”€ Public interface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface SandboxExecuteOptions {
     /** Execution mode: 'script' (default) runs a script via runner; 'command' runs a validated executable+args. */
@@ -231,17 +231,17 @@ export interface SandboxExecuteOptions {
     script?: string;
     /** Runner: 'node' | 'tsx' | 'bun' | 'python' | 'python3' | 'deno' | ... (required for mode='script'). */
     runner?: string;
-    /** Validated executable (required for mode='command'). Passed as argv[0] — never via shell. */
+    /** Validated executable (required for mode='command'). Passed as argv[0] â€” never via shell. */
     executable?: string;
     /** Validated args array (required for mode='command'). Each arg passed as a separate argv element. */
     args?: string[];
-    /** Workspace root — mounted read-only into the sandbox. */
+    /** Workspace root â€” mounted read-only into the sandbox. */
     workspaceRoot: string;
     /** Optional setup script run before the test (same sandbox). */
     setupScript?: string | null;
     /** Hard wall-clock timeout in ms. The sandbox kills the process at this boundary. */
     timeoutMs: number;
-    /** AbortSignal — if aborted, the sandbox must kill the process and return. */
+    /** AbortSignal â€” if aborted, the sandbox must kill the process and return. */
     signal?: AbortSignal;
 }
 
@@ -259,7 +259,7 @@ export interface SandboxBackend {
     execute(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult>;
 }
 
-// ── Verdict parsing (shared by backends) ─────────────────────────────────────
+// â”€â”€ Verdict parsing (shared by backends) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const PASS_PATTERN = /^PASS:\s*(.+)$/m;
 const FAIL_PATTERN = /^FAIL:\s*(.+)$/m;
@@ -283,11 +283,11 @@ export function parseVerdictCommandMode(exitCode: number, timedOut: boolean): Sa
 
 /**
  * Pick the Docker image for a command-mode executable. Returns null if no
- * suitable image is configured — the caller returns sandbox-unavailable.
+ * suitable image is configured â€” the caller returns sandbox-unavailable.
  */
 export function pickImageForCommand(executable: string): { image: string | null; reason?: string } {
     if (executable === 'npm' || executable === 'npx') {
-        return { image: process.env.SECURECODE_SANDBOX_IMAGE || 'node:20-alpine' };
+        return { image: process.env.SECURECODE_SANDBOX_IMAGE || 'node:22-alpine' };
     }
     if (executable === 'pnpm') {
         const img = process.env.SECURECODE_SANDBOX_PNPM_IMAGE;
@@ -312,7 +312,7 @@ export function pickImageForCommand(executable: string): { image: string | null;
     return { image: null, reason: `No sandbox image configured for executable: ${executable}` };
 }
 
-// ── Probe caching ───────────────────────────────────────────────────────────
+// â”€â”€ Probe caching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const probeCache = new Map<string, boolean>();
 let dockerPositiveCache = false;
@@ -402,18 +402,18 @@ function probe(bin: string, args: string[] = ['--version']): boolean {
     return ok;
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Pick the file extension for a generated script-mode runner.
  *
- *   - node → '.mjs': plain `node` runs ESM .mjs natively and cannot execute
- *     TypeScript — a .ts file is a guaranteed failure for every node-runner
+ *   - node â†’ '.mjs': plain `node` runs ESM .mjs natively and cannot execute
+ *     TypeScript â€” a .ts file is a guaranteed failure for every node-runner
  *     script.
- *   - tsx / pnpm-tsx / yarn-tsx / bun / deno → '.ts': TS-capable runners
+ *   - tsx / pnpm-tsx / yarn-tsx / bun / deno â†’ '.ts': TS-capable runners
  *     (bun and deno execute TS natively; the tsx variants strip types).
- *   - python / python3 → '.py'.
- *   - anything else → '.js'.
+ *   - python / python3 â†’ '.py'.
+ *   - anything else â†’ '.js'.
  *
  * No '.test.' infix: these are standalone verification scripts, not
  * test-suite files, and the infix risks accidental discovery by workspace
@@ -434,7 +434,7 @@ function isPythonRunner(runner: string): boolean {
 
 /**
  * Pick the Docker image for a script-mode runner. Returns null if no suitable
- * image is configured — the caller returns sandbox-unavailable so the user
+ * image is configured â€” the caller returns sandbox-unavailable so the user
  * gets a clear "install X / set ENV to enable" message rather than a crash.
  */
 export function pickImageForRunner(runner: string): { image: string | null; reason?: string } {
@@ -446,9 +446,9 @@ export function pickImageForRunner(runner: string): { image: string | null; reas
         case 'tsx':
         case 'pnpm-tsx':
         case 'yarn-tsx':
-            // node:20-alpine has `node` + `npx`; tsx runs via `npx tsx` (offline
-            // if already cached, otherwise fails safely — network is disabled).
-            return { image: process.env.SECURECODE_SANDBOX_IMAGE || 'node:20-alpine' };
+            // node:22-alpine has `node` + `npx`; tsx runs via `npx tsx` (offline
+            // if already cached, otherwise fails safely â€” network is disabled).
+            return { image: process.env.SECURECODE_SANDBOX_IMAGE || 'node:22-alpine' };
         case 'deno': {
             const img = process.env.SECURECODE_SANDBOX_DENO_IMAGE;
             return img
@@ -510,6 +510,19 @@ function safeUnlink(p: string | null): void {
     try { fs.unlinkSync(p); } catch { /* best effort */ }
 }
 
+function copyExpressRunner(destDir: string): void {
+    const candidates = [
+        path.resolve(__dirname, '../assurance/harness/expressRunner.cjs'),
+        path.resolve(__dirname, '../../src/assurance/harness/expressRunner.cjs'),
+    ];
+    for (const src of candidates) {
+        if (fs.existsSync(src)) {
+            fs.copyFileSync(src, path.join(destDir, 'expressRunner.cjs'));
+            return;
+        }
+    }
+}
+
 // Kill a process tree, best-effort across platforms.
 function killTree(proc: ChildProcess): void {
     try {
@@ -524,7 +537,7 @@ function killTree(proc: ChildProcess): void {
     } catch { /* already dead */ }
 }
 
-// ── Docker backend ─────────────────────────────────────────────────────────
+// â”€â”€ Docker backend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class DockerSandbox implements SandboxBackend {
     readonly name = 'docker';
@@ -534,11 +547,11 @@ class DockerSandbox implements SandboxBackend {
     }
 
     async execute(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
-        // ── Command mode: run a validated executable + args in the sandbox ──
+        // â”€â”€ Command mode: run a validated executable + args in the sandbox â”€â”€
         if (opts.mode === 'command') {
             return this.executeCommand(opts);
         }
-        // ── Script mode (default): write script to temp file and run via runner ──
+        // â”€â”€ Script mode (default): write script to temp file and run via runner â”€â”€
         return this.executeScript(opts);
     }
 
@@ -589,6 +602,7 @@ class DockerSandbox implements SandboxBackend {
 
     private async executeScript(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
         const sandboxDir = ensureSandboxDir(opts.workspaceRoot);
+        copyExpressRunner(sandboxDir);
         const runner = opts.runner || 'node';
         const needsBundle = runner === 'tsx';
         const ext = fileExtFor(runner);
@@ -680,7 +694,7 @@ class DockerSandbox implements SandboxBackend {
     }
 }
 
-// ── Deno backend ────────────────────────────────────────────────────────────
+// â”€â”€ Deno backend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Deno's permission model is a real boundary: `--allow-none` (or no --allow-*
 // flags) denies everything. We allow only:
@@ -748,6 +762,7 @@ export class DenoSandbox implements SandboxBackend {
         }
 
         const sandboxDir = ensureSandboxDir(opts.workspaceRoot);
+        copyExpressRunner(sandboxDir);
         const testFile = path.join(sandboxDir, `verify-test-${uniqueSuffix()}${denoScriptExt(opts.script || '')}`);
         const tmpDir = path.join(sandboxDir, `verify-tmp-${uniqueSuffix()}`);
 
@@ -789,7 +804,7 @@ export class DenoSandbox implements SandboxBackend {
     }
 }
 
-// ── Subprocess runner shared by Docker/Deno backends ────────────────────────
+// â”€â”€ Subprocess runner shared by Docker/Deno backends â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function runSandboxedProcess(
     bin: string,
@@ -864,7 +879,7 @@ function runSandboxedProcess(
             const output = (stdout + '\n' + stderr).trim();
             const exitCode = code ?? -1;
 
-            // Cancellation takes priority over timeout — if the user aborted,
+            // Cancellation takes priority over timeout â€” if the user aborted,
             // we must not report a timeout (which can trigger a retry).
             if (cancelled) {
                 resolve({
@@ -900,7 +915,7 @@ function runSandboxedProcess(
     });
 }
 
-// ── Backend selection ───────────────────────────────────────────────────────
+// â”€â”€ Backend selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let cachedBackend: SandboxBackend | null | undefined;
 let cachedOverride: string | undefined;
@@ -935,7 +950,7 @@ export function detectSandbox(): SandboxBackend | null {
         return cachedBackend;
     }
 
-    // Auto: docker → local → (deno only if explicitly selected)
+    // Auto: docker â†’ local â†’ (deno only if explicitly selected)
     const docker = new DockerSandbox();
     if (docker.available) {
         cachedBackend = docker;
@@ -963,12 +978,12 @@ export function _setSandboxForTests(backend: SandboxBackend | null): void {
     cachedBackend = backend;
 }
 
-// ── Unsafe host execution — ONLY for unit tests of the runner logic ─────────
+// â”€â”€ Unsafe host execution â€” ONLY for unit tests of the runner logic â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // This backend runs scripts via direct `execFileSync` with the host's full
 // privileges. It is NOT a security boundary. It exists solely so the runner's
 // PASS/FAIL parsing and cleanup logic can be unit-tested without a real
-// sandbox. Production code MUST NOT use it — `detectSandbox()` never returns
+// sandbox. Production code MUST NOT use it â€” `detectSandbox()` never returns
 // it. The constructor requires `SECURECODE_TEST_MODE=1` so it cannot be
 // accidentally instantiated in production.
 
@@ -993,6 +1008,7 @@ export class __UnsafeHostSandboxForTests implements SandboxBackend {
         }
 
         const sandboxDir = ensureSandboxDir(opts.workspaceRoot);
+        copyExpressRunner(sandboxDir);
         const ext = fileExtFor(opts.runner || 'node');
         const testFile = path.join(sandboxDir, `verify-test-${uniqueSuffix()}${ext}`);
 

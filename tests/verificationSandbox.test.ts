@@ -44,10 +44,10 @@ describe('pickImageForCommand', () => {
         }
     });
 
-    it('returns node:20-alpine for npm', () => {
+    it('returns node:22-alpine for npm', () => {
         delete process.env.SECURECODE_SANDBOX_IMAGE;
         const result = pickImageForCommand('npm');
-        expect(result.image).toBe('node:20-alpine');
+        expect(result.image).toBe('node:22-alpine');
     });
 
     it('returns custom image when SECURECODE_SANDBOX_IMAGE is set', () => {
@@ -104,13 +104,13 @@ describe('pickImageForCommand', () => {
     it('returns image for npx', () => {
         delete process.env.SECURECODE_SANDBOX_IMAGE;
         const result = pickImageForCommand('npx');
-        expect(result.image).toBe('node:20-alpine');
+        expect(result.image).toBe('node:22-alpine');
     });
 });
 
-// ── bun default image via vi.stubEnv (command + runner mode) ─────────────────
+// â”€â”€ bun default image via vi.stubEnv (command + runner mode) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('bun sandbox image — env stubbing', () => {
+describe('bun sandbox image â€” env stubbing', () => {
     afterEach(() => {
         vi.unstubAllEnvs();
     });
@@ -140,7 +140,7 @@ describe('bun sandbox image — env stubbing', () => {
     });
 });
 
-// ── pickImageForRunner (Fix 2: Docker script-mode runner dispatch) ──────────
+// â”€â”€ pickImageForRunner (Fix 2: Docker script-mode runner dispatch) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('pickImageForRunner', () => {
     const origEnv = { ...process.env };
@@ -154,14 +154,14 @@ describe('pickImageForRunner', () => {
         }
     });
 
-    it('returns node:20-alpine for node runner', () => {
+    it('returns node:22-alpine for node runner', () => {
         delete process.env.SECURECODE_SANDBOX_IMAGE;
-        expect(pickImageForRunner('node').image).toBe('node:20-alpine');
+        expect(pickImageForRunner('node').image).toBe('node:22-alpine');
     });
 
-    it('returns node:20-alpine for tsx runner', () => {
+    it('returns node:22-alpine for tsx runner', () => {
         delete process.env.SECURECODE_SANDBOX_IMAGE;
-        expect(pickImageForRunner('tsx').image).toBe('node:20-alpine');
+        expect(pickImageForRunner('tsx').image).toBe('node:22-alpine');
     });
 
     it('returns python:3.11-slim for python runner', () => {
@@ -205,7 +205,7 @@ describe('pickImageForRunner', () => {
     });
 });
 
-// ── runnerInvocation (Fix 2 + Fix 3: correct runner + setup chaining) ──────
+// â”€â”€ runnerInvocation (Fix 2 + Fix 3: correct runner + setup chaining) â”€â”€â”€â”€â”€â”€
 
 describe('runnerInvocation', () => {
     it('invokes node directly', () => {
@@ -257,14 +257,14 @@ describe('runnerInvocation', () => {
     });
 });
 
-// ── fileExtFor (runner → generated-script extension) ────────────────────────
+// â”€â”€ fileExtFor (runner â†’ generated-script extension) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('fileExtFor', () => {
-    it('node → .mjs (plain node runs ESM natively, never .ts)', () => {
+    it('node â†’ .mjs (plain node runs ESM natively, never .ts)', () => {
         expect(fileExtFor('node')).toBe('.mjs');
     });
 
-    it('TS-capable runners → .ts', () => {
+    it('TS-capable runners â†’ .ts', () => {
         expect(fileExtFor('tsx')).toBe('.ts');
         expect(fileExtFor('pnpm-tsx')).toBe('.ts');
         expect(fileExtFor('yarn-tsx')).toBe('.ts');
@@ -272,12 +272,12 @@ describe('fileExtFor', () => {
         expect(fileExtFor('deno')).toBe('.ts');
     });
 
-    it('python runners → .py', () => {
+    it('python runners â†’ .py', () => {
         expect(fileExtFor('python')).toBe('.py');
         expect(fileExtFor('python3')).toBe('.py');
     });
 
-    it('unknown runner → .js fallback', () => {
+    it('unknown runner â†’ .js fallback', () => {
         expect(fileExtFor('ruby')).toBe('.js');
     });
 
@@ -288,13 +288,13 @@ describe('fileExtFor', () => {
     });
 });
 
-// ── node-runner script regression (production v0.10.5 failure) ──────────────
+// â”€â”€ node-runner script regression (production v0.10.5 failure) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
-// Generated node-runner scripts were saved as .ts — plain `node` cannot
+// Generated node-runner scripts were saved as .ts â€” plain `node` cannot
 // execute TypeScript, so every node-runner script failed. The script must
 // now be saved as .mjs and execute to a passing verdict end to end.
 
-describe('__UnsafeHostSandboxForTests — node runner generated-script regression', () => {
+describe('__UnsafeHostSandboxForTests â€” node runner generated-script regression', () => {
     it('executes a node-runner script printing PASS: to a passing verdict', async () => {
         const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-node-runner-'));
         const backend = new __UnsafeHostSandboxForTests();

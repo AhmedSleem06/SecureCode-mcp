@@ -31,6 +31,8 @@ export interface AttackTestSummary {
     untestable: number;
     skipped: number;
     costUsd: number;
+    repeatable?: number;
+    downgraded?: number;
 }
 
 export interface AssuranceResult {
@@ -59,6 +61,7 @@ export interface AttackOutcomeLike {
     exploitedFindings?: unknown[];
     approval: { granted: boolean; reason: string };
     costUsd: number;
+    scenarioSummary?: { ran: number; repeatable: number; downgraded: number };
 }
 
 interface GridSnapshot {
@@ -258,6 +261,8 @@ export class GridState {
             untestable: (prev?.untestable ?? 0) + count('untestable'),
             skipped: (prev?.skipped ?? 0) + count('skipped'),
             costUsd: (prev?.costUsd ?? 0) + cost,
+            repeatable: (prev?.repeatable ?? 0) + ((outcome as any).scenarioSummary?.repeatable ?? 0),
+            downgraded: (prev?.downgraded ?? 0) + ((outcome as any).scenarioSummary?.downgraded ?? 0),
         };
     }
 

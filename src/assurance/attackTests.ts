@@ -24,11 +24,12 @@ export interface AssuranceAttackTestInput {
 }
 
 export interface AssuranceAttackTestOutcome {
-    scenarioUpdates: { scenarioId: string; test: 'blocked' | 'exploited' | 'untestable' | 'skipped'; testNote: string; artifactPath?: string; backend?: string; isolation?: string }[];
+    scenarioUpdates: { scenarioId: string; test: 'blocked' | 'exploited' | 'untestable' | 'skipped'; testNote: string; artifactPath?: string; backend?: string; isolation?: string; repeatable?: boolean }[];
     cellUpdates: CellUpdate[];
-    exploitedFindings: { cellId: string; scenarioId: string; type: string; line: number; title: string; why: string; artifactPath?: string; observedType?: string; severity?: 'critical' | 'high' | 'medium' | 'low'; confidence?: number }[];
+    exploitedFindings: { cellId: string; scenarioId: string; type: string; line: number; title: string; why: string; artifactPath?: string; observedType?: string; severity?: 'critical' | 'high' | 'medium' | 'low'; confidence?: number; repeatable?: boolean }[];
     approval: { granted: boolean; reason: string };
     costUsd: number;
+    scenarioSummary?: { ran: number; repeatable: number; downgraded: number };
 }
 
 type ScenarioTestResult = AssuranceAttackTestOutcome['scenarioUpdates'][number]['test'];
@@ -105,7 +106,7 @@ export function selectAssuranceScenarios(cells: GridCell[], scenarios: Scenario[
     const perCell = eligible.map((cell) => ({
         cell,
         list: scenarios
-            .filter((s) => s.cellId === cell.id && !TESTED_STATUSES.has(s.test ?? ''))
+            .filter((s) => s.cellId === cell.id && !TESTED_STATUSES.has(s.test ?? '') && (s as any).classification !== 'hardening')
             .sort((a, b) => (b.risk - a.risk) || ((sIndex.get(a) ?? 0) - (sIndex.get(b) ?? 0)))
             .slice(0, ASSURANCE_MAX_SCENARIOS_PER_CELL),
     }));
@@ -179,6 +180,7 @@ interface ScenarioRunResult {
     observedWeakness?: { type: string; severity: 'critical' | 'high' | 'medium' | 'low'; matchesCell: boolean; summary: string } | null;
     rounds: ProofArtifactRound[];
     stop?: 'budget' | 'sandbox' | 'cancelled';
+    repeatable?: boolean;
 }
 
 interface RunEnv {
@@ -190,6 +192,7 @@ interface RunEnv {
     sandboxIsolation?: string;
     relatedFiles: Array<{ filePath: string; content: string; relationship: string }>;
     addCost: (usd: unknown) => void;
+    consumeGrant: () => boolean;
 }
 
 function snippet(text: string): string {
@@ -348,7 +351,25 @@ async function runScenarioTest(env: RunEnv, cell: GridCell, scenario: Scenario):
         if (decision.verdict === 'EXPLOITED') {
             const fl = typeof analyze.failureLine === 'number' && Number.isInteger(analyze.failureLine) ? analyze.failureLine : null;
             const ow = analyze.observedWeakness && typeof analyze.observedWeakness === 'object' ? analyze.observedWeakness : null;
-            return { test: 'exploited', note: `Attack test exploited: ${decision.reason}`, failureLine: fl, observedWeakness: ow, rounds };
+            if (!env.consumeGrant()) {
+                return { test: 'exploited', note: `Attack test exploited: ${decision.reason}`, failureLine: fl, observedWeakness: ow, rounds, repeatable: false };
+            }
+            const repeatRun = await runLocalTest(testScript, runner, input.ctx.workspaceRoot, {
+                setupScript: setupScript || null,
+                timeoutMs: ASSURANCE_TEST_TIMEOUT_MS,
+                signal: input.signal,
+            });
+            rounds.push({ round: attempt + 0.5, testScript, setupScript, runner, verdict: repeatRun.verdict, output: repeatRun.output });
+            const repeatMarker = parseScenarioMarker(repeatRun.output);
+            const repeatAgreed = repeatMarker.found
+                && repeatMarker.verdict === 'EXPLOITED'
+                && repeatMarker.targetReached
+                && !repeatMarker.mockedTarget
+                && repeatRun.verdict === 'pass';
+            if (repeatAgreed) {
+                return { test: 'exploited', note: `Attack test exploited: ${decision.reason}`, failureLine: fl, observedWeakness: ow, rounds, repeatable: true };
+            }
+            return { test: 'untestable', note: `Attack test could not exercise the code: not repeatable`, failureLine: null, rounds, repeatable: false };
         }
         lastNote = decision.reason;
         if (!decision.retryable) break;
@@ -446,7 +467,7 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
     const runtimeInfo = detectRuntime(ctx.workspaceRoot, target.filePath || undefined);
     const sandbox = detectSandbox();
 
-    const results: Array<{ cell: GridCell; scenario: Scenario; test: ScenarioTestResult; note: string; line?: number; artifactPath?: string; observedWeakness?: ScenarioRunResult['observedWeakness'] }> = [];
+    const results: Array<{ cell: GridCell; scenario: Scenario; test: ScenarioTestResult; note: string; line?: number; artifactPath?: string; observedWeakness?: ScenarioRunResult['observedWeakness']; repeatable?: boolean }> = [];
     const finalize = (): AssuranceAttackTestOutcome => {
         const backend = sandbox?.name;
         const isolation = backend === 'docker' ? 'full' : (backend === 'local' ? 'reduced' : undefined);
@@ -457,9 +478,16 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
             ...(r.artifactPath ? { artifactPath: r.artifactPath } : {}),
             ...(backend ? { backend } : {}),
             ...(isolation ? { isolation } : {}),
+            ...(typeof r.repeatable === 'boolean' ? { repeatable: r.repeatable } : {}),
         }));
         outcome.cellUpdates = buildAssuranceCellUpdates(input.cells, results);
         outcome.costUsd = Math.round(outcome.costUsd * 1e6) / 1e6;
+        const tested = results.filter((r) => r.test !== 'skipped');
+        const repeatableCount = results.filter((r) => r.repeatable === true).length;
+        const downgradedCount = results.filter((r) => r.repeatable === false).length;
+        if (tested.length > 0) {
+            outcome.scenarioSummary = { ran: tested.length, repeatable: repeatableCount, downgraded: downgradedCount };
+        }
         return outcome;
     };
     const markRest = (from: number, test: ScenarioTestResult, note: string) => {
@@ -539,6 +567,7 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
             addCost: (usd) => {
                 if (typeof usd === 'number' && Number.isFinite(usd) && usd > 0) outcome.costUsd += usd;
             },
+            consumeGrant: () => consumeSessionApproval(runId),
         };
         const fileLines = target.fileContent.split('\n').length;
         const maxUsd = getAssuranceMaxUsd();
@@ -579,7 +608,7 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
                     isolation: env.sandboxIsolation,
                 }) ?? undefined;
             }
-            results.push({ cell, scenario, test: r.test, note: r.note, line, ...(artifactPath ? { artifactPath } : {}), ...(r.observedWeakness ? { observedWeakness: r.observedWeakness } : {}) });
+            results.push({ cell, scenario, test: r.test, note: r.note, line, ...(artifactPath ? { artifactPath } : {}), ...(r.observedWeakness ? { observedWeakness: r.observedWeakness } : {}), ...(typeof r.repeatable === 'boolean' ? { repeatable: r.repeatable } : {}) });
             if (r.test === 'exploited') {
                 consecutiveUntestable = 0;
                 lastFailureClass = '';
@@ -593,6 +622,7 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
                     why: `Attack scenario ${scenario.id} (${scenario.actor}): ${scenario.steps.join(' → ')}. Expected: ${scenario.expectSecure}. ${r.note}`.slice(0, 1500),
                     ...(artifactPath ? { artifactPath } : {}),
                     ...(ow ? { observedType: ow.type, severity: ow.severity, confidence: 85 } : {}),
+                    ...(typeof r.repeatable === 'boolean' ? { repeatable: r.repeatable } : {}),
                 });
             } else if (r.test === 'blocked') {
                 consecutiveUntestable = 0;

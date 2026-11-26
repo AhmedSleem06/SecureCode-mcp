@@ -162,6 +162,7 @@ describe('runAssuranceAttackTests', () => {
         mocks.runLocalTest
             .mockResolvedValueOnce(BLOCKED_RUN)
             .mockResolvedValueOnce({ verdict: 'fail', output: `FAIL: untestable — needs a real DB\n${marker({ verdict: 'UNTESTABLE', targetReached: false })}`, exitCode: 0 })
+            .mockResolvedValueOnce(EXPLOITED_RUN)
             .mockResolvedValueOnce(EXPLOITED_RUN);
         setupApi([AN.blocked, { verdict: 'INCONCLUSIVE', scenarioVerdict: 'UNTESTABLE', targetReached: false, reason: 'needs a real database', shouldRetry: false, costUsd: 0.02 }, AN.exploited]);
         const progress = vi.fn();
@@ -173,17 +174,18 @@ describe('runAssuranceAttackTests', () => {
         expect(scope).toMatchObject({ runId: 'run-1', tool: 'assurance-tests', maxTests: 3 });
         expect(summary).toContain('src/target.js');
         expect(summary).toContain('Run up to 3 attack tests for src/target.js in the Docker sandbox');
-        expect(mocks.consumeSessionApproval).toHaveBeenCalledTimes(3);
+        expect(mocks.consumeSessionApproval).toHaveBeenCalledTimes(4);
         expect(mocks.revokeSessionApproval).toHaveBeenCalledWith('run-1');
         expect(out.approval).toEqual({ granted: true, reason: 'User approved' });
 
         expect(out.scenarioUpdates.map((u) => [u.scenarioId, u.test])).toEqual([['s1', 'blocked'], ['s3', 'untestable'], ['s2', 'exploited']]);
+        expect(out.scenarioUpdates[2].repeatable).toBe(true);
         expect(out.cellUpdates).toEqual([
             expect.objectContaining({ cellId: 'c1', status: 'safe', closure: 'tested', evidenceLines: [4, 6] }),
             expect.objectContaining({ cellId: 'c2', status: 'vulnerable', closure: 'tested', evidenceLines: [7] }),
         ]);
         expect(out.exploitedFindings).toEqual([
-            expect.objectContaining({ cellId: 'c2', scenarioId: 's2', type: 'idor', line: 7, title: 'cell c2' }),
+            expect.objectContaining({ cellId: 'c2', scenarioId: 's2', type: 'idor', line: 7, title: 'cell c2', repeatable: true }),
         ]);
         expect(out.exploitedFindings[0].artifactPath).toMatch(/^\.securecode\/proofs\/assurance-run-1-s2-/);
         expect(out.costUsd).toBeCloseTo(0.36, 5);
@@ -202,6 +204,8 @@ describe('runAssuranceAttackTests', () => {
         expect(art.scenario).toMatchObject({ id: 's1', cellId: 'c1' });
         expect(art.finalVerdict).toBe('BLOCKED');
         expect(art.rounds[0].verdict).toBe('fail:BLOCKED');
+
+        expect(out.scenarioSummary).toMatchObject({ ran: 3, repeatable: 1, downgraded: 0 });
     });
 
     it('untestable result only closes a cell that has no better closure', async () => {
@@ -339,7 +343,7 @@ describe('runAssuranceAttackTests', () => {
     it('exploited finding includes observedType, severity, confidence when API returns observedWeakness', async () => {
         const cells = [cell('c1', 5, 'safe', 'traced')];
         const scenarios = [scen('s1', 'c1')];
-        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN);
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN).mockResolvedValueOnce(EXPLOITED_RUN);
         setupApi([{
             ...AN.exploited,
             observedWeakness: { type: 'idor', severity: 'high', matchesCell: true, summary: 'User B read doc 1 without auth' },
@@ -350,6 +354,7 @@ describe('runAssuranceAttackTests', () => {
             observedType: 'idor',
             severity: 'high',
             confidence: 85,
+            repeatable: true,
         });
         expect(out.cellUpdates).toEqual([expect.objectContaining({ cellId: 'c1', status: 'vulnerable', closure: 'tested' })]);
     });
@@ -357,20 +362,21 @@ describe('runAssuranceAttackTests', () => {
     it('exploited finding omits observedType/severity/confidence when API returns no observedWeakness', async () => {
         const cells = [cell('c1', 5, 'safe', 'traced')];
         const scenarios = [scen('s1', 'c1')];
-        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN);
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN).mockResolvedValueOnce(EXPLOITED_RUN);
         setupApi([AN.exploited]);
         const out = await runAssuranceAttackTests(baseInput(cells, scenarios));
         expect(out.exploitedFindings).toHaveLength(1);
         expect(out.exploitedFindings[0].observedType).toBeUndefined();
         expect(out.exploitedFindings[0].severity).toBeUndefined();
         expect(out.exploitedFindings[0].confidence).toBeUndefined();
+        expect(out.exploitedFindings[0].repeatable).toBe(true);
         expect(out.cellUpdates).toEqual([expect.objectContaining({ cellId: 'c1', status: 'vulnerable', closure: 'tested' })]);
     });
 
     it('matchesCell=false does NOT mark the cell as vulnerable', async () => {
         const cells = [cell('c1', 5, 'safe', 'traced')];
         const scenarios = [scen('s1', 'c1')];
-        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN);
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN).mockResolvedValueOnce(EXPLOITED_RUN);
         setupApi([{
             ...AN.exploited,
             observedWeakness: { type: 'missing_rate_limiting', severity: 'medium', matchesCell: false, summary: 'No rate limit on signup' },
@@ -384,7 +390,7 @@ describe('runAssuranceAttackTests', () => {
     it('matchesCell=false with a blocked scenario on the same cell marks the cell safe/tested', async () => {
         const cells = [cell('c1', 5, 'safe', 'traced')];
         const scenarios = [scen('s1', 'c1', 5), scen('s2', 'c1', 4)];
-        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN).mockResolvedValueOnce(BLOCKED_RUN);
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN).mockResolvedValueOnce(EXPLOITED_RUN).mockResolvedValueOnce(BLOCKED_RUN);
         setupApi([
             { ...AN.exploited, observedWeakness: { type: 'other_weakness', severity: 'low', matchesCell: false, summary: 'different weakness' } },
             AN.blocked,
@@ -393,5 +399,51 @@ describe('runAssuranceAttackTests', () => {
         expect(out.exploitedFindings).toHaveLength(1);
         expect(out.cellUpdates).toEqual([expect.objectContaining({ cellId: 'c1', status: 'safe', closure: 'tested' })]);
         expect(out.cellUpdates[0].note).toContain('mismatched exploit');
+    });
+
+    it('hardening scenarios are skipped during selection', () => {
+        const cells = [cell('c1', 5, 'safe', 'traced')];
+        const h = scen('s1', 'c1', 5);
+        (h as any).classification = 'hardening';
+        const w = scen('s2', 'c1', 4);
+        const picked = selectAssuranceScenarios(cells, [h, w], 10);
+        expect(picked.map(p => p.scenario.id)).toEqual(['s2']);
+    });
+
+    it('second run agrees → repeatable true', async () => {
+        const cells = [cell('c1', 5, 'safe', 'traced')];
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN).mockResolvedValueOnce(EXPLOITED_RUN);
+        setupApi([AN.exploited]);
+        const out = await runAssuranceAttackTests(baseInput(cells, [scen('s1', 'c1')]));
+        expect(out.scenarioUpdates[0].test).toBe('exploited');
+        expect(out.scenarioUpdates[0].repeatable).toBe(true);
+        expect(out.exploitedFindings[0].repeatable).toBe(true);
+        expect(mocks.runLocalTest).toHaveBeenCalledTimes(2);
+    });
+
+    it('second run disagrees → untestable "not repeatable"', async () => {
+        const cells = [cell('c1', 5, 'safe', 'traced')];
+        const BLOCKED_REPEAT = { verdict: 'fail', output: `FAIL: blocked\n${marker({ verdict: 'BLOCKED', targetReached: true, controlOk: true })}`, exitCode: 0, backend: 'docker' };
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN).mockResolvedValueOnce(BLOCKED_REPEAT);
+        setupApi([AN.exploited]);
+        const out = await runAssuranceAttackTests(baseInput(cells, [scen('s1', 'c1')]));
+        expect(out.scenarioUpdates[0].test).toBe('untestable');
+        expect(out.scenarioUpdates[0].testNote).toContain('not repeatable');
+        expect(out.scenarioUpdates[0].repeatable).toBe(false);
+        expect(out.exploitedFindings).toHaveLength(0);
+        expect(out.scenarioSummary?.downgraded).toBe(1);
+    });
+
+    it('no grant for re-run → repeatable false, still exploited', async () => {
+        const cells = [cell('c1', 5, 'safe', 'traced')];
+        mocks.consumeSessionApproval.mockReturnValueOnce(true).mockReturnValue(false);
+        mocks.runLocalTest.mockResolvedValueOnce(EXPLOITED_RUN);
+        setupApi([AN.exploited]);
+        const out = await runAssuranceAttackTests(baseInput(cells, [scen('s1', 'c1')]));
+        expect(out.scenarioUpdates[0].test).toBe('exploited');
+        expect(out.scenarioUpdates[0].repeatable).toBe(false);
+        expect(out.exploitedFindings).toHaveLength(1);
+        expect(out.exploitedFindings[0].repeatable).toBe(false);
+        expect(mocks.runLocalTest).toHaveBeenCalledTimes(1);
     });
 });

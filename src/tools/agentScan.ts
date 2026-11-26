@@ -1449,29 +1449,80 @@ async function scanTarget(
                 const observedRank = ef.severity ? (SEV_RANK[ef.severity] ?? riskRank) : riskRank;
                 const efSeverity = RANK_SEV[Math.min(observedRank, riskRank)];
                 const efConfidence = ef.confidence ?? 85;
-                const efReason = `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId}${efType !== ef.type ? `, observed ${efType}` : ''})`;
+                const repeatableLabel = typeof (ef as any).repeatable === 'boolean' ? String((ef as any).repeatable) : 'unknown';
+                const efReason = `Scenario test reported the weakness (repeatable: ${repeatableLabel}); independent proof pending`;
+                const scenarioEvidence = `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId}${efType !== ef.type ? `, observed ${efType}` : ''})`;
 
                 const sameFamily = (f: { line: number; type: string }) =>
                     Math.abs(f.line - ef.line) <= 3 && familyOf(f.type) === familyOf(efType);
                 const sameSpot = (f: { line: number }) => Math.abs(f.line - ef.line) <= 1;
                 const existing = provenFindings.find(sameFamily) ?? provenFindings.find(sameSpot);
 
+                let target: ProvenFinding;
                 if (existing) {
-                    if (existing.proven !== 'PROVEN') existing.proven = 'PROVEN';
+                    if (existing.proven === 'PROVEN') {
+                        existing.provenReason = [existing.provenReason, scenarioEvidence].filter(Boolean).join('; ');
+                        if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
+                        continue;
+                    }
+                    existing.proven = 'INCONCLUSIVE';
                     existing.provenReason = [existing.provenReason, efReason].filter(Boolean).join('; ');
                     if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
+                    target = existing;
                 } else {
-                    provenFindings.push({
+                    target = {
                         line: ef.line,
                         type: efType,
                         severity: efSeverity as any,
                         confidence: efConfidence,
                         evidence: ef.title,
                         why: ef.why,
-                        proven: 'PROVEN' as any,
+                        proven: 'INCONCLUSIVE' as any,
                         provenReason: efReason,
                         ...(ef.artifactPath ? { proofArtifact: ef.artifactPath } : {}),
-                    } as any);
+                    } as any;
+                    provenFindings.push(target);
+                }
+
+                if (verifyTracker.canAttemptFinding() && !abortSignal?.aborted) {
+                    try {
+                        const verifyResult = await runVerifyLoop({
+                            finding: {
+                                type: target.type,
+                                line: target.line,
+                                lineEnd: target.lineEnd,
+                                evidence: target.evidence,
+                                why: target.why,
+                                severity: target.severity,
+                            },
+                            filePath: filePath || '',
+                            code,
+                            relatedFiles: (relatedFiles || []).map(rf => ({
+                                filePath: rf.filePath,
+                                content: rf.content,
+                                relationship: rf.relationship,
+                            })),
+                            workspaceRoot: ctx.workspaceRoot,
+                            language,
+                            client,
+                            budgetTracker: verifyTracker,
+                            signal: abortSignal,
+                            ...runIdField,
+                        });
+                        if (verifyResult.verdict === 'PROVEN') {
+                            target.proven = 'PROVEN';
+                            target.provenReason = [scenarioEvidence, verifyResult.reason].filter(Boolean).join('; ');
+                            target.verificationLevel = mapVerificationLevel('PROVEN', false, target.verificationLevel);
+                            if (verifyResult.proofEvidence) target.proofEvidence = verifyResult.proofEvidence;
+                            if (verifyResult.proofGateResult) target.proofGateResult = verifyResult.proofGateResult;
+                        } else {
+                            target.provenReason = [target.provenReason, scenarioEvidence].filter(Boolean).join('; ');
+                        }
+                    } catch (verifyErr: any) {
+                        target.provenReason = [target.provenReason, scenarioEvidence].filter(Boolean).join('; ');
+                    }
+                } else {
+                    target.provenReason = [target.provenReason, scenarioEvidence].filter(Boolean).join('; ');
                 }
             }
         } catch (atkErr: any) {

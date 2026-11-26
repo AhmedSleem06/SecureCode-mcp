@@ -8,7 +8,7 @@
   },
   "icon": "icon.svg",
   "scripts": {
-    "build": "tsc -p ./",
+    "build": "tsc -p ./ && node -e \"require('fs').mkdirSync('dist/assurance/harness',{recursive:true});require('fs').copyFileSync('src/assurance/harness/expressRunner.cjs','dist/assurance/harness/expressRunner.cjs')\"",
     "start": "node dist/index.js serve",
     "test": "vitest run",
     "test:watch": "vitest",

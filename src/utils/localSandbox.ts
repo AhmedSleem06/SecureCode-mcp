@@ -359,6 +359,19 @@ function buildPreludeFile(dir: string): string {
     return p;
 }
 
+function copyExpressRunner(destDir: string): void {
+    const candidates = [
+        path.resolve(__dirname, '../assurance/harness/expressRunner.cjs'),
+        path.resolve(__dirname, '../../src/assurance/harness/expressRunner.cjs'),
+    ];
+    for (const src of candidates) {
+        if (fs.existsSync(src)) {
+            fs.copyFileSync(src, path.join(destDir, 'expressRunner.cjs'));
+            return;
+        }
+    }
+}
+
 function killTree(proc: ChildProcess): void {
     try {
         if (process.platform === 'win32') {
@@ -424,6 +437,7 @@ export class LocalSandbox implements SandboxBackend {
             const ext = fileExtFor(runner);
             const scDir = path.join(layout.workspaceCopy, '.securecode');
             fs.mkdirSync(scDir, { recursive: true });
+            copyExpressRunner(scDir);
             const suffix = uniqueSuffix();
 
             let testFile: string;
