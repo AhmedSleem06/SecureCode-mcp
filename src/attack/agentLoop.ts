@@ -2,6 +2,7 @@ import { ApiClient } from '../api/client';
 import type { ScanResponse, FixResponse, EndpointContext, ProjectMap } from '../api/types';
 import type { ServerContext } from '../mcp/types';
 import { readFileFromWorkspace } from '../utils/files';
+import { buildProjectSecurityHints } from '../project-map/projectSecurityContext';
 import { assembleAgentFindings } from './agentCorroboration';
 import { executeHttpRequest } from './executor';
 import { DEFAULT_BUDGET, validateTarget, checkBudget, type AttackBudget } from './policy';
@@ -45,11 +46,15 @@ export async function runAttack(
     const state = { stepsTaken, requestsMade, startTime };
 
     try {
+        const projectHints = ctx.workspaceRoot
+            ? await buildProjectSecurityHints(ctx.workspaceRoot, endpoint.sourceFile, code)
+            : {};
         const scanResp = await client.postJson<ScanResponse>('/scan', {
             code,
             language,
             filePath: endpoint.sourceFile,
             scanDepth: 'auto',
+            ...((projectHints.dependencies || projectHints.databasePolicies) && { workspaceHints: projectHints }),
         });
 
         const findings = ((scanResp.scanType === 'advanced' || scanResp.scanType === 'fast') && scanResp.finalFindings)

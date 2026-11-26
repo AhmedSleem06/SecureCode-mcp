@@ -7,6 +7,10 @@ export interface ScanRequest {
         frameworkHint?: string;
         relatedFiles?: Array<{ path: string; content: string; role: string }>;
         endpointContext?: unknown;
+        /** `name@version` for packages the scanned file imports (from the workspace lockfile). */
+        dependencies?: string[];
+        /** RLS / policy / grant statements from migrations covering tables the file references. */
+        databasePolicies?: string[];
     };
     /** Phase B/C/E: AST-derived sink findings + taint flows + guard evals. */
     deterministicFacts?: {

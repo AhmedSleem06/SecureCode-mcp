@@ -10,6 +10,7 @@ import { evaluateGuards } from '../project-map/guardEvaluator';
 import type { AttackType } from '../project-map/guardPatterns';
 import { grammarForFile } from '../project-map/parserLoader';
 import { getEndpointContextForFile, getRelatedFilesForFile } from '../project-map/mapContext';
+import { buildProjectSecurityHints } from '../project-map/projectSecurityContext';
 
 export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> {
     const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
@@ -112,6 +113,13 @@ export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> 
         }
     }
 
+    const projectHints = filePath && ctx.workspaceRoot
+        ? await buildProjectSecurityHints(ctx.workspaceRoot, filePath, code)
+        : {};
+    const workspaceHints = relatedFiles || projectHints.dependencies || projectHints.databasePolicies
+        ? { ...(relatedFiles && { relatedFiles }), ...projectHints }
+        : undefined;
+
     const data = await client.postJson<ScanResponse>('/scan', {
         code,
         language,
@@ -119,7 +127,7 @@ export async function toolScan(ctx: ServerContext, args: any): Promise<unknown> 
         scanDepth: (args.scanDepth as 'fast' | 'deep' | 'auto') || 'auto',
         ...(deterministicFacts && { deterministicFacts }),
         ...(endpointContext && { endpointContext }),
-        ...(relatedFiles && { workspaceHints: { relatedFiles } }),
+        ...(workspaceHints && { workspaceHints }),
     });
 
     const findings: (FinalFinding | ScanFinding)[] =

@@ -21,6 +21,7 @@ import type { AttackType } from '../project-map/guardPatterns';
 import { grammarForFile } from '../project-map/parserLoader';
 import { buildProjectMap } from '../project-map/mapBuilder';
 import { readCache, writeCache } from '../project-map/cache';
+import { buildProjectSecurityHints } from '../project-map/projectSecurityContext';
 
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
 const DEFAULT_MAX_FILES = 200;
@@ -301,6 +302,8 @@ export async function toolScanBatch(ctx: ServerContext, args: any): Promise<unkn
             const language = inferLanguage(absPath)!;
             const grammar = grammarForFile(filePath);
             const deterministicFacts = await runDeterministicAnalysis(code, grammar, filePath);
+            const projectHints = await buildProjectSecurityHints(ctx.workspaceRoot, filePath, code);
+            const hasProjectHints = !!(projectHints.dependencies || projectHints.databasePolicies);
 
             const data = await client.postJson<ScanResponse>('/scan', {
                 code,
@@ -309,6 +312,7 @@ export async function toolScanBatch(ctx: ServerContext, args: any): Promise<unkn
                 scanDepth: 'auto',
                 ...(deterministicFacts && { deterministicFacts }),
                 ...(workspaceId && { workspaceId }),
+                ...(hasProjectHints && { workspaceHints: projectHints }),
             });
 
             const findings = mapFindings(data);
