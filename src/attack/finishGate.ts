@@ -39,23 +39,37 @@ export const LOGIC_BUG_TYPES = new Set([
     'config_default',
 ]);
 
+export const FLOW_REQUIRED_TYPES = new Set([
+    'sql_injection', 'nosql_injection', 'command_injection', 'code_injection',
+    'xss', 'ssrf', 'path_traversal', 'open_redirect', 'prototype_pollution',
+    'insecure_deserialization', 'template_injection', 'ldap_injection',
+    'xpath_injection', 'header_injection', 'log_injection', 'xxe',
+]);
+
 function isLogicClass(candidateType: string): boolean {
     const normalized = candidateType.toLowerCase().replace(/[\s-]+/g, '_');
     for (const logicType of LOGIC_BUG_TYPES) {
         if (normalized.includes(logicType)) return true;
     }
-    return false;
+    for (const flowType of FLOW_REQUIRED_TYPES) {
+        if (normalized.includes(flowType)) return false;
+    }
+    return !/injection|traversal|xss|ssrf|redirect|deserializ/.test(normalized);
 }
 
 function candidateLinesDelivered(
     candidate: Candidate,
     investigation: InvestigationState,
+    targetFile?: string,
+    deliveredRanges?: LineRange[],
 ): { entryDelivered: boolean; vulnDelivered: boolean } {
     if (candidate.locations.length === 0) return { entryDelivered: false, vulnDelivered: false };
     let entryDelivered = false;
     let vulnDelivered = false;
     for (const loc of candidate.locations) {
-        if (investigation.isCovered(loc.filePath, loc.line, loc.line)) {
+        const inPrompt = !!targetFile && loc.filePath === targetFile
+            && (deliveredRanges ?? []).some(r => loc.line >= r.start && loc.line <= r.end);
+        if (inPrompt || investigation.isCovered(loc.filePath, loc.line, loc.line)) {
             vulnDelivered = true;
             entryDelivered = true;
         }
@@ -65,8 +79,8 @@ function candidateLinesDelivered(
 
 function candidateClaimHasActorAndEffect(candidate: Candidate): boolean {
     const claim = (candidate.claim || '').toLowerCase();
-    const actorTerms = ['attacker', 'user', 'member', 'caller', 'client', 'unauthenticated', 'authenticated', 'any user', 'actor', 'adversary', 'requester'];
-    const effectTerms = ['escalat', 'elevat', 'overwrit', 'bypass', 'impersonat', 'admin', 'role', 'permission', 'privilege', 'unauthoriz', 'access', 'modify', 'manipulat', 'tamper', 'inject', 'assign', 'set', 'update', 'change'];
+    const actorTerms = ['attacker', 'user', 'member', 'caller', 'client', 'unauthenticated', 'authenticated', 'any user', 'actor', 'adversary', 'requester', 'anyone', 'anonymous', 'someone', 'visitor', 'tenant', 'account', 'request', 'public'];
+    const effectTerms = ['escalat', 'elevat', 'overwrit', 'bypass', 'impersonat', 'admin', 'role', 'permission', 'privilege', 'unauthoriz', 'access', 'modify', 'manipulat', 'tamper', 'inject', 'assign', 'set', 'update', 'change', 'forge', 'leak', 'expos', 'disclos', 'enumerat', 'reveal', 'find out', 'learn', 'crash', 'denial', 'exhaust', 'hang', 'block', 'delete', 'duplicate', 'take over', 'takeover', 'steal', 'read', 'sign'];
     const hasActor = actorTerms.some(t => claim.includes(t));
     const hasEffect = effectTerms.some(t => claim.includes(t));
     return hasActor && hasEffect;
@@ -469,7 +483,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
             const logicClass = isLogicClass(candidate.type);
 
             if (logicClass) {
-                const { entryDelivered, vulnDelivered } = candidateLinesDelivered(candidate, investigation);
+                const { entryDelivered, vulnDelivered } = candidateLinesDelivered(candidate, investigation, target.filePath, input.evidenceGate?.deliveredRanges);
                 const claimSufficient = candidateClaimHasActorAndEffect(candidate);
 
                 if (entryDelivered && vulnDelivered) {

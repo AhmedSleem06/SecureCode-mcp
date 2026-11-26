@@ -73,6 +73,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
 
         const input = makeInput({ candidates, investigation });
+        input.evidenceGate = { ...input.evidenceGate, deliveredRanges: [] };
         const result = evaluateFinishGate(input);
         const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
         expect(candidateReasons.length).toBeGreaterThan(0);
@@ -146,6 +147,56 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         const result = evaluateFinishGate(input);
         const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
         expect(candidateReasons).toHaveLength(0);
+    });
+
+    it.each([
+        ['hardcoded_secret', 7, 'If the env var is missing, anyone can forge a token signed with the public fallback key and get past requireAdmin'],
+        ['denial_of_service', 38, 'An unauthenticated caller can send a long dotted email that hangs the regex and blocks the event loop'],
+        ['user_enumeration', 41, 'An anonymous caller can find out which emails are registered from the 409 response'],
+    ])('non-injection class %s is closed by read lines + actor/effect claim', (type, line, claim) => {
+        const candidates = new CandidateStore();
+        const investigation = new InvestigationState();
+        investigation.recordRead('src/users.ts', 1, 120, 120);
+        investigation.recordActualRead('src/users.ts', 1, 120, 120, false);
+        const id = candidates.register({ rootCauseId: `rc-${type}`, type, severity: 'medium', locations: [{ filePath: 'src/users.ts', line }], claim });
+        candidates.addEvidence(id, 'backfill:source:src/users.ts', 'source', 'source');
+        candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
+        const result = evaluateFinishGate(makeInput({ candidates, investigation }));
+        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toHaveLength(0);
+    });
+
+    it('lines shown to the model in the prompt count as read for the target file', () => {
+        const candidates = new CandidateStore();
+        const investigation = new InvestigationState();
+        const id = candidates.register({
+            rootCauseId: 'mass-assign-role',
+            type: 'mass_assignment',
+            severity: 'high',
+            locations: [{ filePath: 'src/users.ts', line: 80 }],
+            claim: 'Any member sets body.role="admin" via PUT /users/me and bypasses requireAdmin',
+        });
+        candidates.addEvidence(id, 'backfill:source:src/users.ts', 'source', 'source');
+        candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
+        const shown = evaluateFinishGate(makeInput({ candidates, investigation }));
+        expect(shown.reasons.filter(r => r.code === 'non-terminal-candidate')).toHaveLength(0);
+    });
+
+    it('a prompt range that does not include the cited line does not count', () => {
+        const candidates = new CandidateStore();
+        const investigation = new InvestigationState();
+        const id = candidates.register({
+            rootCauseId: 'mass-assign-role',
+            type: 'mass_assignment',
+            severity: 'high',
+            locations: [{ filePath: 'src/users.ts', line: 80 }],
+            claim: 'Any member sets body.role="admin" via PUT /users/me and bypasses requireAdmin',
+        });
+        candidates.addEvidence(id, 'backfill:source:src/users.ts', 'source', 'source');
+        candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
+        const input = makeInput({ candidates, investigation });
+        input.evidenceGate = { ...input.evidenceGate, deliveredRanges: [{ start: 1, end: 60 }] };
+        const result = evaluateFinishGate(input);
+        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate').length).toBeGreaterThan(0);
     });
 
     it('LOGIC_BUG_TYPES covers the documented set', () => {
