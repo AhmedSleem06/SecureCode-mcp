@@ -172,7 +172,7 @@ describe('runAssuranceAttackTests', () => {
         const [scope, summary] = mocks.requestSessionApproval.mock.calls[0];
         expect(scope).toMatchObject({ runId: 'run-1', tool: 'assurance-tests', maxTests: 3 });
         expect(summary).toContain('src/target.js');
-        expect(summary).toContain('3 sandboxed attack test(s)');
+        expect(summary).toContain('Run up to 3 attack tests for src/target.js in the Docker sandbox');
         expect(mocks.consumeSessionApproval).toHaveBeenCalledTimes(3);
         expect(mocks.revokeSessionApproval).toHaveBeenCalledWith('run-1');
         expect(out.approval).toEqual({ granted: true, reason: 'User approved' });
@@ -254,8 +254,8 @@ describe('runAssuranceAttackTests', () => {
         const out = await runAssuranceAttackTests(baseInput([cell('c1', 5, 'safe', 'traced')], [scen('s1', 'c1'), scen('s2', 'c1')]));
         expect(out.approval).toEqual({ granted: false, reason: 'Attack test skipped: approval was denied.' });
         expect(out.scenarioUpdates).toEqual([
-            { scenarioId: 's1', test: 'skipped', testNote: 'Attack test skipped: approval was denied.' },
-            { scenarioId: 's2', test: 'skipped', testNote: 'Attack test skipped: approval was denied.' },
+            { scenarioId: 's1', test: 'skipped', testNote: 'Attack test skipped: approval was denied.', backend: 'docker', isolation: 'full' },
+            { scenarioId: 's2', test: 'skipped', testNote: 'Attack test skipped: approval was denied.', backend: 'docker', isolation: 'full' },
         ]);
         expect(out.cellUpdates).toEqual([]);
         expect(mocks.postJson).not.toHaveBeenCalled();

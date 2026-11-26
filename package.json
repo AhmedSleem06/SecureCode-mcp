@@ -46,6 +46,7 @@
   },
   "dependencies": {
     "@yarnpkg/lockfile": "^1.1.0",
+    "esbuild": "^0.28.2",
     "semver": "^7.5.4",
     "spdx-correct": "^3.2.0",
     "web-tree-sitter": "0.26.11",
@@ -58,5 +59,9 @@
     "@types/yarnpkg__lockfile": "^1.1.9",
     "typescript": "^5.3.2",
     "vitest": "^2.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true,
+    "esbuild@0.28.2": true
   }
 }

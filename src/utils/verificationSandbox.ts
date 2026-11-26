@@ -39,6 +39,43 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
+import { LocalSandbox } from './localSandbox';
+
+// ── Host-side TypeScript bundler ────────────────────────────────────────────
+
+export interface BundleResult {
+    ok: boolean;
+    code?: string;
+    error?: string;
+}
+
+export function bundleScript(
+    scriptPath: string,
+    workspaceRoot: string,
+): BundleResult {
+    try {
+        const esbuild: typeof import('esbuild') = require('esbuild');
+        const result = esbuild.buildSync({
+            entryPoints: [scriptPath],
+            bundle: true,
+            platform: 'node',
+            format: 'cjs',
+            target: 'node20',
+            packages: 'external',
+            sourcemap: 'inline',
+            write: false,
+            absWorkingDir: workspaceRoot,
+            logLevel: 'silent',
+        });
+        if (result.outputFiles && result.outputFiles.length > 0) {
+            return { ok: true, code: result.outputFiles[0].text };
+        }
+        return { ok: false, error: 'esbuild produced no output' };
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: `esbuild bundle failed: ${msg.slice(0, 500)}` };
+    }
+}
 
 // ── Public interface ────────────────────────────────────────────────────────
 
@@ -133,14 +170,11 @@ export function pickImageForCommand(executable: string): { image: string | null;
 // ── Probe caching ───────────────────────────────────────────────────────────
 
 const probeCache = new Map<string, boolean>();
+let dockerPositiveCache = false;
+let dockerNegativeExpiry = 0;
+const DOCKER_NEGATIVE_TTL_MS = 60_000;
+const DOCKER_PROBE_TIMEOUT_MS = 15_000;
 
-/**
- * On Windows, `deno`/`docker` are often `.cmd` shims (npm installs) that
- * `spawn(bin, { shell: false })` cannot execute (ENOENT). Resolve the real
- * path via `where.exe`: `.exe` files spawn directly; `.cmd`/`.bat` shims are
- * invoked as `cmd.exe /c <resolved>` — argv-quoted, never a shell string.
- * Returns null on non-Windows or when the binary cannot be resolved.
- */
 function resolveWindowsBin(bin: string): { cmd: string; preArgs: string[] } | null {
     if (process.platform !== 'win32') return null;
     try {
@@ -157,21 +191,52 @@ function resolveWindowsBin(bin: string): { cmd: string; preArgs: string[] } | nu
     }
 }
 
+function probeDockerOnce(): boolean {
+    let cmd = 'docker';
+    let args = ['info', '--format', '{{.ServerVersion}}'];
+    const resolved = resolveWindowsBin('docker');
+    if (resolved) {
+        cmd = resolved.cmd;
+        args = [...resolved.preArgs, 'info', '--format', '{{.ServerVersion}}'];
+    }
+    try {
+        const r = spawnSync(cmd, args, {
+            stdio: ['ignore', 'pipe', 'ignore'],
+            shell: false,
+            timeout: DOCKER_PROBE_TIMEOUT_MS,
+        });
+        return r.status === 0 && !!r.stdout && r.stdout.toString('utf8').trim().length > 0;
+    } catch {
+        return false;
+    }
+}
+
+export function probeDocker(): boolean {
+    if (dockerPositiveCache) return true;
+    if (Date.now() < dockerNegativeExpiry) return false;
+
+    let ok = probeDockerOnce();
+    if (!ok) ok = probeDockerOnce(); // retry once
+
+    if (ok) {
+        dockerPositiveCache = true;
+    } else {
+        dockerNegativeExpiry = Date.now() + DOCKER_NEGATIVE_TTL_MS;
+    }
+    return ok;
+}
+
+export function _resetDockerCacheForTests(): void {
+    dockerPositiveCache = false;
+    dockerNegativeExpiry = 0;
+}
+
 function probe(bin: string, args: string[] = ['--version']): boolean {
+    if (bin === 'docker') return probeDocker();
     const key = `${bin} ${args.join(' ')}`;
     if (probeCache.has(key)) return probeCache.get(key)!;
     let ok = false;
     try {
-        if (process.platform === 'win32' && bin === 'docker') {
-            const pipes = [
-                '\\\\.\\pipe\\dockerDesktopLinuxEngine',
-                '\\\\.\\pipe\\docker_engine',
-            ];
-            if (!pipes.some(p => fs.existsSync(p))) {
-                probeCache.set(key, false);
-                return false;
-            }
-        }
         let cmd = bin;
         let cmdArgs = args;
         const resolved = resolveWindowsBin(bin);
@@ -267,12 +332,7 @@ export function runnerInvocation(runner: string, scriptPath: string): string {
         case 'node':
             return `node ${p}`;
         case 'tsx':
-            // npx needs no network when the package is already in the image cache.
-            // In node:20-alpine tsx is NOT preinstalled, so this will fail safely
-            // unless SECURECODE_SANDBOX_IMAGE provides tsx. That's acceptable: a
-            // safe failure is better than silently running with `node` (which
-            // would choke on TS syntax and also mask the misconfiguration).
-            return `npx --no-install tsx ${p}`;
+            return `node --enable-source-maps ${p}`;
         case 'pnpm-tsx':
             return `pnpm exec tsx ${p}`;
         case 'yarn-tsx':
@@ -385,17 +445,45 @@ class DockerSandbox implements SandboxBackend {
     private async executeScript(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
         const sandboxDir = ensureSandboxDir(opts.workspaceRoot);
         const runner = opts.runner || 'node';
+        const needsBundle = runner === 'tsx';
         const ext = fileExtFor(runner);
-        const testFile = path.join(sandboxDir, `verify-test-${uniqueSuffix()}${ext}`);
+        const srcSuffix = uniqueSuffix();
+        const srcTestFile = path.join(sandboxDir, `verify-test-${srcSuffix}${ext}`);
         const setupExt = isPythonRunner(runner) ? '.py' : ext;
-        const setupFile = opts.setupScript
-            ? path.join(sandboxDir, `verify-setup-${uniqueSuffix()}${setupExt}`)
+        const srcSetupFile = opts.setupScript
+            ? path.join(sandboxDir, `verify-setup-${srcSuffix}${setupExt}`)
             : null;
 
+        let bundledTestFile: string | null = null;
+        let bundledSetupFile: string | null = null;
+
         try {
-            fs.writeFileSync(testFile, opts.script || '', 'utf8');
-            if (setupFile && opts.setupScript) {
-                fs.writeFileSync(setupFile, opts.setupScript, 'utf8');
+            fs.writeFileSync(srcTestFile, opts.script || '', 'utf8');
+            if (srcSetupFile && opts.setupScript) {
+                fs.writeFileSync(srcSetupFile, opts.setupScript, 'utf8');
+            }
+
+            let testFile = srcTestFile;
+            let setupFile = srcSetupFile;
+
+            if (needsBundle) {
+                const tb = bundleScript(srcTestFile, opts.workspaceRoot);
+                if (!tb.ok) {
+                    return { verdict: 'error', output: `TypeScript bundle failed: ${tb.error}`, exitCode: -1, backend: this.name };
+                }
+                bundledTestFile = path.join(sandboxDir, `verify-test-${srcSuffix}.cjs`);
+                fs.writeFileSync(bundledTestFile, tb.code!, 'utf8');
+                testFile = bundledTestFile;
+
+                if (srcSetupFile) {
+                    const sb = bundleScript(srcSetupFile, opts.workspaceRoot);
+                    if (!sb.ok) {
+                        return { verdict: 'error', output: `TypeScript setup bundle failed: ${sb.error}`, exitCode: -1, backend: this.name };
+                    }
+                    bundledSetupFile = path.join(sandboxDir, `verify-setup-${srcSuffix}.cjs`);
+                    fs.writeFileSync(bundledSetupFile, sb.code!, 'utf8');
+                    setupFile = bundledSetupFile;
+                }
             }
 
             const imageInfo = pickImageForRunner(runner);
@@ -408,11 +496,6 @@ class DockerSandbox implements SandboxBackend {
                 };
             }
 
-            // The test and setup files are written inside workspaceRoot/.securecode/,
-            // so they're already accessible via the workspace bind mount. We compute
-            // the in-container path from the host path — no separate bind mount needed.
-            // (A separate bind mount would fail on Docker Desktop for Windows because
-            // it can't create a mountpoint inside a read-only bind mount.)
             const toContainerPath = (hostPath: string): string =>
                 '/workspace/' + path.relative(opts.workspaceRoot, hostPath).replace(/\\/g, '/');
 
@@ -435,23 +518,23 @@ class DockerSandbox implements SandboxBackend {
                 '--env', 'npm_config_cache=/tmp/npm-cache',
                 '-v', `${opts.workspaceRoot}:/workspace:ro`,
             ];
+
             dockerArgs.push(imageInfo.image);
 
-            // Build the in-container command for the requested runner.
-            const testCmd = runnerInvocation(runner, containerTestPath);
+            const effectiveRunner = needsBundle ? 'tsx' : runner;
+            const testCmd = runnerInvocation(effectiveRunner, containerTestPath);
             const fullCmd = setupFile
-                ? `${runnerInvocation(runner, containerSetupPath)} && ${testCmd}`
+                ? `${runnerInvocation(effectiveRunner, containerSetupPath)} && ${testCmd}`
                 : testCmd;
 
-            // Use sh -c so setup && test chain correctly. The script paths are
-            // generated by us (unique suffix) so there is no injection risk; the
-            // script *content* is already accepted-risk (it runs in the sandbox).
             dockerArgs.push('sh', '-c', fullCmd);
 
             return await runSandboxedProcess('docker', dockerArgs, opts, this.name);
         } finally {
-            safeUnlink(testFile);
-            safeUnlink(setupFile);
+            safeUnlink(srcTestFile);
+            safeUnlink(srcSetupFile);
+            safeUnlink(bundledTestFile);
+            safeUnlink(bundledSetupFile);
         }
     }
 }
@@ -679,25 +762,49 @@ function runSandboxedProcess(
 // ── Backend selection ───────────────────────────────────────────────────────
 
 let cachedBackend: SandboxBackend | null | undefined;
+let cachedOverride: string | undefined;
 
-/**
- * Detect the best available sandbox backend. Docker is preferred (runs any
- * Node/Python test unchanged); Deno is a fallback for TS/JS tests only.
- * Returns null if neither is available — the caller MUST return INCONCLUSIVE.
- */
+function loadLocalSandboxLazy(): SandboxBackend | null {
+    try {
+        return new LocalSandbox();
+    } catch {
+        return null;
+    }
+}
+
 export function detectSandbox(): SandboxBackend | null {
-    if (cachedBackend !== undefined) return cachedBackend;
+    const override = process.env.SECURECODE_SANDBOX;
+    if (cachedBackend !== undefined && cachedOverride === override) return cachedBackend;
+    cachedOverride = override;
 
+    if (override === 'none') { cachedBackend = null; return null; }
+
+    if (override === 'docker') {
+        const d = new DockerSandbox();
+        cachedBackend = d.available ? d : null;
+        return cachedBackend;
+    }
+    if (override === 'deno') {
+        const d = new DenoSandbox();
+        cachedBackend = d.available ? d : null;
+        return cachedBackend;
+    }
+    if (override === 'local') {
+        cachedBackend = loadLocalSandboxLazy();
+        return cachedBackend;
+    }
+
+    // Auto: docker → local → (deno only if explicitly selected)
     const docker = new DockerSandbox();
     if (docker.available) {
         cachedBackend = docker;
         return docker;
     }
 
-    const deno = new DenoSandbox();
-    if (deno.available) {
-        cachedBackend = deno;
-        return deno;
+    const local = loadLocalSandboxLazy();
+    if (local && local.available) {
+        cachedBackend = local;
+        return local;
     }
 
     cachedBackend = null;
@@ -707,6 +814,7 @@ export function detectSandbox(): SandboxBackend | null {
 /** Reset the cached backend selection. Used by tests. */
 export function _resetSandboxCacheForTests(): void {
     cachedBackend = undefined;
+    cachedOverride = undefined;
 }
 
 /** Force a specific backend (for tests). Pass null to simulate "no sandbox". */

@@ -97,7 +97,6 @@ const DANGEROUS_GLOBAL_CALLS: Array<{ pattern: RegExp; reason: string }> = [
 const TIMER_STRING_ARG: RegExp = /\b(setTimeout|setInterval|setImmediate)\s*\(\s*['"`]/;
 
 const DANGEROUS_PROCESS_ACCESS: Array<{ pattern: RegExp; reason: string }> = [
-    { pattern: /\bprocess\.env\b/, reason: 'process.env access can leak host secrets — pass values explicitly' },
     { pattern: /\bprocess\.argv\b/, reason: 'process.argv access can leak host arguments' },
     { pattern: /\bprocess\.execPath\b/, reason: 'process.execPath exposes the host runtime path' },
     { pattern: /\bprocess\.cwd\s*\(/, reason: 'process.cwd() exposes the host filesystem layout' },
@@ -317,6 +316,55 @@ export function maskLiterals(src: string): MaskedScript {
     return { text: out, reliable, dynamicTemplateSpecifier };
 }
 
+// ── process.env access analysis ─────────────────────────────────────────────
+//
+// Allow: `process.env.KEY = 'literal'`, `process.env.KEY = "literal"`,
+//        `process.env.KEY = \`literal\`` (no interpolation),
+//        `delete process.env.KEY`
+// Block: `process.env` passed as a whole, JSON.stringify(process.env),
+//        Object.keys(process.env), reading a var and printing/sending it,
+//        or any other use of process.env.
+
+const PROCESS_ENV_RE = /\bprocess\.env\b/g;
+const ENV_ASSIGN_RE = /\bprocess\.env\.\w+\s*=\s*(['"`])/;
+const ENV_DELETE_RE = /\bdelete\s+process\.env\.\w+/;
+const ENV_DUMP_RE = /(?:JSON\.stringify|Object\.(?:keys|values|entries|assign)|console\.(?:log|dir|error|warn)|\.(?:send|write|emit|post|get)\s*\()\s*\(\s*process\.env\b/;
+const ENV_WHOLE_RE = /(?:=\s*process\.env\s*[;,)\]}]|\(\s*process\.env\s*[,)]|,\s*process\.env\s*[,)\]])/;
+
+function checkProcessEnvAccess(script: string): TestSafetyResult | null {
+    if (!PROCESS_ENV_RE.test(script)) return null;
+    PROCESS_ENV_RE.lastIndex = 0;
+
+    if (ENV_DUMP_RE.test(script)) {
+        return { allowed: false, reason: 'dumping process.env to output or network is blocked — it leaks host secrets' };
+    }
+    if (ENV_WHOLE_RE.test(script)) {
+        return { allowed: false, reason: 'passing process.env as a whole object is blocked — it leaks host secrets' };
+    }
+
+    let match: RegExpExecArray | null;
+    PROCESS_ENV_RE.lastIndex = 0;
+    while ((match = PROCESS_ENV_RE.exec(script)) !== null) {
+        const before = script.slice(Math.max(0, match.index - 40), match.index);
+        const after = script.slice(match.index, Math.min(script.length, match.index + 80));
+
+        if (ENV_DELETE_RE.test(before + after)) continue;
+
+        if (ENV_ASSIGN_RE.test(after)) continue;
+
+        const readMatch = /^process\.env\.(\w+)/.exec(after);
+        if (readMatch) {
+            return { allowed: false, reason: `reading process.env.${readMatch[1]} can leak host secrets — set the value with process.env.KEY = 'value' instead` };
+        }
+
+        if (/^process\.env\s*[^.\[=]/.test(after) || /^process\.env\s*$/.test(after)) {
+            return { allowed: false, reason: 'process.env access can leak host secrets — pass values explicitly' };
+        }
+    }
+
+    return null;
+}
+
 // ── Main entry ──────────────────────────────────────────────────────────────
 
 export function checkTestSafety(rawScript: string, _workspaceRoot: string): TestSafetyResult {
@@ -345,6 +393,11 @@ export function checkTestSafety(rawScript: string, _workspaceRoot: string): Test
             return { allowed: false, reason };
         }
     }
+
+    // 3b. process.env — allow ASSIGNING a literal value or deleting a key,
+    // block reading/dumping the host env
+    const envResult = checkProcessEnvAccess(script);
+    if (envResult) return envResult;
 
     // 4. Global network refs
     for (const { pattern, reason } of DANGEROUS_GLOBAL_REFERENCES) {

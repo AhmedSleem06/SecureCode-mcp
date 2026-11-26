@@ -25,12 +25,52 @@ import type { GridGateProblems } from '../assurance/gridState';
 import type { EvidenceLedger } from './evidenceLedger';
 import type { WorkItemQueue } from './workItem';
 import type { HandlerInventory } from '../project-map/handlerInventory';
-import type { CandidateStore } from './candidateStore';
+import type { Candidate, CandidateStore } from './candidateStore';
 import { missingGateDimensions } from './candidateStore';
 import { uncoveredWithin, type InvestigationState, type LineRange } from './investigationState';
 import type { ScheduleDecision } from './scanScheduler';
 
 export type FinishGateMode = 'complete' | 'continue' | 'forced-incomplete';
+
+export const LOGIC_BUG_TYPES = new Set([
+    'broken_access_control', 'idor', 'privilege_escalation', 'mass_assignment',
+    'business_logic', 'state_order', 'race_condition', 'auth_bypass',
+    'broken_authentication', 'missing_authorization', 'insecure_default',
+    'config_default',
+]);
+
+function isLogicClass(candidateType: string): boolean {
+    const normalized = candidateType.toLowerCase().replace(/[\s-]+/g, '_');
+    for (const logicType of LOGIC_BUG_TYPES) {
+        if (normalized.includes(logicType)) return true;
+    }
+    return false;
+}
+
+function candidateLinesDelivered(
+    candidate: Candidate,
+    investigation: InvestigationState,
+): { entryDelivered: boolean; vulnDelivered: boolean } {
+    if (candidate.locations.length === 0) return { entryDelivered: false, vulnDelivered: false };
+    let entryDelivered = false;
+    let vulnDelivered = false;
+    for (const loc of candidate.locations) {
+        if (investigation.isCovered(loc.filePath, loc.line, loc.line)) {
+            vulnDelivered = true;
+            entryDelivered = true;
+        }
+    }
+    return { entryDelivered, vulnDelivered };
+}
+
+function candidateClaimHasActorAndEffect(candidate: Candidate): boolean {
+    const claim = (candidate.claim || '').toLowerCase();
+    const actorTerms = ['attacker', 'user', 'member', 'caller', 'client', 'unauthenticated', 'authenticated', 'any user', 'actor', 'adversary', 'requester'];
+    const effectTerms = ['escalat', 'elevat', 'overwrit', 'bypass', 'impersonat', 'admin', 'role', 'permission', 'privilege', 'unauthoriz', 'access', 'modify', 'manipulat', 'tamper', 'inject', 'assign', 'set', 'update', 'change'];
+    const hasActor = actorTerms.some(t => claim.includes(t));
+    const hasEffect = effectTerms.some(t => claim.includes(t));
+    return hasActor && hasEffect;
+}
 
 /**
  * When the identical reason-code set rejects this many CONSECUTIVE finishes,
@@ -418,13 +458,60 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
     // traced source-to-sink flow touches its location and no effective guard
     // was found. `verification` is never a pre-finish requirement: the
     // verifier runs after finish.
+    //
+    // Logic-class candidates (access control, mass assignment, privilege
+    // escalation, etc.) do not require a traced taint flow: delivered read
+    // coverage of the entry-point and vulnerable lines satisfies
+    // `reachability`, and a claim stating actor+effect satisfies
+    // `threat-model` and `impact`.
     if (!candidates.allReadyForJuror()) {
         for (const candidate of candidates.getBlocking()) {
+            const logicClass = isLogicClass(candidate.type);
+
+            if (logicClass) {
+                const { entryDelivered, vulnDelivered } = candidateLinesDelivered(candidate, investigation);
+                const claimSufficient = candidateClaimHasActorAndEffect(candidate);
+
+                if (entryDelivered && vulnDelivered) {
+                    const missingBefore = missingGateDimensions(candidate);
+                    if (missingBefore.includes('reachability')) {
+                        candidates.addEvidence(candidate.id, `logic-read-coverage:${candidate.locations[0]?.filePath}`, 'source', 'reachability');
+                    }
+                }
+                if (claimSufficient) {
+                    const missingBefore = missingGateDimensions(candidate);
+                    if (missingBefore.includes('threat-model')) {
+                        candidates.addEvidence(candidate.id, `logic-claim-threat:${candidate.id}`, 'policy', 'threat-model');
+                    }
+                    if (missingBefore.includes('impact')) {
+                        candidates.addEvidence(candidate.id, `logic-claim-impact:${candidate.id}`, 'impact', 'impact');
+                    }
+                }
+            }
+
+            if (candidates.isReadyForJuror(candidate.id)) continue;
+
             const missingDims = missingGateDimensions(candidate);
             const location = candidate.locations.map(l => `${l.filePath}:${l.line}`).join(', ') || target.filePath;
-            const blocker = candidate.guardFound
-                ? `an effective guard was found (${candidate.guardReason}) — show why it does not apply or drop the finding`
-                : `no traced source-to-sink flow reaches ${location} — run trace_flow or trace_flow_cross_file on that file`;
+
+            let blocker: string;
+            if (candidate.guardFound) {
+                blocker = `an effective guard was found (${candidate.guardReason}) — show why it does not apply or drop the finding`;
+            } else if (logicClass) {
+                const hints: string[] = [];
+                if (missingDims.includes('reachability')) {
+                    hints.push(`read the entry-point and vulnerable lines (${location}) so the read coverage proves reachability`);
+                }
+                if (missingDims.includes('threat-model') || missingDims.includes('impact')) {
+                    hints.push('state which actor exploits the flaw and what effect it has (e.g. "unauthenticated user sets role to admin") in the candidate claim');
+                }
+                blocker = hints.length > 0
+                    ? hints.join('; ')
+                    : `missing dimensions ${missingDims.join(', ')} — provide evidence for each`;
+            } else {
+                blocker = `no traced source-to-sink flow reaches ${location} — run trace_flow or trace_flow_cross_file on that file`;
+            }
+
             const dimInfo = missingDims.length > 0
                 ? ` (missing proof dimensions: ${missingDims.join(', ')}; ${blocker})`
                 : ` (${candidate.evidenceRefs.length} evidence ref(s); ${blocker})`;
@@ -437,7 +524,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                 detail: `This vulnerability candidate at ${location} has status "${candidate.status}" with ${candidate.evidenceRefs.length} evidence reference(s). Missing proof dimensions: ${missingDims.join(', ') || 'none'}. ${blocker[0].toUpperCase()}${blocker.slice(1)}.`,
                 file: candidate.locations[0]?.filePath || target.filePath,
                 requiredEvidence: candidate.requiredEvidence.map(e => `${e.description} (tools: ${(e.requiredTools || []).join(', ')})`),
-                suggestedNextAction: (candidate.requiredEvidence[0]?.requiredTools || ['trace_flow_cross_file'])[0],
+                suggestedNextAction: logicClass ? 'read_file' : (candidate.requiredEvidence[0]?.requiredTools || ['trace_flow_cross_file'])[0],
                 priority: candidate.severity === 'high' || candidate.severity === 'critical' ? 'high' : 'medium',
             });
         }

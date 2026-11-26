@@ -50,11 +50,11 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * know — in one place, with a copy-pasteable install path — what to do.
  */
 export const SANDBOX_UNAVAILABLE_MESSAGE =
-    'No verification sandbox backend (Docker or Deno) was detected locally. ' +
+    'No verification sandbox backend was detected locally. ' +
     'Exploit verification was skipped — the finding is reported as INCONCLUSIVE ' +
     'with confidence capped at 75%. To enable exploit-verified findings:\n' +
     '  • Docker (preferred, supports any language): https://docs.docker.com/get-docker\n' +
-    '  • Deno (JS/TS only, lighter install):    https://deno.com/#installation\n' +
+    '  • Local mode (Node.js only, automatic when Docker is unavailable)\n' +
     'If neither is available, the API-side sandbox (on the server) is used as an ' +
     'automatic fallback — no local install required, but slower (network round-trip per finding).';
 

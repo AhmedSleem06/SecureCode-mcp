@@ -22,6 +22,8 @@ export interface ProofArtifact {
     mutation: { description: string; mutatedVerdict: string; reason: string } | null;
     finalVerdict: string;
     finalReason: string;
+    backend?: string;
+    isolation?: string;
 }
 
 export const PROOF_ARTIFACT_DIR = path.join('.securecode', 'proofs');

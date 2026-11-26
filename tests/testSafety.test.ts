@@ -125,7 +125,7 @@ describe('checkTestSafety', () => {
         expect(result.reason).toContain('string argument');
     });
 
-    it('blocks process.env access', () => {
+    it('blocks process.env read access', () => {
         const script = `const token = process.env.GITHUB_TOKEN;`;
         const result = checkTestSafety(script, '/workspace');
         expect(result.allowed).toBe(false);
@@ -265,5 +265,59 @@ describe('checkTestSafety', () => {
         const result = checkTestSafety(script, '/workspace');
         expect(result.allowed).toBe(false);
         expect(result.reason).toContain('process.exit');
+    });
+
+    // ── process.env assignment / delete (allowed for test config) ────────
+
+    it('allows process.env.KEY = "literal" (setting fake config)', () => {
+        const script = `process.env.JWT_SECRET = 'test-secret';\nimport { verify } from "./auth";\nconsole.log("PASS: ok");`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed, result.reason).toBe(true);
+    });
+
+    it('allows process.env.KEY = "literal" with double quotes', () => {
+        const script = `process.env.DATABASE_URL = "postgres://localhost/test";\nconsole.log("PASS: ok");`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed, result.reason).toBe(true);
+    });
+
+    it('allows delete process.env.KEY', () => {
+        const script = `delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;\nconsole.log("PASS: ok");`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed, result.reason).toBe(true);
+    });
+
+    it('blocks JSON.stringify(process.env) — full dump', () => {
+        const script = `const data = JSON.stringify(process.env);\nconsole.log(data);`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('dump');
+    });
+
+    it('blocks Object.keys(process.env) — env enumeration', () => {
+        const script = `const keys = Object.keys(process.env);\nconsole.log(keys);`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('dump');
+    });
+
+    it('blocks passing process.env as argument', () => {
+        const script = `someFunc(process.env);`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('process.env');
+    });
+
+    it('blocks assigning process.env to a variable', () => {
+        const script = `const env = process.env;\nconsole.log(env.SECRET);`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('process.env');
+    });
+
+    it('blocks console.log(process.env)', () => {
+        const script = `console.log(process.env);`;
+        const result = checkTestSafety(script, '/workspace');
+        expect(result.allowed).toBe(false);
     });
 });

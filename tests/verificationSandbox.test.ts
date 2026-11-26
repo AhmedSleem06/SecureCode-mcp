@@ -213,9 +213,10 @@ describe('runnerInvocation', () => {
             .toBe('node "/workspace/.securecode/test.test.ts"');
     });
 
-    it('invokes tsx via npx --no-install', () => {
-        expect(runnerInvocation('tsx', '/workspace/.securecode/test.test.ts'))
-            .toBe('npx --no-install tsx "/workspace/.securecode/test.test.ts"');
+    it('invokes tsx as node --enable-source-maps (pre-bundled CJS)', () => {
+        const cmd = runnerInvocation('tsx', '/workspace/.securecode/test.cjs');
+        expect(cmd).toContain('node --enable-source-maps');
+        expect(cmd).toContain('/workspace/.securecode/test.cjs');
     });
 
     it('invokes bun via bun run', () => {

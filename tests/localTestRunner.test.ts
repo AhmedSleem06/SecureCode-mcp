@@ -75,9 +75,7 @@ describe('runLocalTest', () => {
         const script = `console.log("PASS: done");`;
         const result = await runLocalTest(script, 'node', workspaceRoot);
         expect(result.verdict).toBe('sandbox-unavailable');
-        // The message must point the user at a concrete install path.
         expect(result.output).toContain('docs.docker.com');
-        expect(result.output).toContain('deno.com');
     });
 
     it('returns cancelled (not timeout) when the AbortSignal fires mid-test', async () => {

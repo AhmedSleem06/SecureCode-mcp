@@ -24,7 +24,7 @@ export interface AssuranceAttackTestInput {
 }
 
 export interface AssuranceAttackTestOutcome {
-    scenarioUpdates: { scenarioId: string; test: 'blocked' | 'exploited' | 'untestable' | 'skipped'; testNote: string; artifactPath?: string }[];
+    scenarioUpdates: { scenarioId: string; test: 'blocked' | 'exploited' | 'untestable' | 'skipped'; testNote: string; artifactPath?: string; backend?: string; isolation?: string }[];
     cellUpdates: CellUpdate[];
     exploitedFindings: { cellId: string; scenarioId: string; type: string; line: number; title: string; why: string; artifactPath?: string }[];
     approval: { granted: boolean; reason: string };
@@ -39,9 +39,35 @@ export const ASSURANCE_MAX_SCENARIOS_PER_CELL = 3;
 export const ASSURANCE_MAX_ATTEMPTS = 2;
 export const ASSURANCE_APPROVAL_TTL_MS = 2 * 60 * 60 * 1000;
 export const ASSURANCE_TEST_TIMEOUT_MS = 30_000;
+export const ASSURANCE_DEFAULT_MAX_USD = 1.5;
+export const ASSURANCE_CONSECUTIVE_UNTESTABLE_LIMIT = 3;
 const NOTE_OUTPUT_CHARS = 300;
 const TESTED_STATUSES = new Set(['blocked', 'exploited', 'untestable']);
 const CLOSURE_STRENGTH: Record<string, number> = { untestable: 1, reasoning: 2, traced: 3, tested: 4 };
+
+function getAssuranceMaxTests(): number {
+    const env = process.env.SECURECODE_ASSURANCE_MAX_TESTS;
+    if (env) { const n = Number(env); if (Number.isFinite(n) && n > 0) return Math.floor(n); }
+    return ASSURANCE_DEFAULT_MAX_TESTS;
+}
+
+function getAssuranceMaxUsd(): number {
+    const env = process.env.SECURECODE_ASSURANCE_TEST_USD;
+    if (env) { const n = Number(env); if (Number.isFinite(n) && n > 0) return n; }
+    return ASSURANCE_DEFAULT_MAX_USD;
+}
+
+function classifyFailure(result: ScenarioRunResult): string {
+    if (result.test === 'untestable') {
+        const note = result.note;
+        if (/safety check|blocked/i.test(note)) return 'safety-check';
+        if (/cannot find module|cannot resolve|module not found|import error/i.test(note)) return 'module-load';
+        if (/no PASS\/FAIL|no.*result.*marker|printed no scenario/i.test(note)) return 'no-result-marker';
+        const firstLine = note.split('\n')[0].slice(0, 120);
+        return `crash:${firstLine}`;
+    }
+    return '';
+}
 
 export interface SelectedScenario {
     cell: GridCell;
@@ -160,6 +186,7 @@ interface RunEnv {
     runtimeInfo: ReturnType<typeof detectRuntime>;
     relativeImportPath: string;
     sandboxBackend?: string;
+    sandboxIsolation?: string;
     relatedFiles: Array<{ filePath: string; content: string; relationship: string }>;
     addCost: (usd: unknown) => void;
 }
@@ -265,7 +292,7 @@ async function runScenarioTest(env: RunEnv, cell: GridCell, scenario: Scenario):
         rounds.push({ round: attempt, testScript, setupScript, runner, verdict: run.verdict, output: run.output });
 
         if (run.verdict === 'sandbox-unavailable') {
-            return { test: 'skipped', note: 'No sandbox (Docker or Deno) is available to run attack tests.', failureLine: null, rounds, stop: 'sandbox' };
+            return { test: 'skipped', note: 'No sandbox is available to run attack tests.', failureLine: null, rounds, stop: 'sandbox' };
         }
         if (run.verdict === 'cancelled') {
             return { test: 'skipped', note: 'Cancelled before the attack test finished.', failureLine: null, rounds, stop: 'cancelled' };
@@ -403,19 +430,27 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
         costUsd: 0,
     };
     const { ctx, runId, target } = input;
-    const selected = selectAssuranceScenarios(input.cells, input.scenarios, input.maxTests ?? ASSURANCE_DEFAULT_MAX_TESTS);
+    const selected = selectAssuranceScenarios(input.cells, input.scenarios, input.maxTests ?? getAssuranceMaxTests());
     if (selected.length === 0) {
         outcome.approval.reason = 'No attack tests needed: no eligible scenarios.';
         return outcome;
     }
 
+    const fileRel = relativeTarget(ctx.workspaceRoot, target.filePath);
+    const runtimeInfo = detectRuntime(ctx.workspaceRoot, target.filePath || undefined);
+    const sandbox = detectSandbox();
+
     const results: Array<{ cell: GridCell; scenario: Scenario; test: ScenarioTestResult; note: string; line?: number; artifactPath?: string }> = [];
     const finalize = (): AssuranceAttackTestOutcome => {
+        const backend = sandbox?.name;
+        const isolation = backend === 'docker' ? 'full' : (backend === 'local' ? 'reduced' : undefined);
         outcome.scenarioUpdates = results.map((r) => ({
             scenarioId: r.scenario.id,
             test: r.test,
             testNote: r.note,
             ...(r.artifactPath ? { artifactPath: r.artifactPath } : {}),
+            ...(backend ? { backend } : {}),
+            ...(isolation ? { isolation } : {}),
         }));
         outcome.cellUpdates = buildAssuranceCellUpdates(input.cells, results);
         outcome.costUsd = Math.round(outcome.costUsd * 1e6) / 1e6;
@@ -425,18 +460,15 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
         for (const { cell, scenario } of selected.slice(from)) results.push({ cell, scenario, test, note });
     };
 
-    const fileRel = relativeTarget(ctx.workspaceRoot, target.filePath);
-    const runtimeInfo = detectRuntime(ctx.workspaceRoot, target.filePath || undefined);
     if (!runtimeInfo.canRunLocally) {
         const why = runtimeInfo.skipReason || 'this file cannot run in the local sandbox';
         outcome.approval.reason = `Not requested: ${why}`;
         markRest(0, 'untestable', `Cannot test in the sandbox: ${why}`);
         return finalize();
     }
-    const sandbox = detectSandbox();
     if (!sandbox) {
-        outcome.approval.reason = 'Not requested: no sandbox (Docker or Deno) is available.';
-        markRest(0, 'skipped', 'Attack test skipped: no sandbox (Docker or Deno) is available.');
+        outcome.approval.reason = 'Not requested: no sandbox is available.';
+        markRest(0, 'skipped', 'Attack test skipped: no sandbox is available.');
         return finalize();
     }
     if (input.signal?.aborted) {
@@ -454,8 +486,11 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
         } catch {
             brokerStarted = false;
         }
-        const summary = `Deep assurance scan of ${fileRel}: run ${selected.length} sandboxed attack test(s) against your own code. ` +
-            'Each test performs one attack scenario on the real module (no network, read-only workspace) to check that its protections hold.';
+        const backendLabel = sandbox.name;
+        const isDocker = backendLabel === 'docker';
+        const summary = isDocker
+            ? `Run up to ${selected.length} attack tests for ${fileRel} in the Docker sandbox.`
+            : `Docker not found — run up to ${selected.length} attack tests for ${fileRel} in local mode on this PC (copy of the project, no secrets, network blocked, lower isolation).`;
         const approval = await broker.requestSessionApproval(
             { runId, tool: 'assurance-tests', maxTests: selected.length, ttlMs: ASSURANCE_APPROVAL_TTL_MS },
             summary,
@@ -486,18 +521,23 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
         } catch {
             relatedFiles = [];
         }
+        const sandboxIsolation = backendLabel === 'docker' ? 'full' : backendLabel.includes('reduced') ? 'reduced' : (backendLabel === 'local' ? 'reduced' : 'full');
         const env: RunEnv = {
             input,
             client: new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken }),
             runtimeInfo,
             relativeImportPath: computeRelativeImportPath(testFileDir, absTarget, runtimeInfo.runner),
             sandboxBackend: sandbox.name,
+            sandboxIsolation,
             relatedFiles,
             addCost: (usd) => {
                 if (typeof usd === 'number' && Number.isFinite(usd) && usd > 0) outcome.costUsd += usd;
             },
         };
         const fileLines = target.fileContent.split('\n').length;
+        const maxUsd = getAssuranceMaxUsd();
+        let consecutiveUntestable = 0;
+        let lastFailureClass = '';
 
         for (let i = 0; i < selected.length; i++) {
             const { cell, scenario } = selected[i];
@@ -507,6 +547,10 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
             }
             if (!consumeSessionApproval(runId)) {
                 markRest(i, 'skipped', getSessionApproval(runId).reason);
+                break;
+            }
+            if (outcome.costUsd >= maxUsd) {
+                markRest(i, 'skipped', `Attack test budget reached ($${maxUsd.toFixed(2)}).`);
                 break;
             }
             input.progress?.(`Attack test ${i + 1}/${selected.length}: scenario ${scenario.id} on ${cell.title} (risk ${cell.risk})`);
@@ -525,10 +569,14 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
                     mutation: null,
                     finalVerdict: r.test.toUpperCase(),
                     finalReason: r.note,
+                    backend: env.sandboxBackend,
+                    isolation: env.sandboxIsolation,
                 }) ?? undefined;
             }
             results.push({ cell, scenario, test: r.test, note: r.note, line, ...(artifactPath ? { artifactPath } : {}) });
             if (r.test === 'exploited') {
+                consecutiveUntestable = 0;
+                lastFailureClass = '';
                 outcome.exploitedFindings.push({
                     cellId: cell.id,
                     scenarioId: scenario.id,
@@ -538,10 +586,28 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
                     why: `Attack scenario ${scenario.id} (${scenario.actor}): ${scenario.steps.join(' → ')}. Expected: ${scenario.expectSecure}. ${r.note}`.slice(0, 1500),
                     ...(artifactPath ? { artifactPath } : {}),
                 });
+            } else if (r.test === 'blocked') {
+                consecutiveUntestable = 0;
+                lastFailureClass = '';
+            } else if (r.test === 'untestable') {
+                const cls = classifyFailure(r);
+                if (cls && cls === lastFailureClass) {
+                    consecutiveUntestable++;
+                } else {
+                    consecutiveUntestable = cls ? 1 : 0;
+                    lastFailureClass = cls;
+                }
+                if (consecutiveUntestable >= ASSURANCE_CONSECUTIVE_UNTESTABLE_LIMIT) {
+                    markRest(i + 1, 'skipped', `Stopped: the previous ${ASSURANCE_CONSECUTIVE_UNTESTABLE_LIMIT} tests failed the same way (${lastFailureClass}).`);
+                    break;
+                }
+            } else {
+                consecutiveUntestable = 0;
+                lastFailureClass = '';
             }
             if (r.stop) {
                 const note = r.stop === 'budget' ? `Attack test skipped: ${VERIFY_BUDGET_EXHAUSTED_REASON}`
-                    : r.stop === 'sandbox' ? 'Attack test skipped: no sandbox (Docker or Deno) is available.'
+                    : r.stop === 'sandbox' ? 'Attack test skipped: no sandbox is available.'
                     : 'Cancelled before the attack test ran.';
                 markRest(i + 1, 'skipped', note);
                 break;
