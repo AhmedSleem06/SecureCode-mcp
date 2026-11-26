@@ -22,10 +22,13 @@ import { ApiClient } from '../src/api/client';
 import { executeAction, executeReadFileAction, executeFlowAction, extractFunctionBoundaries } from '../src/attack/agentScanExecutor';
 import {
     clampHarnessSettings,
+    clampCellUpdates,
     DEFAULT_AGENT_HARNESS,
     FULL_READ_WINDOW,
 } from '../src/attack/agentScanProtocol';
 import { InvestigationState } from '../src/attack/investigationState';
+import fs from 'fs';
+import path from 'path';
 
 const ctx = { workspaceRoot: '/tmp/securecode-harness-test-missing', apiUrl: 'http://localhost:3000', apiToken: 'test' };
 const baseStart = { runId: 'run-1', budget: { stepsRemaining: 40, costSpentUsd: 0, costCapUsd: 4.0, stepsGranted: 40, hardMaxSteps: 80, extensionsGranted: 0 }, scanCredits: 95, refundId: 'r1' };
@@ -72,7 +75,7 @@ const stepBodies = (mockFn: any) => (mockFn.mock.calls as any[]).filter(c => c[0
 
 describe('clampHarnessSettings (MCP mirror)', () => {
     it('defaults to checklist / 2 / window', () => {
-        expect(DEFAULT_AGENT_HARNESS).toEqual({ gateMode: 'checklist', fullReadWindow: 2, reReadPolicy: 'window' });
+        expect(DEFAULT_AGENT_HARNESS).toEqual({ gateMode: 'checklist', fullReadWindow: 2, reReadPolicy: 'window', scanMode: 'standard' });
         expect(DEFAULT_AGENT_HARNESS.fullReadWindow).toBe(FULL_READ_WINDOW);
         expect(clampHarnessSettings(undefined)).toEqual(DEFAULT_AGENT_HARNESS);
         expect(clampHarnessSettings('evidence')).toEqual(DEFAULT_AGENT_HARNESS);
@@ -83,9 +86,51 @@ describe('clampHarnessSettings (MCP mirror)', () => {
         expect(clampHarnessSettings({ fullReadWindow: 9 }).fullReadWindow).toBe(4);
         expect(clampHarnessSettings({ fullReadWindow: 3.5 }).fullReadWindow).toBe(2);
         expect(clampHarnessSettings({ gateMode: 'yolo', reReadPolicy: 'x', fullReadWindow: 3 }))
-            .toEqual({ gateMode: 'checklist', fullReadWindow: 3, reReadPolicy: 'window' });
+            .toEqual({ gateMode: 'checklist', fullReadWindow: 3, reReadPolicy: 'window', scanMode: 'standard' });
         expect(clampHarnessSettings({ gateMode: 'evidence', fullReadWindow: 4, reReadPolicy: 'coverage' }))
-            .toEqual({ gateMode: 'evidence', fullReadWindow: 4, reReadPolicy: 'coverage' });
+            .toEqual({ gateMode: 'evidence', fullReadWindow: 4, reReadPolicy: 'coverage', scanMode: 'standard' });
+    });
+
+    it('clamps scanMode to standard | assurance', () => {
+        expect(clampHarnessSettings({ scanMode: 'assurance' }).scanMode).toBe('assurance');
+        expect(clampHarnessSettings({ scanMode: 'deep' }).scanMode).toBe('standard');
+        expect(clampHarnessSettings({ gateMode: 'evidence', fullReadWindow: 3, reReadPolicy: 'coverage' }).scanMode).toBe('standard');
+    });
+});
+
+describe('clampCellUpdates (MCP mirror)', () => {
+    const known = new Set(['c1', 'c2']);
+
+    it('drops unknown ids and invalid enums and caps fields', () => {
+        expect(clampCellUpdates('nope', known)).toEqual([]);
+        expect(clampCellUpdates([
+            { cellId: 'x', status: 'safe' },
+            { cellId: 'c1', status: 'done' },
+            { cellId: 'c1', status: 'safe', closure: 'guess', evidenceLines: [3, 0, -1, 1.5], note: 'n'.repeat(900) },
+            { cellId: 'c2', status: 'depends', dependsOn: 'orders RLS policy' },
+        ], known)).toEqual([
+            { cellId: 'c1', status: 'safe', evidenceLines: [3], note: 'n'.repeat(500) },
+            { cellId: 'c2', status: 'depends', dependsOn: 'orders RLS policy' },
+        ]);
+        expect(clampCellUpdates(Array.from({ length: 41 }, () => ({ cellId: 'c1', status: 'open' })), known)).toHaveLength(40);
+        const [u] = clampCellUpdates([{ cellId: 'c1', status: 'safe', evidenceLines: Array.from({ length: 30 }, (_, i) => i + 1) }], known);
+        expect(u.evidenceLines).toHaveLength(20);
+    });
+});
+
+describe('agent scan protocol mirror (MCP ↔ API)', () => {
+    const mcpFile = path.join(__dirname, '../src/attack/agentScanProtocol.ts');
+    const apiFile = path.join(__dirname, '../../api/src/attacker/agentScanProtocol.ts');
+    const section = (src: string) => {
+        const start = src.indexOf('export type AgentScanMode');
+        const end = src.indexOf('export type LeadStatus');
+        return src.slice(start, end).replace(/\r\n/g, '\n').replace(/^\/\/ Mirror:.*$/m, '');
+    };
+
+    it.skipIf(!fs.existsSync(apiFile))('harness and assurance code is identical in both files', () => {
+        const mcp = section(fs.readFileSync(mcpFile, 'utf8'));
+        expect(mcp).toContain('export function clampCellUpdates');
+        expect(mcp).toBe(section(fs.readFileSync(apiFile, 'utf8')));
     });
 });
 
@@ -121,7 +166,7 @@ describe('runAgentScan — harness settings', () => {
 
     it('echoes the start-response harness in every step request and blocks re-reads inside the larger window', async () => {
         setupExecutors(100);
-        const harness = { gateMode: 'evidence', fullReadWindow: 3, reReadPolicy: 'window' };
+        const harness = { gateMode: 'evidence', fullReadWindow: 3, reReadPolicy: 'window', scanMode: 'standard' };
         const mockFn = mockPostJson([{ ...baseStart, harness }, ...readSequence()]);
 
         const result = await runAgentScan(ctx, target, {});
@@ -140,6 +185,21 @@ describe('runAgentScan — harness settings', () => {
 
         await runAgentScan(ctx, target, {});
 
-        for (const b of stepBodies(mockFn)) expect(b.harness).toEqual({ gateMode: 'checklist', fullReadWindow: 4, reReadPolicy: 'window' });
+        for (const b of stepBodies(mockFn)) expect(b.harness).toEqual({ gateMode: 'checklist', fullReadWindow: 4, reReadPolicy: 'window', scanMode: 'standard' });
+    });
+
+    it('fills standard for an older API harness and echoes assurance when sent', async () => {
+        setupExecutors(100);
+        let mockFn = mockPostJson([{ ...baseStart, harness: { gateMode: 'evidence', fullReadWindow: 3, reReadPolicy: 'coverage' } }, ...readSequence()]);
+        await runAgentScan(ctx, target, {});
+        for (const b of stepBodies(mockFn)) expect(b.harness.scanMode).toBe('standard');
+
+        vi.clearAllMocks();
+        setupExecutors(100);
+        mockFn = mockPostJson([{ ...baseStart, harness: { gateMode: 'evidence', fullReadWindow: 3, reReadPolicy: 'coverage', scanMode: 'assurance' } }, ...readSequence()]);
+        await runAgentScan(ctx, target, {});
+        const bodies = stepBodies(mockFn);
+        expect(bodies.length).toBeGreaterThan(1);
+        for (const b of bodies) expect(b.harness.scanMode).toBe('assurance');
     });
 });

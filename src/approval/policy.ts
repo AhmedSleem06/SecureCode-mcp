@@ -1,10 +1,11 @@
-import type { OperationCategory } from '../approval/types';
+import type { OperationCategory, SessionApprovalTool } from '../approval/types';
 
 export interface ToolPolicy {
     name: string;
     category: OperationCategory;
     requiresApproval: boolean;
     approvalNote?: string;
+    enabled?: boolean;
 }
 
 export const TOOL_POLICIES: Record<string, ToolPolicy> = {
@@ -128,7 +129,29 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
         category: 'paid-generation',
         requiresApproval: true,
     },
+    'securecode.assurance-tests': {
+        name: 'securecode.assurance-tests',
+        category: 'sandboxed-verification',
+        requiresApproval: true,
+        approvalNote: 'Deep scan attack tests run code in the sandbox. One approval per scan covers a fixed number of runs for a limited time.',
+    },
 };
+
+export const SESSION_APPROVAL_POLICY_NAMES: Record<SessionApprovalTool, string> = {
+    'assurance-tests': 'securecode.assurance-tests',
+};
+
+export type SessionApprovalPolicyDecision =
+    | { action: 'prompt'; policy: ToolPolicy }
+    | { action: 'deny'; reason: string };
+
+export function resolveSessionApprovalPolicy(tool: SessionApprovalTool): SessionApprovalPolicyDecision {
+    const name = SESSION_APPROVAL_POLICY_NAMES[tool];
+    const policy = name ? TOOL_POLICIES[name] : undefined;
+    if (!policy) return { action: 'deny', reason: `no approval policy for ${tool}` };
+    if (policy.enabled === false) return { action: 'deny', reason: 'sandbox runs are turned off by policy' };
+    return { action: 'prompt', policy };
+}
 
 export function getToolPolicy(toolName: string): ToolPolicy | undefined {
     return TOOL_POLICIES[toolName];

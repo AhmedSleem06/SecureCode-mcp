@@ -1,15 +1,23 @@
 import * as http from 'http';
+import * as crypto from 'crypto';
 import { exec } from 'child_process';
 import {
     createApprovalRequest,
+    hashOperation,
     isExpired,
+    workspaceIdFromRoot,
     type ApprovalRequest,
     type ApprovalResult,
     type AuditEntry,
     type AuditReason,
     type OperationCategory,
+    type SessionApprovalResult,
+    type SessionApprovalScope,
+    type SessionApprovalState,
+    type SessionApprovalTool,
 } from './types';
 import { appendAudit } from './auditLog';
+import { resolveSessionApprovalPolicy, SESSION_APPROVAL_POLICY_NAMES } from './policy';
 
 const MAX_PENDING = 16;
 const MAX_BODY_BYTES = 4096;
@@ -126,6 +134,154 @@ interface PendingEntry {
     resolve: (r: ApprovalResult) => void;
     timer: ReturnType<typeof setTimeout>;
     settled: boolean;
+    runId?: string;
+    onSettled?: (reason: AuditReason) => void;
+}
+
+interface SessionRecord {
+    runId: string;
+    tool: SessionApprovalTool;
+    policyName: string;
+    requestId: string;
+    operationHash: string;
+    workspaceId: string | null;
+    state: Exclude<SessionApprovalState, 'expired' | 'exhausted' | 'none'>;
+    detail: string;
+    maxTests: number;
+    remaining: number;
+    ttlMs: number;
+    promptTimeoutMs: number;
+    expiresAt: number;
+    endAudited: boolean;
+}
+
+export const SESSION_APPROVAL_MAX_TESTS = 100;
+export const SESSION_APPROVAL_MAX_TTL_MS = 4 * 60 * 60 * 1000;
+export const SESSION_APPROVAL_PROMPT_TIMEOUT_MS = 120_000;
+const SESSION_RECORD_RETENTION_MS = 10 * 60 * 1000;
+const MAX_SESSION_RECORDS = 256;
+const SKIP_PREFIX = 'Attack test skipped:';
+
+const sessionRecords: Map<string, SessionRecord> = new Map();
+const sessionInflight: Map<string, { promise: Promise<SessionApprovalResult> | null }> = new Map();
+
+function formatDuration(ms: number): string {
+    if (ms >= 60_000) return `${Math.round(ms / 60_000)} min`;
+    return `${Math.max(1, Math.round(ms / 1000))} s`;
+}
+
+function liveState(rec: SessionRecord, now: number): SessionApprovalState {
+    if (rec.state !== 'granted') return rec.state;
+    if (now > rec.expiresAt) return 'expired';
+    if (rec.remaining <= 0) return 'exhausted';
+    return 'granted';
+}
+
+function skipReason(state: SessionApprovalState, rec: SessionRecord | undefined): string {
+    switch (state) {
+        case 'granted':
+            return 'User approved';
+        case 'denied':
+            return `${SKIP_PREFIX} approval was denied.`;
+        case 'timeout':
+            return `${SKIP_PREFIX} approval was not given within ${Math.round((rec?.promptTimeoutMs ?? SESSION_APPROVAL_PROMPT_TIMEOUT_MS) / 1000)} s — re-run with someone available to approve, or verify manually.`;
+        case 'expired':
+            return `${SKIP_PREFIX} approval for this scan expired after ${formatDuration(rec?.ttlMs ?? 0)} — re-run the scan to approve again.`;
+        case 'exhausted':
+            return `${SKIP_PREFIX} approval for this scan covered ${rec?.maxTests ?? 0} attack test(s) and all were used.`;
+        case 'policy-denied':
+        case 'invalid-scope':
+        case 'unavailable':
+            return `${SKIP_PREFIX} approval was not given — ${rec?.detail || 'approval unavailable'}.`;
+        case 'none':
+        default:
+            return `${SKIP_PREFIX} approval was not given for this scan.`;
+    }
+}
+
+function toResult(runId: string, rec: SessionRecord | undefined, now: number): SessionApprovalResult {
+    const state: SessionApprovalState = rec ? liveState(rec, now) : 'none';
+    return {
+        granted: state === 'granted',
+        state,
+        reason: skipReason(state, rec),
+        detail: rec?.detail ?? '',
+        requestId: rec?.requestId ?? '',
+        runId,
+        maxTests: rec?.maxTests ?? 0,
+        remaining: rec && state === 'granted' ? rec.remaining : 0,
+        expiresAt: rec && rec.state === 'granted' ? rec.expiresAt : null,
+    };
+}
+
+function auditSession(rec: SessionRecord, approved: boolean, reason: AuditReason, durationMs = 0): void {
+    appendAudit({
+        timestamp: new Date().toISOString(),
+        requestId: rec.requestId,
+        tool: rec.policyName,
+        operationHash: rec.operationHash,
+        category: 'sandboxed-verification',
+        workspaceId: rec.workspaceId,
+        approved,
+        reason,
+        durationMs,
+        runId: rec.runId,
+        remaining: rec.remaining,
+    });
+}
+
+function storeSessionRecord(rec: SessionRecord): void {
+    sessionRecords.delete(rec.runId);
+    sessionRecords.set(rec.runId, rec);
+    while (sessionRecords.size > MAX_SESSION_RECORDS) {
+        const oldest = sessionRecords.keys().next().value;
+        if (oldest === undefined) break;
+        sessionRecords.delete(oldest);
+    }
+}
+
+export function pruneSessionApprovals(now: number = Date.now()): number {
+    let removed = 0;
+    for (const [runId, rec] of sessionRecords) {
+        if (now > rec.expiresAt + SESSION_RECORD_RETENTION_MS) {
+            sessionRecords.delete(runId);
+            removed++;
+        }
+    }
+    return removed;
+}
+
+export function getSessionApproval(runId: string, now: number = Date.now()): SessionApprovalResult {
+    return toResult(runId, sessionRecords.get(runId), now);
+}
+
+export function consumeSessionApproval(runId: string, now: number = Date.now()): boolean {
+    pruneSessionApprovals(now);
+    const rec = sessionRecords.get(runId);
+    if (!rec) return false;
+    const state = liveState(rec, now);
+    if (state === 'granted') {
+        rec.remaining--;
+        auditSession(rec, true, 'session-consumed');
+        return true;
+    }
+    if ((state === 'expired' || state === 'exhausted') && !rec.endAudited) {
+        rec.endAudited = true;
+        auditSession(rec, false, state === 'expired' ? 'session-expired' : 'session-exhausted');
+    }
+    return false;
+}
+
+export function revokeSessionApproval(runId: string): boolean {
+    const hadInflight = sessionInflight.delete(runId);
+    const rec = sessionRecords.get(runId);
+    if (!rec) return hadInflight;
+    sessionRecords.delete(runId);
+    if (rec.state === 'granted') {
+        rec.remaining = 0;
+        auditSession(rec, false, 'session-revoked');
+    }
+    return true;
 }
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -194,6 +350,121 @@ export class ApprovalBroker {
         workspaceRoot: string | null = null,
         opts?: { onUrl?: (url: string) => void },
     ): Promise<ApprovalResult> {
+        return this.enqueue(tool, summary, operationParts, timeoutMs, category, workspaceRoot, opts);
+    }
+
+    requestSessionApproval(
+        scope: SessionApprovalScope,
+        summary: string,
+        opts: { timeoutMs?: number; workspaceRoot?: string | null; onUrl?: (url: string) => void } = {},
+    ): Promise<SessionApprovalResult> {
+        const now = Date.now();
+        pruneSessionApprovals(now);
+        const runId = typeof scope?.runId === 'string' ? scope.runId.trim() : '';
+        if (runId) {
+            const existing = sessionRecords.get(runId);
+            if (existing) return Promise.resolve(toResult(runId, existing, now));
+            const inflight = sessionInflight.get(runId);
+            if (inflight?.promise) return inflight.promise;
+        }
+
+        const tool = scope?.tool;
+        const policyName = SESSION_APPROVAL_POLICY_NAMES[tool] ?? `securecode.${String(tool)}`;
+        const rawMax = Number(scope?.maxTests);
+        const rawTtl = Number(scope?.ttlMs);
+        const maxTests = Number.isFinite(rawMax) ? Math.min(Math.floor(rawMax), SESSION_APPROVAL_MAX_TESTS) : 0;
+        const ttlMs = Number.isFinite(rawTtl) ? Math.min(Math.floor(rawTtl), SESSION_APPROVAL_MAX_TTL_MS) : 0;
+        const promptTimeoutMs = opts.timeoutMs ?? SESSION_APPROVAL_PROMPT_TIMEOUT_MS;
+        const operationParts = [runId, tool, maxTests, ttlMs];
+        const base: SessionRecord = {
+            runId,
+            tool,
+            policyName,
+            requestId: crypto.randomUUID(),
+            operationHash: hashOperation(policyName, ...operationParts),
+            workspaceId: workspaceIdFromRoot(opts.workspaceRoot ?? null),
+            state: 'invalid-scope',
+            detail: '',
+            maxTests,
+            remaining: 0,
+            ttlMs,
+            promptTimeoutMs,
+            expiresAt: now + Math.max(ttlMs, 0),
+            endAudited: false,
+        };
+
+        const invalid = !runId ? 'the scan has no run id'
+            : !SESSION_APPROVAL_POLICY_NAMES[tool] ? `unknown session tool ${String(tool)}`
+            : maxTests < 1 ? 'the scan asked for no attack tests'
+            : ttlMs < 1 ? 'the approval window is empty'
+            : null;
+        if (invalid) {
+            const rec: SessionRecord = { ...base, state: 'invalid-scope', detail: invalid };
+            auditSession(rec, false, 'invalid-scope');
+            return Promise.resolve(toResult(runId, rec, now));
+        }
+
+        const decision = resolveSessionApprovalPolicy(tool);
+        if (decision.action === 'deny') {
+            const rec: SessionRecord = { ...base, state: 'policy-denied', detail: decision.reason };
+            storeSessionRecord(rec);
+            auditSession(rec, false, 'policy-denied');
+            return Promise.resolve(toResult(runId, rec, now));
+        }
+
+        if (!this.server || !this.port) {
+            const rec: SessionRecord = { ...base, state: 'unavailable', detail: 'approval broker unavailable' };
+            auditSession(rec, false, 'cancelled');
+            return Promise.resolve(toResult(runId, rec, now));
+        }
+
+        const fullSummary = `${summary}\n\nThis one approval covers up to ${maxTests} sandbox run(s) for this scan only (run ${runId}) and ends ${formatDuration(ttlMs)} after you approve.`;
+        const slot: { promise: Promise<SessionApprovalResult> | null } = { promise: null };
+        slot.promise = (async () => {
+            let settledReason: AuditReason | null = null;
+            const result = await this.enqueue(
+                policyName,
+                fullSummary,
+                operationParts,
+                promptTimeoutMs,
+                decision.policy.category,
+                opts.workspaceRoot ?? null,
+                { onUrl: opts.onUrl },
+                { runId, onSettled: (r) => { settledReason = r; } },
+            );
+            const at = Date.now();
+            if (sessionInflight.get(runId) !== slot) return toResult(runId, undefined, at);
+            sessionInflight.delete(runId);
+            const reason = settledReason as AuditReason | null;
+            const state: SessionRecord['state'] = result.approved ? 'granted'
+                : reason === 'denied' ? 'denied'
+                : reason === 'timeout' ? 'timeout'
+                : 'unavailable';
+            const rec: SessionRecord = {
+                ...base,
+                requestId: result.requestId || base.requestId,
+                state,
+                detail: state === 'unavailable' ? result.reason.replace(/^./, (c) => c.toLowerCase()) : result.reason,
+                remaining: result.approved ? maxTests : 0,
+                expiresAt: at + ttlMs,
+            };
+            storeSessionRecord(rec);
+            return toResult(runId, rec, at);
+        })();
+        sessionInflight.set(runId, slot);
+        return slot.promise;
+    }
+
+    private enqueue(
+        tool: string,
+        summary: string,
+        operationParts: unknown[],
+        timeoutMs: number,
+        category: OperationCategory,
+        workspaceRoot: string | null,
+        opts?: { onUrl?: (url: string) => void },
+        extra?: { runId?: string; onSettled?: (reason: AuditReason) => void },
+    ): Promise<ApprovalResult> {
         return new Promise<ApprovalResult>((resolve) => {
             if (this.pending.size >= MAX_PENDING) {
                 resolve({
@@ -219,7 +490,7 @@ export class ApprovalBroker {
                 }
             }, timeoutMs + 5000);
 
-            const entry: PendingEntry = { req, resolve, timer, settled: false };
+            const entry: PendingEntry = { req, resolve, timer, settled: false, runId: extra?.runId, onSettled: extra?.onSettled };
             this.pending.set(req.id, entry);
 
             console.error(`[securecode] Approval required for ${tool}. Open: ${url}`);
@@ -259,8 +530,10 @@ export class ApprovalBroker {
             reason,
             durationMs: duration,
         };
+        if (entry.runId) audit.runId = entry.runId;
         appendAudit(audit);
 
+        entry.onSettled?.(reason);
         entry.resolve(result);
     }
 

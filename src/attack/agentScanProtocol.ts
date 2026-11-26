@@ -87,12 +87,17 @@ export interface AgentHarnessSettings {
     /** Clamped to 2..4. */
     fullReadWindow: number;
     reReadPolicy: 'window' | 'coverage';
+    /** Old clients omit it; clampHarnessSettings fills the fallback. */
+    scanMode: AgentScanMode;
 }
+
+export type AgentScanMode = 'standard' | 'assurance';
 
 export const DEFAULT_AGENT_HARNESS: AgentHarnessSettings = {
     gateMode: 'checklist',
     fullReadWindow: FULL_READ_WINDOW,
     reReadPolicy: 'window',
+    scanMode: 'standard',
 };
 
 export const HARNESS_FULL_READ_WINDOW_MIN = 2;
@@ -107,7 +112,112 @@ export function clampHarnessSettings(raw: unknown, fallback: AgentHarnessSetting
     const fullReadWindow = typeof w === 'number' && Number.isInteger(w)
         ? Math.min(HARNESS_FULL_READ_WINDOW_MAX, Math.max(HARNESS_FULL_READ_WINDOW_MIN, w))
         : fallback.fullReadWindow;
-    return { gateMode, fullReadWindow, reReadPolicy };
+    const scanMode = r.scanMode === 'standard' || r.scanMode === 'assurance' ? r.scanMode : fallback.scanMode;
+    return { gateMode, fullReadWindow, reReadPolicy, scanMode };
+}
+
+// ── Deep assurance scan ─────────────────────────────────────────────────────
+//
+// Mirror: api/src/attacker/agentScanProtocol.ts — keep identical.
+
+export type AssuranceRisk = 1 | 2 | 3 | 4 | 5;
+
+export const GRID_CELL_STATUSES = ['open', 'safe', 'vulnerable', 'not-applicable', 'untestable', 'depends'] as const;
+export type GridCellStatus = typeof GRID_CELL_STATUSES[number];
+
+export const GRID_CELL_CLOSURES = ['tested', 'traced', 'reasoning', 'untestable'] as const;
+export type GridCellClosure = typeof GRID_CELL_CLOSURES[number];
+
+export const GRID_CELL_SOURCES = ['seed', 'ai', 'redteam'] as const;
+export type GridCellSource = typeof GRID_CELL_SOURCES[number];
+
+export const SCENARIO_TEST_STATUSES = ['planned', 'blocked', 'exploited', 'untestable', 'skipped'] as const;
+export type ScenarioTestStatus = typeof SCENARIO_TEST_STATUSES[number];
+
+export interface GridCell {
+    id: string;
+    entryId: string | null;
+    inputId: string | null;
+    targetId: string | null;
+    attackType: string;
+    title: string;
+    risk: AssuranceRisk;
+    source: GridCellSource;
+    status: GridCellStatus;
+    closure?: GridCellClosure;
+    evidenceLines?: number[];
+    note?: string;
+    dependsOn?: string;
+}
+
+export interface Scenario {
+    id: string;
+    cellId: string;
+    actor: string;
+    preconditions: string[];
+    steps: string[];
+    payloads: string[];
+    expectSecure: string;
+    risk: AssuranceRisk;
+    test?: ScenarioTestStatus;
+    testNote?: string;
+}
+
+export interface CellUpdate {
+    cellId: string;
+    status: GridCell['status'];
+    closure?: GridCell['closure'];
+    evidenceLines?: number[];
+    note?: string;
+    dependsOn?: string;
+}
+
+export interface AssuranceCounts {
+    total: number;
+    open: number;
+    safe: number;
+    vulnerable: number;
+    notApplicable: number;
+    untestable: number;
+    depends: number;
+    tested: number;
+}
+
+export interface AssuranceStepView {
+    openCells: GridCell[];
+    activeScenarios: Scenario[];
+    counts: AssuranceCounts;
+}
+
+export const CELL_UPDATE_LIMITS = {
+    maxUpdates: 40,
+    noteMaxChars: 500,
+    dependsOnMaxChars: 500,
+    maxEvidenceLines: 20,
+} as const;
+
+/** Invalid closure, lines, note or dependsOn are dropped; an unknown cell id or status drops the update. */
+export function clampCellUpdates(raw: unknown, knownCellIds: Set<string>): CellUpdate[] {
+    if (!Array.isArray(raw)) return [];
+    const out: CellUpdate[] = [];
+    for (const item of raw) {
+        if (out.length >= CELL_UPDATE_LIMITS.maxUpdates) break;
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+        const u = item as Record<string, unknown>;
+        if (typeof u.cellId !== 'string' || !knownCellIds.has(u.cellId)) continue;
+        if (!(GRID_CELL_STATUSES as readonly unknown[]).includes(u.status)) continue;
+        const update: CellUpdate = { cellId: u.cellId, status: u.status as GridCellStatus };
+        if ((GRID_CELL_CLOSURES as readonly unknown[]).includes(u.closure)) update.closure = u.closure as GridCellClosure;
+        if (Array.isArray(u.evidenceLines)) {
+            const lines = [...new Set(u.evidenceLines.filter((n): n is number => typeof n === 'number' && Number.isInteger(n) && n > 0))]
+                .slice(0, CELL_UPDATE_LIMITS.maxEvidenceLines);
+            if (lines.length > 0) update.evidenceLines = lines;
+        }
+        if (typeof u.note === 'string' && u.note.trim()) update.note = u.note.trim().slice(0, CELL_UPDATE_LIMITS.noteMaxChars);
+        if (typeof u.dependsOn === 'string' && u.dependsOn.trim()) update.dependsOn = u.dependsOn.trim().slice(0, CELL_UPDATE_LIMITS.dependsOnMaxChars);
+        out.push(update);
+    }
+    return out;
 }
 
 export type LeadStatus = 'open' | 'finding' | 'note' | 'dropped';
@@ -131,6 +241,7 @@ export interface CapabilityBaseline {
 export interface AgentScanNotebookFields {
     memo?: string | null;
     leads?: AgentLead[] | null;
+    cellUpdates?: CellUpdate[] | null;
 }
 
 /**
@@ -691,6 +802,7 @@ export interface AgentScanStepRequest {
     actionConstraint?: AgentActionConstraint;
     harness?: AgentHarnessSettings;
     suggestedChecks?: string[];
+    assurance?: AssuranceStepView;
 }
 
 export interface AgentInvestigationProgress {

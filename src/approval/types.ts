@@ -34,7 +34,13 @@ export type AuditReason =
     | 'expired'
     | 'invalid-token'
     | 'replayed'
-    | 'shutdown';
+    | 'shutdown'
+    | 'policy-denied'
+    | 'invalid-scope'
+    | 'session-consumed'
+    | 'session-exhausted'
+    | 'session-expired'
+    | 'session-revoked';
 
 export interface AuditEntry {
     timestamp: string;
@@ -46,6 +52,40 @@ export interface AuditEntry {
     approved: boolean;
     reason: AuditReason;
     durationMs: number;
+    runId?: string;
+    remaining?: number;
+}
+
+export type SessionApprovalTool = 'assurance-tests';
+
+export interface SessionApprovalScope {
+    runId: string;
+    tool: SessionApprovalTool;
+    maxTests: number;
+    ttlMs: number;
+}
+
+export type SessionApprovalState =
+    | 'granted'
+    | 'denied'
+    | 'timeout'
+    | 'policy-denied'
+    | 'invalid-scope'
+    | 'unavailable'
+    | 'expired'
+    | 'exhausted'
+    | 'none';
+
+export interface SessionApprovalResult {
+    granted: boolean;
+    state: SessionApprovalState;
+    reason: string;
+    detail: string;
+    requestId: string;
+    runId: string;
+    maxTests: number;
+    remaining: number;
+    expiresAt: number | null;
 }
 
 export function hashOperation(tool: string, ...parts: unknown[]): string {
