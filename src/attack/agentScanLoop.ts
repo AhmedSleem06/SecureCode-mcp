@@ -86,7 +86,7 @@ export interface AgentScanOptions {
     deferClose?: boolean;
     segment?: AgentScanSegment;
     role?: string;
-    requestedMode?: 'quick' | 'standard' | 'assurance';
+    requestedMode?: 'standard' | 'assurance';
 }
 
 const SEGMENT_EDGE_TOLERANCE_LINES = 5;

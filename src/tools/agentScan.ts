@@ -117,17 +117,18 @@ function shouldProve(finding: AgentScanFinding): boolean {
     return finding.severity === 'critical' || finding.severity === 'high' || finding.severity === 'medium';
 }
 
-function shouldProveQuick(finding: AgentScanFinding): boolean {
-    return finding.severity === 'critical' || finding.severity === 'high';
-}
-
-function mapModeToWire(mode: string | undefined): 'quick' | 'standard' | 'assurance' | undefined {
+function mapModeToWire(mode: string | undefined): 'standard' | 'assurance' | undefined {
     switch (mode) {
-        case 'quick': return 'quick';
         case 'standard': return 'standard';
         case 'deep': return 'assurance';
         default: return undefined;
     }
+}
+
+function mapScanModeForResult(serverMode: AgentScanMode | undefined): 'standard' | 'deep' | undefined {
+    if (serverMode === 'assurance') return 'deep';
+    if (serverMode === 'standard') return 'standard';
+    return undefined;
 }
 
 const RUN_CLOSE_TIMEOUT_MS = 30_000;
@@ -244,6 +245,12 @@ async function toolAgentScanInner(ctx: ServerContext, args: any): Promise<unknow
 }
 
 async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: AgentScanRunCloser): Promise<unknown> {
+    if (args.mode === 'quick') {
+        throw Object.assign(
+            new Error("mode 'quick' was removed — use 'standard' (default) or 'deep'."),
+            { code: -32602 },
+        );
+    }
     const progress = args._progress as ((progress: number, total: number, message: string) => void) | undefined;
 
     // 1. Resolve code + language
@@ -455,7 +462,7 @@ async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: Agent
             if (map) {
                 // Try each depth; 'standard' is the most common. The cache
                 // returns null if the entry is stale or missing.
-                for (const d of ['standard', 'deep', 'quick'] as const) {
+                for (const d of ['standard', 'deep'] as const) {
                     const cached = getCachedArchitectureContext(
                         ctx.workspaceRoot, d, map.builtAt, map.version,
                     );
@@ -562,7 +569,7 @@ async function scanTarget(
         agentResult.terminationReason,
     );
     const runIdField = scanRunId ? { runId: scanRunId } : {};
-    const isQuickMode = agentResult.scanMode === 'quick';
+    const resolvedScanMode = mapScanModeForResult(agentResult.scanMode);
 
     if (agentResult.status === 'failed') {
         if (!part) throw new Error(agentResult.error || 'Agent scan failed to start.');
@@ -600,19 +607,15 @@ async function scanTarget(
     let scanBudgetExhausted = false;
     let scanBudgetExhaustedCount = 0;
 
-    const proveFn = isQuickMode ? shouldProveQuick : shouldProve;
-    const proveable = agentResult.findings.filter(proveFn);
+    const proveable = agentResult.findings.filter(shouldProve);
     if (proveable.length > 0 && progress) {
         progress(0, proveable.length, `Verifying ${proveable.length} finding(s)...`);
     }
 
     let proveIdx = 0;
     for (const finding of agentResult.findings) {
-        if (!proveFn(finding)) {
-            const reason = isQuickMode
-                ? `quick mode: proof skipped for ${finding.severity} findings`
-                : 'Low severity — not verified';
-            provenFindings.push({ ...finding, proven: 'SKIPPED', provenReason: reason });
+        if (!shouldProve(finding)) {
+            provenFindings.push({ ...finding, proven: 'SKIPPED', provenReason: 'Low severity — not verified' });
             continue;
         }
 
@@ -823,7 +826,7 @@ async function scanTarget(
     // 4b. Generate fixes for proven/suspected findings (requires approval)
     const isAssuranceMode = !!(agentResult as any).assurance?.cells?.length;
     const generateFixesRequested = !!(args as any).generateFixes;
-    if (skipFix || isQuickMode) {
+    if (skipFix) {
         console.log('[Agent Scan] Skipping fix generation (_skipFix=true)');
     } else {
     const fixableFindings = provenFindings.filter(f =>
@@ -1301,12 +1304,14 @@ async function scanTarget(
         }
         : {};
     const fixAvailText = availableFixes.length > 0 ? `${availableFixes.length} fix(es) available — re-run with generateFixes: true or call securecode.fix.` : '';
-    const summary = [agentResult.summary, creditText, approvalText, fixAvailText].filter(Boolean).join(' ') || agentResult.summary;
+    const modeLabel = resolvedScanMode ? `[${resolvedScanMode} mode]` : '';
+    const summary = [modeLabel, agentResult.summary, creditText, approvalText, fixAvailText].filter(Boolean).join(' ') || agentResult.summary;
 
     return {
         agentSummary: agentResult.summary,
         result: {
             status: agentResult.status,
+            scanMode: resolvedScanMode,
             summary,
             agentFindings: provenFindings,
             verifiedFindings: provenFindings.filter(f => f.proven === 'PROVEN'),

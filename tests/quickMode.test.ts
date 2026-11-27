@@ -58,22 +58,12 @@ const FINDING_HIGH = { type: 'sql_injection', line: 10, severity: 'high', confid
 const FINDING_MED = { type: 'xss', line: 20, severity: 'medium', confidence: 75, evidence: 'e', why: 'w' };
 const FINDING_LOW = { type: 'info_disclosure', line: 30, severity: 'low', confidence: 60, evidence: 'e', why: 'w' };
 
-describe('agent-scan quick mode', () => {
+describe('agent-scan mode mapping', () => {
     const ctx: any = { workspaceRoot: '/tmp/ws', apiUrl: 'http://localhost:3000', apiToken: 'test' };
 
     beforeEach(() => {
         vi.mocked(runAgentScan).mockReset();
         vi.mocked(runVerifyLoop).mockReset();
-    });
-
-    it('maps mode=quick to requestedMode=quick in the loop options', async () => {
-        vi.mocked(runAgentScan).mockResolvedValue(agentResult({ scanMode: 'quick' }));
-        vi.mocked(ApiClient).mockReturnValue({ postJson: vi.fn() } as any);
-
-        await toolAgentScan(ctx, { code: 'x', language: 'javascript', mode: 'quick' });
-
-        const opts = vi.mocked(runAgentScan).mock.calls[0][2];
-        expect(opts.requestedMode).toBe('quick');
     });
 
     it('maps mode=standard to requestedMode=standard', async () => {
@@ -97,7 +87,7 @@ describe('agent-scan quick mode', () => {
     });
 
     it('omits requestedMode when mode is not specified', async () => {
-        vi.mocked(runAgentScan).mockResolvedValue(agentResult());
+        vi.mocked(runAgentScan).mockResolvedValue(agentResult({ scanMode: 'standard' }));
         vi.mocked(ApiClient).mockReturnValue({ postJson: vi.fn() } as any);
 
         await toolAgentScan(ctx, { code: 'x', language: 'javascript' });
@@ -106,32 +96,42 @@ describe('agent-scan quick mode', () => {
         expect(opts.requestedMode).toBeUndefined();
     });
 
-    it('uses server-chosen scanMode for behaviour (quick from server skips medium proofs)', async () => {
-        vi.mocked(runAgentScan).mockResolvedValue(agentResult({
-            scanMode: 'quick',
-            findings: [FINDING_HIGH, FINDING_MED, FINDING_LOW],
-        }));
-        vi.mocked(runVerifyLoop).mockResolvedValue({
-            verdict: 'PROVEN', reason: 'exploited', roundsUsed: 2,
-            testScript: '', testOutput: '', subVerdict: 'proven',
-        });
-        vi.mocked(ApiClient).mockReturnValue({ postJson: vi.fn() } as any);
+    it('rejects mode=quick with a clear error', async () => {
+        await expect(
+            toolAgentScan(ctx, { code: 'x', language: 'javascript', mode: 'quick' }),
+        ).rejects.toThrow("mode 'quick' was removed");
+    });
+});
 
-        const result = await toolAgentScan(ctx, { code: 'x', language: 'javascript', mode: 'quick' });
+describe('agent-scan result scanMode', () => {
+    const ctx: any = { workspaceRoot: '/tmp/ws', apiUrl: 'http://localhost:3000', apiToken: 'test' };
 
-        expect(vi.mocked(runVerifyLoop)).toHaveBeenCalledTimes(1);
-        const highFinding = result.agentFindings.find((f: any) => f.type === 'sql_injection');
-        const medFinding = result.agentFindings.find((f: any) => f.type === 'xss');
-        const lowFinding = result.agentFindings.find((f: any) => f.type === 'info_disclosure');
-        expect(highFinding.proven).toBe('PROVEN');
-        expect(medFinding.proven).toBe('SKIPPED');
-        expect(medFinding.provenReason).toContain('quick mode');
-        expect(medFinding.provenReason).toContain('medium');
-        expect(lowFinding.proven).toBe('SKIPPED');
-        expect(lowFinding.provenReason).toContain('quick mode');
+    beforeEach(() => {
+        vi.mocked(runAgentScan).mockReset();
+        vi.mocked(runVerifyLoop).mockReset();
     });
 
-    it('standard mode still proves medium findings', async () => {
+    it('maps server assurance to deep in the result', async () => {
+        vi.mocked(runAgentScan).mockResolvedValue(agentResult({ scanMode: 'assurance' }));
+        vi.mocked(ApiClient).mockReturnValue({ postJson: vi.fn() } as any);
+
+        const result = await toolAgentScan(ctx, { code: 'x', language: 'javascript', mode: 'deep' });
+
+        expect(result.scanMode).toBe('deep');
+        expect(result.summary).toContain('[deep mode]');
+    });
+
+    it('maps server standard to standard in the result', async () => {
+        vi.mocked(runAgentScan).mockResolvedValue(agentResult({ scanMode: 'standard' }));
+        vi.mocked(ApiClient).mockReturnValue({ postJson: vi.fn() } as any);
+
+        const result = await toolAgentScan(ctx, { code: 'x', language: 'javascript' });
+
+        expect(result.scanMode).toBe('standard');
+        expect(result.summary).toContain('[standard mode]');
+    });
+
+    it('standard mode proves high + medium findings', async () => {
         vi.mocked(runAgentScan).mockResolvedValue(agentResult({
             scanMode: 'standard',
             findings: [FINDING_HIGH, FINDING_MED, FINDING_LOW],
@@ -142,35 +142,11 @@ describe('agent-scan quick mode', () => {
         });
         vi.mocked(ApiClient).mockReturnValue({ postJson: vi.fn() } as any);
 
-        const result = await toolAgentScan(ctx, { code: 'x', language: 'javascript', mode: 'standard' });
+        const result = await toolAgentScan(ctx, { code: 'x', language: 'javascript' });
 
         expect(vi.mocked(runVerifyLoop)).toHaveBeenCalledTimes(2);
-        const medFinding = result.agentFindings.find((f: any) => f.type === 'xss');
-        expect(medFinding.proven).toBe('PROVEN');
-    });
-
-    it('quick mode skips fix generation', async () => {
-        vi.mocked(runAgentScan).mockResolvedValue(agentResult({
-            scanMode: 'quick',
-            findings: [FINDING_HIGH],
-        }));
-        vi.mocked(runVerifyLoop).mockResolvedValue({
-            verdict: 'PROVEN', reason: 'exploited', roundsUsed: 2,
-            testScript: '', testOutput: '', subVerdict: 'proven',
-        });
-        const mockPostJson = vi.fn();
-        vi.mocked(ApiClient).mockReturnValue({ postJson: mockPostJson } as any);
-
-        const result = await toolAgentScan(ctx, { code: 'x', language: 'javascript', mode: 'quick' });
-
-        const fixCalls = mockPostJson.mock.calls.filter((c: any[]) => c[0] === '/fix');
-        expect(fixCalls).toHaveLength(0);
-        expect(result.agentFindings[0].fixStatus).toBeUndefined();
-    });
-});
-
-describe('runAgentScan requestedMode wire mapping', () => {
-    it('requestedMode is passed through in the loop options (covered by tool-level tests above)', () => {
-        expect(true).toBe(true);
+        expect(result.agentFindings.find((f: any) => f.type === 'sql_injection').proven).toBe('PROVEN');
+        expect(result.agentFindings.find((f: any) => f.type === 'xss').proven).toBe('PROVEN');
+        expect(result.agentFindings.find((f: any) => f.type === 'info_disclosure').proven).toBe('SKIPPED');
     });
 });

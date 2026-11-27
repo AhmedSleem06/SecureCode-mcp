@@ -91,7 +91,7 @@ export interface AgentHarnessSettings {
     scanMode: AgentScanMode;
 }
 
-export type AgentScanMode = 'quick' | 'standard' | 'assurance';
+export type AgentScanMode = 'standard' | 'assurance';
 
 export const DEFAULT_AGENT_HARNESS: AgentHarnessSettings = {
     gateMode: 'checklist',
@@ -112,7 +112,7 @@ export function clampHarnessSettings(raw: unknown, fallback: AgentHarnessSetting
     const fullReadWindow = typeof w === 'number' && Number.isInteger(w)
         ? Math.min(HARNESS_FULL_READ_WINDOW_MAX, Math.max(HARNESS_FULL_READ_WINDOW_MIN, w))
         : fallback.fullReadWindow;
-    const scanMode = r.scanMode === 'quick' || r.scanMode === 'standard' || r.scanMode === 'assurance' ? r.scanMode : fallback.scanMode;
+    const scanMode = r.scanMode === 'standard' || r.scanMode === 'assurance' ? r.scanMode : fallback.scanMode;
     return { gateMode, fullReadWindow, reReadPolicy, scanMode };
 }
 
