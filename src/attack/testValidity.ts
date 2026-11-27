@@ -8,11 +8,24 @@ export interface TestValidityResult {
 export interface TestValidityOptions {
     kind: 'proof' | 'scenario';
     controlOk?: boolean | null;
+    strictEngine?: boolean;
+}
+
+export function engineValidity(output: string): TestValidityResult {
+    const harnessLog = parseHarnessLog(output);
+    if (!harnessLog.found) return { valid: true };
+    if (harnessLog.engine === 'emulated' && harnessLog.unsupported && harnessLog.unsupported.length > 0) {
+        return { valid: false, reason: `the test helper cannot model this routing (${harnessLog.unsupported.join(', ')})` };
+    }
+    return { valid: true };
 }
 
 export function testValidity(output: string, opts?: TestValidityOptions): TestValidityResult {
     const kind = opts?.kind ?? 'proof';
     const harnessLog = parseHarnessLog(output);
+
+    const engineCheck = engineValidity(output);
+    if (!engineCheck.valid) return engineCheck;
 
     if (harnessLog.found) {
         for (const call of harnessLog.calls) {

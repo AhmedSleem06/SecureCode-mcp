@@ -529,3 +529,82 @@ describe('runVerifyLoop — testValidity guard on UNPROVEN', () => {
         expect(result.reason).toContain('setup failed');
     });
 });
+
+describe('runVerifyLoop — engine validity guard on PROVEN', () => {
+    beforeEach(() => {
+        vi.mocked(runLocalTest).mockReset();
+    });
+
+    const baseOpts = {
+        finding: { type: 'missing_auth', line: 20, evidence: 'no auth check', why: 'admin route', severity: 'high' },
+        filePath: 'src/admin.ts',
+        code: 'const x = 1;',
+        relatedFiles: [],
+        workspaceRoot: '/tmp/workspace',
+        language: 'javascript',
+    };
+
+    const HARNESS_LOG_EMULATED_UNSUPPORTED = '\nSECURECODE_HARNESS_LOG:{"calls":[{"method":"GET","path":"/admin/config","matched":true,"sent":true,"status":200,"timedOut":false}],"engine":"emulated","unsupported":["wildcard path /admin/*path"]}:SECURECODE_HARNESS_END\n';
+
+    it('PROVEN with emulated+unsupported log → INCONCLUSIVE', async () => {
+        vi.mocked(runLocalTest).mockResolvedValue({
+            verdict: 'pass',
+            output: `PASS: exploit worked\n${VALID_PROOF_MARKER}\n${HARNESS_LOG_EMULATED_UNSUPPORTED}`,
+            exitCode: 0,
+        });
+
+        const postJson = vi.fn()
+            .mockResolvedValueOnce({ canTest: true, testScript: 'console.log("PASS")', runner: 'node', description: 'test' })
+            .mockResolvedValueOnce({ verdict: 'PROVEN', reason: 'exploit succeeded', shouldRetry: false });
+
+        const result = await runVerifyLoop({
+            ...baseOpts,
+            client: { postJson } as unknown as ApiClient,
+        });
+
+        expect(result.verdict).toBe('INCONCLUSIVE');
+        expect(result.reason).toContain('cannot model');
+        expect(result.reason).toContain('wildcard path');
+        expect(result.subVerdict).toBe('analyzed');
+    });
+
+    it('PROVEN with real express engine → still PROVEN', async () => {
+        const HARNESS_LOG_REAL = '\nSECURECODE_HARNESS_LOG:{"calls":[{"method":"GET","path":"/admin/config","matched":true,"sent":true,"status":401,"timedOut":false}],"engine":"express@5.0.1","unsupported":[]}:SECURECODE_HARNESS_END\n';
+        vi.mocked(runLocalTest).mockResolvedValue({
+            verdict: 'pass',
+            output: `PASS: exploit worked\n${VALID_PROOF_MARKER}\n${HARNESS_LOG_REAL}`,
+            exitCode: 0,
+        });
+
+        const postJson = vi.fn()
+            .mockResolvedValueOnce({ canTest: true, testScript: 'console.log("PASS")', runner: 'node', description: 'test' })
+            .mockResolvedValueOnce({ verdict: 'PROVEN', reason: 'exploit succeeded', shouldRetry: false });
+
+        const result = await runVerifyLoop({
+            ...baseOpts,
+            client: { postJson } as unknown as ApiClient,
+        });
+
+        expect(result.verdict).toBe('PROVEN');
+    });
+
+    it('PROVEN with emulated but empty unsupported → still PROVEN', async () => {
+        const HARNESS_LOG_EMU_OK = '\nSECURECODE_HARNESS_LOG:{"calls":[{"method":"GET","path":"/admin/config","matched":true,"sent":true,"status":200,"timedOut":false}],"engine":"emulated","unsupported":[]}:SECURECODE_HARNESS_END\n';
+        vi.mocked(runLocalTest).mockResolvedValue({
+            verdict: 'pass',
+            output: `PASS: exploit worked\n${VALID_PROOF_MARKER}\n${HARNESS_LOG_EMU_OK}`,
+            exitCode: 0,
+        });
+
+        const postJson = vi.fn()
+            .mockResolvedValueOnce({ canTest: true, testScript: 'console.log("PASS")', runner: 'node', description: 'test' })
+            .mockResolvedValueOnce({ verdict: 'PROVEN', reason: 'exploit succeeded', shouldRetry: false });
+
+        const result = await runVerifyLoop({
+            ...baseOpts,
+            client: { postJson } as unknown as ApiClient,
+        });
+
+        expect(result.verdict).toBe('PROVEN');
+    });
+});

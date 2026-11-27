@@ -469,4 +469,28 @@ describe('runAssuranceAttackTests', () => {
         expect(decision.verdict).toBe('UNTESTABLE');
         expect(decision.reason).toContain('control step failed');
     });
+
+    it('EXPLOITED with emulated+unsupported harness log → UNTESTABLE', () => {
+        const harnessLog = `\nSECURECODE_HARNESS_LOG:${JSON.stringify({ calls: [{ method: 'GET', path: '/admin/config', matched: true, sent: true, status: 200, timedOut: false }], engine: 'emulated', unsupported: ['wildcard path /admin/*path'] })}:SECURECODE_HARNESS_END\n`;
+        const output = `PASS: exploited — got doc\n${marker({ verdict: 'EXPLOITED', targetReached: true, targetCalls: 1, controlOk: true })}${harnessLog}`;
+        const decision = decideScenarioVerdict(AN.exploited as any, { verdict: 'pass', output });
+        expect(decision.verdict).toBe('UNTESTABLE');
+        expect(decision.reason).toContain('cannot model');
+        expect(decision.retryable).toBe(false);
+    });
+
+    it('BLOCKED with emulated+unsupported harness log → UNTESTABLE', () => {
+        const harnessLog = `\nSECURECODE_HARNESS_LOG:${JSON.stringify({ calls: [{ method: 'GET', path: '/admin/config', matched: true, sent: true, status: 403, timedOut: false }], engine: 'emulated', unsupported: ['mounted router at /api'] })}:SECURECODE_HARNESS_END\n`;
+        const output = `FAIL: blocked — 403\n${marker({ verdict: 'BLOCKED', targetReached: true, targetCalls: 2, controlOk: true })}${harnessLog}`;
+        const decision = decideScenarioVerdict(AN.blocked as any, { verdict: 'fail', output });
+        expect(decision.verdict).toBe('UNTESTABLE');
+        expect(decision.reason).toContain('cannot model');
+    });
+
+    it('EXPLOITED with real express engine → stays EXPLOITED', () => {
+        const harnessLog = `\nSECURECODE_HARNESS_LOG:${JSON.stringify({ calls: [{ method: 'GET', path: '/admin/config', matched: true, sent: true, status: 200, timedOut: false }], engine: 'express@5.0.1', unsupported: [] })}:SECURECODE_HARNESS_END\n`;
+        const output = `PASS: exploited — got doc\n${marker({ verdict: 'EXPLOITED', targetReached: true, targetCalls: 1, controlOk: true })}${harnessLog}`;
+        const decision = decideScenarioVerdict(AN.exploited as any, { verdict: 'pass', output });
+        expect(decision.verdict).toBe('EXPLOITED');
+    });
 });

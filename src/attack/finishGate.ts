@@ -18,7 +18,7 @@
  * coverage gaps for every unresolved item.
  */
 
-import type { AgentLead, AgentScanAction, AgentScanFinding, AgentScanFinishAction, GridCell } from './agentScanProtocol';
+import type { AgentLead, AgentScanAction, AgentScanFinding, AgentScanFinishAction, AgentScanTranscriptStep, GridCell } from './agentScanProtocol';
 import { AGENT_SCAN_DEFAULTS } from './agentScanProtocol';
 import type { ScanRunState } from './scanState';
 import type { GridGateProblems } from '../assurance/gridState';
@@ -26,7 +26,7 @@ import type { EvidenceLedger } from './evidenceLedger';
 import type { WorkItemQueue } from './workItem';
 import type { HandlerInventory } from '../project-map/handlerInventory';
 import type { Candidate, CandidateStore } from './candidateStore';
-import { missingGateDimensions } from './candidateStore';
+import { missingGateDimensions, FLOW_LINE_TOLERANCE } from './candidateStore';
 import { uncoveredWithin, type InvestigationState, type LineRange } from './investigationState';
 import type { ScheduleDecision } from './scanScheduler';
 
@@ -77,13 +77,100 @@ function candidateLinesDelivered(
     return { entryDelivered, vulnDelivered };
 }
 
-function candidateClaimHasActorAndEffect(candidate: Candidate): boolean {
-    const claim = (candidate.claim || '').toLowerCase();
-    const actorTerms = ['attacker', 'user', 'member', 'caller', 'client', 'unauthenticated', 'authenticated', 'any user', 'actor', 'adversary', 'requester', 'anyone', 'anonymous', 'someone', 'visitor', 'tenant', 'account', 'request', 'public'];
-    const effectTerms = ['escalat', 'elevat', 'overwrit', 'bypass', 'impersonat', 'admin', 'role', 'permission', 'privilege', 'unauthoriz', 'access', 'modify', 'manipulat', 'tamper', 'inject', 'assign', 'set', 'update', 'change', 'forge', 'leak', 'expos', 'disclos', 'enumerat', 'reveal', 'find out', 'learn', 'crash', 'denial', 'exhaust', 'hang', 'block', 'delete', 'duplicate', 'take over', 'takeover', 'steal', 'read', 'sign', 'gain', 'grant', 'give', 'upgrade', 'obtain', 'without pay', 'for free', 'unlock', 'backtrack', 'freez', 'stall', 'slow', 'cpu', 'memory', 'event loop', 'timeout', 'capabilit'];
-    const hasActor = actorTerms.some(t => claim.includes(t));
-    const hasEffect = effectTerms.some(t => claim.includes(t));
+const ACTOR_TERMS = ['attacker', 'user', 'member', 'caller', 'client', 'unauthenticated', 'authenticated', 'any user', 'actor', 'adversary', 'requester', 'anyone', 'anonymous', 'someone', 'visitor', 'tenant', 'account', 'request', 'public', 'customer', 'owner', 'buyer', 'seller', 'admin', 'employee', 'guest', 'holder', 'sender', 'recipient', 'operator', 'staff', 'merchant', 'partner', 'reviewer'];
+const EFFECT_TERMS = ['escalat', 'elevat', 'overwrit', 'bypass', 'impersonat', 'admin', 'role', 'permission', 'privilege', 'unauthoriz', 'access', 'modify', 'manipulat', 'tamper', 'inject', 'assign', 'set', 'update', 'change', 'forge', 'leak', 'expos', 'disclos', 'enumerat', 'reveal', 'find out', 'learn', 'crash', 'denial', 'exhaust', 'hang', 'block', 'delete', 'duplicate', 'take over', 'takeover', 'steal', 'read', 'sign', 'gain', 'grant', 'give', 'upgrade', 'obtain', 'without pay', 'for free', 'unlock', 'backtrack', 'freez', 'stall', 'slow', 'cpu', 'memory', 'event loop', 'timeout', 'capabilit', 'cancel', 'refund', 'shipped', 'shipping', 'transfer', 'withdraw', 'send', 'mark', 'paid', 'pay', 'price', 'cost', 'amount'];
+
+export function textHasActorAndEffect(text: string): boolean {
+    const lower = text.toLowerCase();
+    const hasActor = ACTOR_TERMS.some(t => {
+        const idx = lower.indexOf(t);
+        if (idx === -1) return false;
+        const rest = lower.slice(idx + t.length);
+        if (rest.length > 0 && /^[a-z]/.test(rest) && !/^(s\b|es\b|'s\b)/.test(rest)) return false;
+        return true;
+    });
+    const hasEffect = EFFECT_TERMS.some(t => lower.includes(t));
     return hasActor && hasEffect;
+}
+
+function candidateClaimHasActorAndEffect(candidate: Candidate): boolean {
+    return textHasActorAndEffect(candidate.claim || '');
+}
+
+function findMatchingFinding(candidate: Candidate, findings: AgentScanFinding[]): AgentScanFinding | undefined {
+    for (const finding of findings) {
+        if (candidate.rootCauseId === `${finding.type}:${finding.line}`) return finding;
+        if (finding.rootCause?.rootCauseId && candidate.rootCauseId === finding.rootCause.rootCauseId) return finding;
+        for (const loc of candidate.locations) {
+            if (finding.type === candidate.type && Math.abs(finding.line - loc.line) <= FLOW_LINE_TOLERANCE) return finding;
+        }
+    }
+    return undefined;
+}
+
+function findingTextHasActorAndEffect(finding: AgentScanFinding): boolean {
+    const texts = [finding.why || '', finding.evidence || ''];
+    return texts.some(t => textHasActorAndEffect(t));
+}
+
+function sinkKeywordsForType(candidateType: string): string[] {
+    const norm = candidateType.toLowerCase().replace(/[\s-]+/g, '_');
+    if (norm.includes('sql_injection') || norm.includes('nosql_injection')) return ['sql', 'query', 'select', 'insert', 'update', 'delete', 'drop', 'table'];
+    if (norm.includes('command_injection') || norm.includes('code_injection')) return ['exec', 'spawn', 'eval', 'shell', 'command'];
+    if (norm.includes('xss')) return ['script', 'alert', 'onerror', 'innerhtml', 'document.write'];
+    if (norm.includes('ssrf')) return ['fetch', 'request', 'http', 'url'];
+    if (norm.includes('path_traversal')) return ['readfile', 'readfilesync', 'path', '..', 'directory'];
+    if (norm.includes('template_injection')) return ['template', 'render', 'compile'];
+    if (norm.includes('xxe')) return ['xml', 'parse', 'entity'];
+    if (norm.includes('ldap_injection')) return ['ldap', 'bind', 'search'];
+    if (norm.includes('xpath_injection')) return ['xpath', 'evaluate'];
+    if (norm.includes('header_injection') || norm.includes('log_injection')) return ['header', 'log', 'write'];
+    if (norm.includes('open_redirect')) return ['redirect', 'location', 'url'];
+    if (norm.includes('prototype_pollution')) return ['prototype', '__proto__', 'constructor'];
+    if (norm.includes('insecure_deserialization')) return ['deserializ', 'unserializ', 'json.parse', 'pickle'];
+    return [];
+}
+
+export function transcriptHasRuntimeEvidence(
+    candidate: Candidate,
+    transcript: AgentScanTranscriptStep[],
+): boolean {
+    const keywords = sinkKeywordsForType(candidate.type);
+    if (keywords.length === 0) return false;
+    const candidateLine = candidate.locations[0]?.line;
+    for (const step of transcript) {
+        if ((step.action as any)?.type !== 'run_tests') continue;
+        const obs = (step.observation || '').toLowerCase();
+        if (!obs.includes('passed') && !obs.includes('pass:') && !obs.includes('exit code: 0')) continue;
+        const lineMatch = candidateLine && obs.includes(`line ${candidateLine}`);
+        const keywordMatch = keywords.some(kw => obs.includes(kw));
+        if (lineMatch || keywordMatch) return true;
+    }
+    return false;
+}
+
+function checkGuardSatisfiesControl(
+    candidate: Candidate,
+    transcript: AgentScanTranscriptStep[],
+): boolean {
+    for (const step of transcript) {
+        if ((step.action as any)?.type !== 'check_guard') continue;
+        const obs = step.observation || '';
+        const obsLower = obs.toLowerCase();
+        const candidateFile = candidate.locations[0]?.filePath || '';
+        const candidateFileNorm = candidateFile.replace(/\\/g, '/').toLowerCase();
+        const actionFile = ((step.action as any)?.filePath || '').replace(/\\/g, '/').toLowerCase();
+        if (candidateFileNorm && actionFile && !candidateFileNorm.endsWith(actionFile) && !actionFile.endsWith(candidateFileNorm)) continue;
+        if (obsLower.includes('not effective') || obsLower.includes('not_effective') ||
+            obsLower.includes('unknown') || obsLower.includes('no guard') ||
+            obsLower.includes('ineffective')) {
+            return true;
+        }
+        if (obsLower.includes('effective')) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -235,6 +322,7 @@ export interface FinishGateInput {
     gateMode?: 'checklist' | 'evidence';
     evidenceGate?: EvidenceGateInput;
     assuranceGate?: AssuranceGateInput;
+    transcript?: AgentScanTranscriptStep[];
 }
 
 export interface AssuranceGateInput {
@@ -479,12 +567,19 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
     // `reachability`, and a claim stating actor+effect satisfies
     // `threat-model` and `impact`.
     if (!candidates.allReadyForJuror()) {
+        const proposedFindings = proposal.findings ?? [];
+        const steps = input.transcript ?? [];
+        const hasTranscript = input.transcript !== undefined;
+
         for (const candidate of candidates.getBlocking()) {
             const logicClass = isLogicClass(candidate.type);
+            const flowRequired = !logicClass && FLOW_REQUIRED_TYPES.has(candidate.type.toLowerCase().replace(/[\s-]+/g, '_'));
 
             if (logicClass) {
                 const { entryDelivered, vulnDelivered } = candidateLinesDelivered(candidate, investigation, target.filePath, input.evidenceGate?.deliveredRanges);
-                const claimSufficient = candidateClaimHasActorAndEffect(candidate);
+                const matchedFinding = findMatchingFinding(candidate, proposedFindings);
+                const claimSufficient = candidateClaimHasActorAndEffect(candidate)
+                    || (matchedFinding !== undefined && findingTextHasActorAndEffect(matchedFinding));
 
                 if (entryDelivered && vulnDelivered) {
                     const missingBefore = missingGateDimensions(candidate);
@@ -495,11 +590,26 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                 if (claimSufficient) {
                     const missingBefore = missingGateDimensions(candidate);
                     if (missingBefore.includes('threat-model')) {
-                        candidates.addEvidence(candidate.id, `logic-claim-threat:${candidate.id}`, 'policy', 'threat-model');
+                        const src = matchedFinding ? `finding:${matchedFinding.line}` : candidate.id;
+                        candidates.addEvidence(candidate.id, `logic-claim-threat:${src}`, 'policy', 'threat-model');
                     }
                     if (missingBefore.includes('impact')) {
-                        candidates.addEvidence(candidate.id, `logic-claim-impact:${candidate.id}`, 'impact', 'impact');
+                        const src = matchedFinding ? `finding:${matchedFinding.line}` : candidate.id;
+                        candidates.addEvidence(candidate.id, `logic-claim-impact:${src}`, 'impact', 'impact');
                     }
+                }
+
+                if (missingGateDimensions(candidate).includes('control') && hasTranscript) {
+                    if (checkGuardSatisfiesControl(candidate, steps)) {
+                        candidates.addEvidence(candidate.id, `guard-control:${candidate.id}`, 'guard', 'control');
+                    }
+                }
+            }
+
+            if (flowRequired && !candidate.flowTraced && steps.length > 0) {
+                if (transcriptHasRuntimeEvidence(candidate, steps)) {
+                    candidates.addEvidence(candidate.id, `runtime-test:${candidate.id}`, 'test', 'reachability');
+                    candidate.flowTraced = true;
                 }
             }
 
@@ -507,6 +617,23 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
 
             const missingDims = missingGateDimensions(candidate);
             const location = candidate.locations.map(l => `${l.filePath}:${l.line}`).join(', ') || target.filePath;
+
+            if (flowRequired && !candidate.flowTraced && missingDims.includes('reachability') && hasTranscript) {
+                if (!candidate.evidenceRefs.some(r => r.startsWith('coverage-gap:no-flow:'))) {
+                    candidates.addEvidence(candidate.id, `coverage-gap:no-flow:${candidate.id}`, 'negative');
+                    coverageGaps.push({
+                        title: `No traced flow or runtime evidence for injection candidate`,
+                        detail: `The taint tracker found no request-input sources for ${candidate.type} at ${location}. No run_tests observation confirmed the payload either. Recorded as a coverage gap.`,
+                        file: candidate.locations[0]?.filePath || target.filePath,
+                        line: candidate.locations[0]?.line,
+                        requiredEvidence: [`Trace a source-to-sink flow or run a test that shows the payload reaching the sink`],
+                        suggestedNextAction: 'trace_flow',
+                        priority: 'medium',
+                    });
+                    continue;
+                }
+                continue;
+            }
 
             let blocker: string;
             if (candidate.guardFound) {
@@ -518,6 +645,9 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                 }
                 if (missingDims.includes('threat-model') || missingDims.includes('impact')) {
                     hints.push('state which actor exploits the flaw and what effect it has (e.g. "unauthenticated user sets role to admin") in the candidate claim');
+                }
+                if (missingDims.includes('control')) {
+                    hints.push(`run check_guard on the vulnerable location to satisfy the control dimension`);
                 }
                 blocker = hints.length > 0
                     ? hints.join('; ')
@@ -657,6 +787,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
             mode: 'complete',
             reasons: [],
             normalizedFinish: proposal,
+            ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
         };
     }
 

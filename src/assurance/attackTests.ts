@@ -11,7 +11,7 @@ import { validateVerifyAnalyzeResponse, validateVerifyGenerateResponse } from '.
 import { isAgentScanBudgetExhausted, VERIFY_BUDGET_EXHAUSTED_REASON } from '../attack/agentScanCredits';
 import { saveProofArtifact, type ProofArtifactRound } from '../attack/proofArtifacts';
 import { getRelatedFilesForFile } from '../project-map/mapContext';
-import { testValidity } from '../attack/testValidity';
+import { testValidity, engineValidity } from '../attack/testValidity';
 
 export interface AssuranceAttackTestInput {
     ctx: ServerContext;
@@ -164,6 +164,10 @@ export function decideScenarioVerdict(
         return { verdict: 'UNTESTABLE', reason: `test did not reach the real target code (${analyze.reason})`, retryable: true };
     }
     if (marker.controlOk === false) return { verdict: 'UNTESTABLE', reason: `control step failed (${analyze.reason})`, retryable: true };
+    const engineCheck = engineValidity(run.output);
+    if (!engineCheck.valid) {
+        return { verdict: 'UNTESTABLE', reason: `${engineCheck.reason} (${analyze.reason})`, retryable: false };
+    }
     const harnessValidity = apiVerdict === 'BLOCKED' ? testValidity(run.output, { kind: 'scenario', controlOk: marker.controlOk }) : { valid: true };
     if (!harnessValidity.valid) {
         return { verdict: 'UNTESTABLE', reason: `${harnessValidity.reason} (${analyze.reason})`, retryable: true };
@@ -269,6 +273,7 @@ async function runScenarioTest(env: RunEnv, cell: GridCell, scenario: Scenario):
                 relativeImportPath: env.relativeImportPath,
                 depsInstalled: runtimeInfo.depsInstalled,
                 verificationPhase: 'original',
+                capabilities: ['express-runner-2'],
                 mode: 'expect-blocked',
                 scenario: scenarioBody,
                 ...(env.sandboxBackend ? { sandboxBackend: env.sandboxBackend } : {}),

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { testValidity } from '../src/attack/testValidity';
+import { testValidity, engineValidity } from '../src/attack/testValidity';
 import { PROOF_MARKER_START, PROOF_MARKER_END, HARNESS_LOG_START, HARNESS_LOG_END } from '../src/attack/proofTypes';
 
 function harnessLog(calls: Array<Record<string, unknown>>): string {
@@ -143,5 +143,48 @@ describe('testValidity — scenario kind', () => {
             ]),
         ].join('\n');
         expect(testValidity(output, { kind: 'scenario' }).valid).toBe(true);
+    });
+});
+
+describe('testValidity — engine validity', () => {
+    it('emulated engine with unsupported patterns → invalid for proof kind', () => {
+        const output = `${HARNESS_LOG_START}${JSON.stringify({ calls: [{ method: 'GET', path: '/admin/config', matched: true, sent: true, status: 200, timedOut: false }], engine: 'emulated', unsupported: ['wildcard path /admin/*path'] })}${HARNESS_LOG_END}`;
+        const result = testValidity(output, { kind: 'proof' });
+        expect(result.valid).toBe(false);
+        expect(result.reason).toContain('cannot model');
+        expect(result.reason).toContain('wildcard path');
+    });
+
+    it('emulated engine with unsupported patterns → invalid for scenario kind', () => {
+        const output = `${HARNESS_LOG_START}${JSON.stringify({ calls: [{ method: 'GET', path: '/admin/config', matched: true, sent: true, status: 200, timedOut: false }], engine: 'emulated', unsupported: ['mounted router at /api'] })}${HARNESS_LOG_END}`;
+        const result = testValidity(output, { kind: 'scenario' });
+        expect(result.valid).toBe(false);
+        expect(result.reason).toContain('cannot model');
+    });
+
+    it('emulated engine with empty unsupported → valid', () => {
+        const output = `${HARNESS_LOG_START}${JSON.stringify({ calls: [{ method: 'GET', path: '/hello', matched: true, sent: true, status: 200, timedOut: false }], engine: 'emulated', unsupported: [] })}${HARNESS_LOG_END}`;
+        expect(testValidity(output, { kind: 'proof' }).valid).toBe(true);
+    });
+
+    it('real express engine → valid regardless of unsupported', () => {
+        const output = `${HARNESS_LOG_START}${JSON.stringify({ calls: [{ method: 'GET', path: '/admin/config', matched: true, sent: true, status: 401, timedOut: false }], engine: 'express@5.0.1', unsupported: [] })}${HARNESS_LOG_END}`;
+        expect(testValidity(output, { kind: 'proof' }).valid).toBe(true);
+    });
+
+    it('no harness log → valid', () => {
+        expect(engineValidity('some output without harness log').valid).toBe(true);
+    });
+
+    it('engineValidity returns invalid for emulated+unsupported', () => {
+        const output = `${HARNESS_LOG_START}${JSON.stringify({ calls: [], engine: 'emulated', unsupported: ['app.param'] })}${HARNESS_LOG_END}`;
+        const result = engineValidity(output);
+        expect(result.valid).toBe(false);
+        expect(result.reason).toContain('app.param');
+    });
+
+    it('engineValidity returns valid for emulated with no unsupported', () => {
+        const output = `${HARNESS_LOG_START}${JSON.stringify({ calls: [], engine: 'emulated', unsupported: [] })}${HARNESS_LOG_END}`;
+        expect(engineValidity(output).valid).toBe(true);
     });
 });

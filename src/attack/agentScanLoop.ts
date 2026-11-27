@@ -1380,6 +1380,7 @@ export async function runAgentScan(
                         segment: segment ? { startLine: segment.startLine, endLine: segment.endLine } : undefined,
                     },
                     landing,
+                    transcript,
                     ...(evidenceMode ? {
                         gateMode: 'evidence' as const,
                         evidenceGate: {

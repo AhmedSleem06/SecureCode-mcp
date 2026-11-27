@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, FINISH_LOOP_ESCAPE_THRESHOLD, FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD, FINISH_LOOP_CANDIDATE_ESCAPE_THRESHOLD, finishLoopEscapeThreshold, isLandingBudget } from '../src/attack/finishGate';
+import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, FINISH_LOOP_ESCAPE_THRESHOLD, FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD, FINISH_LOOP_CANDIDATE_ESCAPE_THRESHOLD, finishLoopEscapeThreshold, isLandingBudget, textHasActorAndEffect, transcriptHasRuntimeEvidence } from '../src/attack/finishGate';
 import { AGENT_SCAN_DEFAULTS } from '../src/attack/agentScanProtocol';
 import { createScanRunState } from '../src/attack/scanState';
 import { EvidenceLedger } from '../src/attack/evidenceLedger';
@@ -435,5 +435,232 @@ describe('Finish Loop Tracker — checklist-only escape', () => {
         expect(finishLoopEscapeThreshold(reasons(['unsatisfied-evidence-requirement', 'high-priority-unread-range']), 0)).toBe(FINISH_LOOP_ESCAPE_THRESHOLD);
         expect(finishLoopEscapeThreshold(reasons(['incomplete-checklist', 'executable-work-remaining']), 0)).toBe(FINISH_LOOP_ESCAPE_THRESHOLD);
         expect(finishLoopEscapeThreshold(reasons(['incomplete-checklist']), 0)).toBe(FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD);
+    });
+});
+
+describe('Finish Gate — Fix D: actor+effect from finding text', () => {
+    function completedInvestigation(): InvestigationState {
+        const investigation = new InvestigationState();
+        investigation.recordActualRead('src/orders.ts', 1, 150, 150, false);
+        investigation.recordToolUse('check_policy');
+        investigation.recordToolUse('search_code');
+        investigation.recordToolUse('get_endpoints');
+        investigation.recordToolUse('read_config');
+        investigation.recordFlowVerification('src/orders.ts', 'trace_flow_cross_file', 'refuted', 0, 'no cross-file flows');
+        investigation.markAllHandlersReviewed();
+        investigation.markCandidatesVerified();
+        return investigation;
+    }
+
+    it('(a) accepts a logic candidate when the finding why has actor+effect but the claim does not (06-fixed regression)', () => {
+        const investigation = completedInvestigation();
+        const candidates = new CandidateStore();
+        const id = candidates.register({
+            rootCauseId: 'business_logic_price_manipulation:44',
+            type: 'business_logic',
+            severity: 'high',
+            locations: [{ filePath: 'src/orders.ts', line: 44 }],
+            claim: 'Any customer with a valid JWT sets item.price in the POST /orders body. The server never looks the price up.',
+        });
+        candidates.addEvidence(id, 'backfill:source:src/orders.ts', 'source', 'source');
+        candidates.addEvidence(id, 'backfill:check_guard:src/orders.ts', 'guard', 'control');
+        candidates.addEvidence(id, 'backfill:check_policy:src/orders.ts', 'policy');
+
+        const finding = {
+            line: 44, type: 'business_logic_price_manipulation', severity: 'high' as const,
+            confidence: 85, evidence: 'POST body sets price directly',
+            why: 'Actor: any authenticated customer. Effect: goods ship at a price the customer chose, including zero or negative.',
+        };
+
+        const transcript: any[] = [{
+            action: { type: 'check_guard', filePath: 'src/orders.ts' },
+            observation: 'Guard: NOT EFFECTIVE — no price validation guard found',
+        }];
+
+        const result = evaluateFinishGate(makeInput({
+            investigation,
+            candidates,
+            transcript,
+            proposal: { type: 'finish', findings: [finding], summary: 'done', selfCritique: 'checked' },
+        }));
+        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toEqual([]);
+    });
+
+    it('(a) the claim itself without "customer" still fails without a matching finding', () => {
+        const investigation = completedInvestigation();
+        const candidates = new CandidateStore();
+        const id = candidates.register({
+            rootCauseId: 'biz:44',
+            type: 'business_logic',
+            severity: 'high',
+            locations: [{ filePath: 'src/orders.ts', line: 44 }],
+            claim: 'Price is not validated before storage.',
+        });
+        candidates.addEvidence(id, 'backfill:source:src/orders.ts', 'source', 'source');
+
+        const result = evaluateFinishGate(makeInput({
+            investigation,
+            candidates,
+            proposal: { type: 'finish', findings: [], summary: 'done', selfCritique: 'checked' },
+        }));
+        expect(result.reasons.some(r => r.code === 'non-terminal-candidate')).toBe(true);
+    });
+
+    it('(a) widened actor terms: "customer", "owner", "buyer", "seller" are accepted in the claim', () => {
+        const investigation = completedInvestigation();
+        for (const actor of ['customer', 'owner', 'buyer', 'seller', 'merchant', 'operator']) {
+            const candidates = new CandidateStore();
+            const id = candidates.register({
+                rootCauseId: `biz:${actor}:44`,
+                type: 'business_logic',
+                severity: 'high',
+                locations: [{ filePath: 'src/orders.ts', line: 44 }],
+                claim: `Any ${actor} can bypass the payment check and get free goods.`,
+            });
+            candidates.addEvidence(id, 'backfill:source:src/orders.ts', 'source', 'source');
+            candidates.addEvidence(id, 'backfill:check_guard:src/orders.ts', 'guard', 'control');
+            const result = evaluateFinishGate(makeInput({
+                investigation,
+                candidates,
+                proposal: { type: 'finish', findings: [], summary: 'done', selfCritique: 'checked' },
+            }));
+            expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toEqual([]);
+        }
+    });
+
+    it('(b) injection candidate without flow: accepts run_tests runtime evidence', () => {
+        const investigation = completedInvestigation();
+        const candidates = new CandidateStore();
+        const id = candidates.register({
+            rootCauseId: 'sql_injection:113',
+            type: 'sql_injection',
+            severity: 'critical',
+            locations: [{ filePath: 'src/analytics.ts', line: 113 }],
+            claim: 'SQL injection via tag parameter',
+        });
+        candidates.addEvidence(id, 'backfill:source:src/analytics.ts', 'source', 'source');
+        candidates.addEvidence(id, 'backfill:check_guard:src/analytics.ts', 'guard', 'control');
+        candidates.addEvidence(id, 'backfill:config:src/analytics.ts', undefined, 'threat-model');
+
+        const transcript: any[] = [{
+            action: { type: 'run_tests', mode: 'generated', rationale: 'test sqli' },
+            observation: 'run_tests generated: passed\nBackend: docker\nExit code: 0\nDuration: 6575ms\n\nOutput:\nSELECT * FROM events WHERE account_id = \'acct_abc12345\' AND tags @> \'["x\'; DROP TABLE events;--"]\' ORDER BY timestamp DESC LIMIT 100\nPASS: DROP TABLE lies outside any SQL string literal',
+        }];
+
+        const result = evaluateFinishGate(makeInput({
+            investigation,
+            candidates,
+            transcript,
+            proposal: { type: 'finish', findings: [{ line: 113, type: 'sql_injection', severity: 'critical', confidence: 90, evidence: 'x', why: 'SQL injection' }], summary: 'done', selfCritique: 'checked' },
+        }));
+        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toEqual([]);
+    });
+
+    it('(b) injection candidate without flow or run_tests: becomes a coverage gap, not a repeated blocker', () => {
+        const investigation = completedInvestigation();
+        const candidates = new CandidateStore();
+        candidates.register({
+            rootCauseId: 'sql_injection:113',
+            type: 'sql_injection',
+            severity: 'critical',
+            locations: [{ filePath: 'src/analytics.ts', line: 113 }],
+            claim: 'SQL injection via tag parameter',
+        });
+
+        const result1 = evaluateFinishGate(makeInput({
+            investigation,
+            candidates,
+            transcript: [],
+            proposal: { type: 'finish', findings: [], summary: 'done', selfCritique: 'checked' },
+        }));
+        expect(result1.coverageGaps?.some(g => g.title.includes('No traced flow'))).toBe(true);
+        expect(result1.reasons.some(r => r.code === 'non-terminal-candidate')).toBe(false);
+
+        const result2 = evaluateFinishGate(makeInput({
+            investigation,
+            candidates,
+            transcript: [],
+            proposal: { type: 'finish', findings: [], summary: 'done', selfCritique: 'checked' },
+        }));
+        expect(result2.reasons.some(r => r.code === 'non-terminal-candidate')).toBe(false);
+    });
+
+    it('(c) logic candidate with missing control: filled by check_guard observation', () => {
+        const investigation = completedInvestigation();
+        const candidates = new CandidateStore();
+        const id = candidates.register({
+            rootCauseId: 'broken_access_control:31',
+            type: 'broken_access_control',
+            severity: 'critical',
+            locations: [{ filePath: 'src/admin.ts', line: 31 }],
+            claim: 'Any attacker can bypass the admin guard on non-GET routes.',
+        });
+        candidates.addEvidence(id, 'backfill:source:src/admin.ts', 'source', 'source');
+
+        const transcript: any[] = [{
+            action: { type: 'check_guard', filePath: 'src/admin.ts' },
+            observation: 'Guard "requireAdmin" vs broken_access_control: NOT EFFECTIVE\nReason: Guard detected as \'unknown\' but effectiveness against broken_access_control is unknown',
+        }];
+
+        const result = evaluateFinishGate(makeInput({
+            investigation,
+            candidates,
+            transcript,
+            proposal: { type: 'finish', findings: [{ line: 31, type: 'broken_access_control', severity: 'critical', confidence: 90, evidence: 'x', why: 'Any attacker can bypass the admin guard.' }], summary: 'done', selfCritique: 'checked' },
+        }));
+        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const controlMissing = candidateReasons.some(r => r.description.includes('control'));
+        expect(controlMissing).toBe(false);
+    });
+
+    it('forced_incomplete becomes complete when all blocking reasons are resolved by fixes', () => {
+        const investigation = completedInvestigation();
+        const candidates = new CandidateStore();
+        for (const [line, type, claim] of [
+            [44, 'business_logic', 'Any customer sets item.price in POST /orders body.'],
+            [81, 'business_logic', 'Any customer marks order as paid without paying.'],
+            [129, 'business_logic', 'Cancel blocks only shipped orders.'],
+        ] as const) {
+            const cid = candidates.register({
+                rootCauseId: `${type}:${line}`, type, severity: 'high',
+                locations: [{ filePath: 'src/orders.ts', line }],
+                claim,
+            });
+            candidates.addEvidence(cid, `backfill:source:src/orders.ts`, 'source', 'source');
+        }
+
+        const findings = [
+            { line: 44, type: 'business_logic', severity: 'high' as const, confidence: 85, evidence: 'x', why: 'Actor: any authenticated customer. Effect: goods ship at chosen price.' },
+            { line: 81, type: 'business_logic', severity: 'high' as const, confidence: 85, evidence: 'x', why: 'Actor: any authenticated customer. Effect: order marked paid without payment.' },
+            { line: 129, type: 'business_logic', severity: 'high' as const, confidence: 85, evidence: 'x', why: 'Actor: the customer who owns the order. Effect: cancels paid order with no refund.' },
+        ];
+
+        const transcript: any[] = [{
+            action: { type: 'check_guard', filePath: 'src/orders.ts' },
+            observation: 'Guard: NOT EFFECTIVE — no payment validation guard found',
+        }];
+
+        const result = evaluateFinishGate(makeInput({
+            investigation,
+            candidates,
+            transcript,
+            proposal: { type: 'finish', findings, summary: 'done', selfCritique: 'checked' },
+        }));
+        expect(result.accepted).toBe(true);
+        expect(result.mode).toBe('complete');
+    });
+});
+
+describe('Finish Gate — textHasActorAndEffect export', () => {
+    it('recognizes classic actor+effect in finding why text', () => {
+        expect(textHasActorAndEffect('Actor: any authenticated customer. Effect: goods ship at a price the customer chose.')).toBe(true);
+    });
+
+    it('rejects text without an actor', () => {
+        expect(textHasActorAndEffect('The price field is not validated.')).toBe(false);
+    });
+
+    it('rejects text without an effect', () => {
+        expect(textHasActorAndEffect('The attacker has a token.')).toBe(false);
     });
 });

@@ -728,6 +728,36 @@ describe('expressRunner.cjs', () => {
       expect(log.calls).toHaveLength(2);
       expect(log.calls[0]).toMatchObject({ method: 'GET', path: '/hello', matched: true, sent: true, status: 200, timedOut: false });
       expect(log.calls[1]).toMatchObject({ method: 'POST', path: '/nonexistent', matched: false, sent: false, timedOut: false });
+      expect(log.engine).toBe('emulated');
+    });
+
+    it('reports engine and unsupported fields in the harness log', () => {
+      const result = runInFreshProcess(`
+        const sc = require('./expressRunner.cjs');
+
+        sc.load('./app.cjs');
+
+        (async () => {
+          await sc.invoke('GET', '/admin/config');
+        })();
+      `, {
+        'app.cjs': `
+          const express = require('express');
+          const app = express();
+          const router = express.Router();
+          router.use('/admin/*path', (req, res, next) => { next(); });
+          app.use(router);
+          app.get('/admin/config', (req, res) => { res.json({ ok: true }); });
+          app.listen(3000);
+        `
+      });
+
+      expect(result.exitCode).toBe(0);
+      const logMatch = result.stdout.match(/SECURECODE_HARNESS_LOG:(\{.*\}):SECURECODE_HARNESS_END/);
+      expect(logMatch).toBeTruthy();
+      const log = JSON.parse(logMatch[1]);
+      expect(log.engine).toBe('emulated');
+      expect(log.unsupported).toEqual(expect.arrayContaining([expect.stringContaining('wildcard path')]));
     });
 
     it('does not print harness log when helper was not used', () => {

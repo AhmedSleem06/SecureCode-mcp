@@ -11,7 +11,7 @@ import {
 import { validateVerifyGenerateResponse, validateVerifyAnalyzeResponse } from './protocolValidator';
 import { parseProofMarker, type ProofRunResult } from './proofTypes';
 import { evaluateProofGate, buildProofEvidence } from './proofGate';
-import { testValidity } from './testValidity';
+import { testValidity, engineValidity } from './testValidity';
 import { runMutationTest } from './mutationTest';
 import { detectSandbox } from '../utils/verificationSandbox';
 import { isAgentScanBudgetExhausted, VERIFY_BUDGET_EXHAUSTED_REASON } from './agentScanCredits';
@@ -235,6 +235,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 relativeImportPath,
                 depsInstalled: runtimeInfo.depsInstalled,
                 verificationPhase,
+                capabilities: ['express-runner-2'],
                 ...(sandboxBackendName ? { sandboxBackend: sandboxBackendName } : {}),
                 ...(opts.runId ? { runId: opts.runId } : {}),
             });
@@ -419,6 +420,20 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             : undefined;
 
         if (analyzeResp.verdict === 'PROVEN') {
+            const engineCheck = engineValidity(lastTestOutput);
+            if (!engineCheck.valid) {
+                return finish({
+                    verdict: 'INCONCLUSIVE',
+                    reason: `Engine validity: ${engineCheck.reason}`,
+                    roundsUsed: round,
+                    testScript: lastTestScript,
+                    testOutput: lastTestOutput,
+                    backend: testResult.backend || '',
+                    proofEvidence,
+                    proofGateResult: gateResult,
+                    subVerdict: 'analyzed',
+                });
+            }
             if (gateResult.eligibleForProven) {
                 const REPEAT_RUNS = 3;
                 const runResults: ProofRunResult[] = [];

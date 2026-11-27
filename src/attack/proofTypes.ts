@@ -113,6 +113,8 @@ export interface HarnessCall {
 export interface HarnessLog {
     found: boolean;
     calls: HarnessCall[];
+    engine?: string;
+    unsupported?: string[];
 }
 
 export function parseHarnessLog(output: string): HarnessLog {
@@ -134,6 +136,8 @@ export function parseHarnessLog(output: string): HarnessLog {
                 status: typeof c.status === 'number' ? c.status : undefined,
                 timedOut: c.timedOut === true,
             })),
+            engine: typeof parsed.engine === 'string' ? parsed.engine : undefined,
+            unsupported: Array.isArray(parsed.unsupported) ? parsed.unsupported.map(String) : undefined,
         };
     } catch {
         return { found: false, calls: [] };
