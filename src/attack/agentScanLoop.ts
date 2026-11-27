@@ -19,7 +19,7 @@
 
 import { ApiClient, describeApiError } from '../api/client';
 import type { ServerContext } from '../mcp/types';
-import { executeAction, executeReadFileAction, executeFlowAction } from './agentScanExecutor';
+import { executeAction, executeReadFileAction, executeFlowAction, createRunTestsRefusalTracker, type ExecuteActionOptions, type RunTestsRefusalTracker } from './agentScanExecutor';
 import { AgentTraceLogger } from './agentTrace';
 import { InvestigationState, promptShownRange, uncoveredWithin, coverageReReadCheck, formatCoverageReReadObservation, type DeliveredRead, type LineRange } from './investigationState';
 import { selectInvestigationProfile, extractRoleFromArchitectureContext, suggestedChecks } from './investigationProfiles';
@@ -87,6 +87,7 @@ export interface AgentScanOptions {
     segment?: AgentScanSegment;
     role?: string;
     requestedMode?: 'standard' | 'assurance';
+    deepScanRunId?: string;
 }
 
 const SEGMENT_EDGE_TOLERANCE_LINES = 5;
@@ -263,6 +264,13 @@ export async function runAgentScan(
         let assuranceRedteamDone = false;
         let assuranceRedteamRounds = 0;
         const assuranceWarnings: string[] = [];
+        let doneRuleRejections = 0;
+
+        const runTestsRefusalTracker = createRunTestsRefusalTracker();
+        const executeOpts: ExecuteActionOptions = {
+            refusalTracker: runTestsRefusalTracker,
+            ...(isAssurance && options.deepScanRunId ? { deepScanRunId: options.deepScanRunId } : {}),
+        };
 
         if (isAssurance) {
             try {
@@ -1387,6 +1395,9 @@ export async function runAgentScan(
                             targetRange: evidenceTargetRange,
                             openLeadsRejectedOnce,
                             findings: scopedFinish.inRange,
+                            connectedFiles: assuranceGrid?.inventory?.connected,
+                            gridCells: assuranceGrid?.cells,
+                            doneRuleRejections,
                         },
                     } : {}),
                     ...(assuranceGrid ? {
@@ -1405,6 +1416,7 @@ export async function runAgentScan(
                 // instead of looping to the wall clock.
                 if (!gateResult.accepted) {
                     if (gateResult.reasons.some(r => r.code === 'open-leads')) openLeadsRejectedOnce = true;
+                    if (gateResult.reasons.some(r => r.code === 'connected-file-unread' || r.code === 'high-risk-cell-no-evidence')) doneRuleRejections++;
                     trackFinishRejection(finishLoop, gateResult.reasons, candidateStore.getActive().length);
                     if (finishLoopEscaped(finishLoop)) {
                         const loopNote = `[FINISH GATE LOOP DETECTED] The same gate reasons have now rejected ${finishLoop.rejections} consecutive finishes. Accepting this finish as forced-incomplete — unresolved items are recorded as coverage gaps instead of looping to the wall clock.`;
@@ -1422,8 +1434,17 @@ export async function runAgentScan(
                 }
 
                 if (gateResult.accepted) {
-                    if (assuranceGrid && assuranceGrid.isFullyClosed(assuranceScope) && !assuranceRedteamDone && assuranceRedteamRounds < 2) {
-                        const round = (assuranceRedteamRounds + 1) as 1 | 2;
+                    if (assuranceGrid && assuranceGrid.isFullyClosed(assuranceScope) && !assuranceRedteamDone && assuranceRedteamRounds < 4) {
+                        const budgetFraction = Math.max(
+                            budget.costCapUsd > 0 ? costSpentUsd / budget.costCapUsd : 0,
+                            wallClockMs > 0 ? (Date.now() - startTime) / wallClockMs : 0,
+                        );
+                        if (budgetFraction >= 0.75) {
+                            assuranceRedteamDone = true;
+                            assuranceGrid.redteamStopReason = 'budget';
+                            console.log(`[Agent Scan Loop] Red team skipped: ≥75% of budget used (${Math.round(budgetFraction * 100)}%).`);
+                        } else {
+                        const round = assuranceRedteamRounds + 1;
                         try {
                             const readRanges = targetDeliveredRanges().map(r => ({ startLine: r.start, endLine: r.end }));
                             const rtBody = {
@@ -1443,8 +1464,12 @@ export async function runAgentScan(
                             assuranceGrid.redteamRounds = round;
                             const addedCells = assuranceGrid.addCells(rtResp.newCells ?? []);
                             assuranceGrid.addScenarios(rtResp.newScenarios ?? []);
-                            if (addedCells.length > 0 && round < 2) {
-                                console.log(`[Agent Scan Loop] Red team round ${round}: added ${addedCells.length} cell(s) — reopening investigation.`);
+                            const hasNewHighRisk = addedCells.some(id => {
+                                const c = assuranceGrid!.getCell(id);
+                                return c !== undefined && c.risk >= 4;
+                            });
+                            if (hasNewHighRisk && round < 4) {
+                                console.log(`[Agent Scan Loop] Red team round ${round}: added ${addedCells.length} cell(s) with high-risk gaps — reopening investigation.`);
                                 const rtNote = `RED TEAM ROUND ${round}: ${addedCells.length} new cell(s) added. ${rtResp.justification ?? 'Continue investigating the new cells.'}`;
                                 transcript.push({
                                     action: { type: 'system_event', eventType: 'finish_gate', message: rtNote } as any,
@@ -1453,12 +1478,19 @@ export async function runAgentScan(
                                 continue;
                             }
                             assuranceRedteamDone = true;
-                            console.log(`[Agent Scan Loop] Red team round ${round}: ${addedCells.length > 0 ? `${addedCells.length} new cell(s) (max rounds reached)` : 'nothing missed'}. ${rtResp.justification ?? ''}`);
+                            if (!hasNewHighRisk) {
+                                assuranceGrid.redteamStopReason = 'no-new-high-risk-gaps';
+                                console.log(`[Agent Scan Loop] Red team round ${round}: no new high-risk gaps. ${rtResp.justification ?? ''}`);
+                            } else {
+                                assuranceGrid.redteamStopReason = 'round-limit';
+                                console.log(`[Agent Scan Loop] Red team round ${round}: ${addedCells.length} new cell(s) (max rounds reached). ${rtResp.justification ?? ''}`);
+                            }
                         } catch (rtErr: any) {
                             const msg = rtErr?.message || String(rtErr);
                             assuranceRedteamDone = true;
                             assuranceGrid.addWarning(`Red team round ${round} failed: ${msg}`);
                             console.warn(`[Agent Scan Loop] Red team round ${round} failed: ${msg} — continuing without it.`);
+                        }
                         }
                     } else if (assuranceGrid) {
                         assuranceRedteamDone = true;
@@ -1579,7 +1611,7 @@ export async function runAgentScan(
                             }
                         }
                     } else {
-                        recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
+                        recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target, executeOpts);
                     }
                     qualityTracker.recordToolUse(recoveryAction.type); investigationState.recordToolUse(recoveryAction.type);
                     recordActionEvidence(recoveryAction, stepsTaken, 'recovery');
@@ -1808,11 +1840,11 @@ export async function runAgentScan(
                         wasBlocked = true;
                     } else {
                         if (action.type === 'trace_flow' || action.type === 'trace_flow_cross_file') {
-                            const flowAction = await executeFlowAction(action, ctx, startResp.runId, client, target);
+                            const flowAction = await executeFlowAction(action, ctx, startResp.runId, client, target, executeOpts);
                             observation = flowAction.observation;
                             flowResult = flowAction.flowResult;
                         } else {
-                            observation = await executeAction(action, ctx, startResp.runId, client, target);
+                            observation = await executeAction(action, ctx, startResp.runId, client, target, executeOpts);
                         }
                         qualityTracker.recordToolUse(action.type); investigationState.recordToolUse(action.type);
                         if (action.type === 'search_code') {
@@ -1828,11 +1860,11 @@ export async function runAgentScan(
                     }
                 } else {
                     if (action.type === 'trace_flow' || action.type === 'trace_flow_cross_file') {
-                        const flowAction = await executeFlowAction(action, ctx, startResp.runId, client, target);
+                        const flowAction = await executeFlowAction(action, ctx, startResp.runId, client, target, executeOpts);
                         observation = flowAction.observation;
                         flowResult = flowAction.flowResult;
                     } else {
-                        observation = await executeAction(action, ctx, startResp.runId, client, target);
+                        observation = await executeAction(action, ctx, startResp.runId, client, target, executeOpts);
                     }
                     qualityTracker.recordToolUse(action.type); investigationState.recordToolUse(action.type);
                     meaningfulProgressSinceLastExtension = true;
@@ -2150,7 +2182,7 @@ export async function runAgentScan(
                                 }
                             }
                         } else {
-                            recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target);
+                            recoveryObservation = await executeAction(recoveryAction, ctx, startResp.runId, client, target, executeOpts);
                             recoveryMadeProgress = true;
                         }
                         qualityTracker.recordToolUse(recoveryAction.type); investigationState.recordToolUse(recoveryAction.type);

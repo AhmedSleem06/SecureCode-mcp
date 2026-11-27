@@ -265,4 +265,118 @@ exec(x);`;
         expect(path[0].operation).toBe('source');
         expect(path[path.length - 1].operation).toBe('sink-arg');
     });
+
+    // ── sourceKind field ───────────────────────────────────────────────────
+
+    it('direct flow has sourceKind "request input"', async () => {
+        const code = `const q = req.body.q;
+exec(q);`;
+        const results = await trackTaint(code, 'javascript');
+        expect(results).toHaveLength(1);
+        expect(results[0].sourceKind).toBe('request input');
+    });
+
+    // ── Stored data flows ──────────────────────────────────────────────────
+
+    it('detects stored flow: Map.set then Map.get', async () => {
+        const code = `const accounts = new Map();
+
+app.post('/register', (req, res) => {
+  const { tags } = req.body;
+  const account = { id: 'x', tags: tags };
+  accounts.set(account.id, account);
+  res.json(account);
+});
+
+app.get('/report', (req, res) => {
+  const account = accounts.get(userId);
+  const tagFilter = "AND tags @> '" + JSON.stringify(account.tags) + "'";
+  const reportQuery = "SELECT * FROM events WHERE id = '1' " + tagFilter;
+  db.query(reportQuery);
+});`;
+        const results = await trackTaint(code, 'javascript');
+        const storedFlow = results.find(r => r.sourceKind === 'stored input');
+        expect(storedFlow).toBeDefined();
+        expect(storedFlow!.sink).toBe('sql-concat');
+        expect(storedFlow!.propagationPath.some(p => p.operation === 'store-write')).toBe(true);
+        expect(storedFlow!.propagationPath.some(p => p.operation === 'store-read')).toBe(true);
+    });
+
+    it('detects stored flow: array.push then iteration', async () => {
+        const code = `const items = [];
+
+app.post('/add', (req, res) => {
+  items.push(req.body.item);
+  res.json({ ok: true });
+});
+
+app.get('/run', (req, res) => {
+  for (const item of items) {
+    exec(item);
+  }
+});`;
+        const results = await trackTaint(code, 'javascript');
+        const storedFlow = results.find(r => r.sourceKind === 'stored input');
+        expect(storedFlow).toBeDefined();
+    });
+
+    it('detects stored flow: subscript assignment then read', async () => {
+        const code = `const cache = {};
+
+app.post('/set', (req, res) => {
+  cache[req.body.key] = req.body.value;
+  res.json({ ok: true });
+});
+
+app.get('/use', (req, res) => {
+  const val = cache.stored;
+  exec(val);
+});`;
+        const results = await trackTaint(code, 'javascript');
+        const storedFlow = results.find(r => r.sourceKind === 'stored input');
+        expect(storedFlow).toBeDefined();
+    });
+
+    it('app 10 flawed: stored flow from req.body tags to SQL concat sink', async () => {
+        const fs = require('fs');
+        const fixturePath = require('path').resolve(__dirname, '../../test_lab/assurance-fixtures/10-sqli-report-concat/flawed/src/analytics.ts');
+        const code = fs.readFileSync(fixturePath, 'utf8');
+        const results = await trackTaint(code, 'javascript');
+        const sqlFlow = results.find(r => r.sink === 'sql-concat' && r.sourceKind === 'stored input');
+        expect(sqlFlow).toBeDefined();
+        expect(sqlFlow!.isTainted).toBe(true);
+        expect(sqlFlow!.sinkLine).toBeGreaterThanOrEqual(112);
+        expect(sqlFlow!.sinkLine).toBeLessThanOrEqual(116);
+    });
+
+    it('app 10 fixed: no tainted SQL flow (uses parameterized queries)', async () => {
+        const fs = require('fs');
+        const fixturePath = require('path').resolve(__dirname, '../../test_lab/assurance-fixtures/10-sqli-report-concat/fixed/src/analytics.ts');
+        const code = fs.readFileSync(fixturePath, 'utf8');
+        const results = await trackTaint(code, 'javascript');
+        const sqlConcatFlow = results.find(r => r.sink === 'sql-concat' && r.isTainted);
+        expect(sqlConcatFlow).toBeUndefined();
+    });
+
+    // ── Identity claim flows ───────────────────────────────────────────────
+
+    it('detects identity claim: req.user.sub reaching a dangerous sink', async () => {
+        const code = `app.get('/x', (req, res) => {
+  const userId = req.user.sub;
+  db.query("SELECT * FROM users WHERE id = " + userId);
+});`;
+        const results = await trackTaint(code, 'javascript');
+        const identityFlow = results.find(r => r.sourceKind === 'identity claim');
+        expect(identityFlow).toBeDefined();
+        expect(identityFlow!.sink).toBe('sql-concat');
+    });
+
+    it('does NOT flag req.user.sub in non-dangerous use', async () => {
+        const code = `app.get('/x', (req, res) => {
+  const userId = req.user.sub;
+  console.log(userId);
+});`;
+        const results = await trackTaint(code, 'javascript');
+        expect(results).toHaveLength(0);
+    });
 });

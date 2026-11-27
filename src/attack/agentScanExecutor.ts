@@ -15,7 +15,7 @@ import { readFileFromWorkspace, resolveWorkspacePath } from '../utils/files';
 import { searchCode, formatSearchResult } from '../utils/searchCode';
 import { trackTaint } from '../project-map/taintTracker';
 import { trackTaintCrossFile } from '../project-map/crossFileTaintTracker';
-import { evaluateGuard } from '../project-map/guardEvaluator';
+import { evaluateGuard, analyzeRouteGuards } from '../project-map/guardEvaluator';
 import type { SinkLanguage } from '../project-map/sinkRegistry';
 import { redactText } from './report';
 import { testOnlyLabel, isTestPath } from './testCodeLabel';
@@ -25,7 +25,7 @@ import { getGitBlame, getGitHistory, formatGitChangedFiles } from '../utils/gitC
 import { scanDependencies } from '../dependency/dependencyChecker';
 import { FileCacheStore } from '../dependency/depCache';
 import { readSecurityConfig } from '../utils/securityConfig';
-import { runTests, type RunTestsRequest } from '../utils/testRunner';
+import { runTests, formatRefusalMessage, type RunTestsRequest, type RunTestsResult } from '../utils/testRunner';
 import { validateToolResponse } from './protocolValidator';
 import type {
     AgentScanAction,
@@ -41,7 +41,25 @@ import type {
 export { MAX_OBSERVATION_CHARS, LARGE_FILE_THRESHOLD } from './observationLimits';
 import { MAX_OBSERVATION_CHARS, LARGE_FILE_THRESHOLD } from './observationLimits';
 
-const TAINT_EMPTY_SUFFIX = ' The tracker found no request-input sources it recognises in this file; this is not evidence the file is safe.';
+export interface RunTestsRefusalTracker {
+    counts: Map<string, number>;
+    disabled: boolean;
+}
+
+export function createRunTestsRefusalTracker(): RunTestsRefusalTracker {
+    return { counts: new Map(), disabled: false };
+}
+
+export interface ExecuteActionOptions {
+    refusalTracker?: RunTestsRefusalTracker;
+    deepScanRunId?: string;
+}
+
+const TAINT_EMPTY_MSG_SINGLE = (file: string) =>
+    `No flow from request input to a dangerous call was found in ${file}. Stored-data flows inside this file are followed; flows through other services, queues or databases are not.`;
+
+const TAINT_EMPTY_MSG_CROSS = (file: string) =>
+    `No flow from request input to a dangerous call was found starting from ${file}. Stored-data flows inside each file are followed; flows through other services, queues or databases are not.`;
 
 export function truncate(text: string): string {
     if (text.length <= MAX_OBSERVATION_CHARS) return text;
@@ -314,6 +332,7 @@ export async function executeAction(
     runId: string,
     client: ApiClient,
     target: AgentScanTarget,
+    opts?: ExecuteActionOptions,
 ): Promise<string> {
     switch (action.type) {
         case 'read_file': {
@@ -341,13 +360,14 @@ export async function executeAction(
                 }
                 const results = await trackTaint(content, sinkLang);
                 if (results.length === 0) {
-                    return `No taint flows found in ${action.filePath}.${TAINT_EMPTY_SUFFIX}`;
+                    return TAINT_EMPTY_MSG_SINGLE(action.filePath);
                 }
                 const formatted = results.map(r => {
+                    const kindLabel = r.sourceKind !== 'request input' ? ` [${r.sourceKind}]` : '';
                     const path = r.propagationPath
                         .map(p => `  L${p.line} ${p.operation}: ${p.description}`)
                         .join('\n');
-                    return `${r.source} (L${r.sourceLine}) → ${r.sink} (L${r.sinkLine}) [${r.canonicalType}]${r.isTainted ? ' TAINTED' : ' (sanitized)'}\n${path}`;
+                    return `${r.source} (L${r.sourceLine})${kindLabel} → ${r.sink} (L${r.sinkLine}) [${r.canonicalType}]${r.isTainted ? ' TAINTED' : ' (sanitized)'}\n${path}`;
                 }).join('\n\n');
                 return redact(formatted);
             } catch (e: any) {
@@ -363,7 +383,7 @@ export async function executeAction(
                     maxDepth: (action as any).maxDepth ?? 3,
                 });
                 if (results.length === 0) {
-                    return `No cross-file taint flows found starting from ${action.filePath}.${TAINT_EMPTY_SUFFIX}`;
+                    return TAINT_EMPTY_MSG_CROSS(action.filePath);
                 }
                 const formatted = results.map(r => {
                     const path = r.crossFileSteps
@@ -379,16 +399,43 @@ export async function executeAction(
 
         case 'check_guard': {
             try {
+                const ACCESS_CONTROL_ATTACKS = new Set([
+                    'broken_access_control', 'missing_authorization', 'idor',
+                    'privilege_escalation', 'auth_bypass',
+                ]);
                 const absPath = resolveWorkspacePath(ctx.workspaceRoot, action.filePath);
                 const content = fs.readFileSync(absPath, 'utf8');
-                const guardSource = findFunctionInFile(content, action.guardName);
-                if (!guardSource) {
-                    return `Guard function "${action.guardName}" not found in ${action.filePath}. Use search_code to find where it's defined.`;
-                }
                 const { language } = readFileFromWorkspace(ctx.workspaceRoot, action.filePath);
                 const sinkLang = toSinkLanguage(language);
                 if (!sinkLang) {
                     return `Unsupported language for guard evaluation: ${language}`;
+                }
+
+                if (ACCESS_CONTROL_ATTACKS.has(action.attackType)) {
+                    const analysis = await analyzeRouteGuards(
+                        action.filePath, content, sinkLang, ctx.workspaceRoot,
+                    );
+                    let output = `Route guard analysis for ${action.filePath} (attack: ${action.attackType}):\n\n`;
+                    output += analysis.summary;
+
+                    const guardSource = findFunctionInFile(content, action.guardName);
+                    if (guardSource) {
+                        const result = await evaluateGuard(guardSource, action.guardName, action.attackType, sinkLang);
+                        const effectiveStr = result.effective ? 'EFFECTIVE' : 'NOT EFFECTIVE';
+                        output += `\n\nGuard "${action.guardName}" classification: ${result.guardType}, ${effectiveStr} against ${action.attackType}`;
+                        output += `\nReason: ${result.reason}`;
+                        if (result.bypassExample) {
+                            output += `\nBypass: ${result.bypassExample}`;
+                        }
+                    } else {
+                        output += `\n\nGuard function "${action.guardName}" not found in this file; it may be defined in an imported module.`;
+                    }
+                    return truncate(output);
+                }
+
+                const guardSource = findFunctionInFile(content, action.guardName);
+                if (!guardSource) {
+                    return `Guard function "${action.guardName}" not found in ${action.filePath}. Use search_code to find where it's defined.`;
                 }
                 const result = await evaluateGuard(guardSource, action.guardName, action.attackType, sinkLang);
                 const effectiveStr = result.effective ? 'EFFECTIVE' : 'NOT EFFECTIVE';
@@ -543,6 +590,10 @@ export async function executeAction(
 
         case 'run_tests': {
             try {
+                const tracker = opts?.refusalTracker;
+                if (tracker?.disabled) {
+                    return 'run_tests disabled for this scan after repeated safety refusals';
+                }
                 const a = action as any;
                 const req: RunTestsRequest = {
                     mode: a.mode,
@@ -554,7 +605,29 @@ export async function executeAction(
                     setupScript: a.setupScript,
                     timeoutMs: a.timeoutMs,
                 };
-                const result = await runTests(req, ctx.workspaceRoot);
+                const deepRunId = opts?.deepScanRunId;
+                let result: RunTestsResult;
+                if (deepRunId) {
+                    const { consumeSessionApproval, getSessionApproval } = await import('../approval/broker');
+                    const approvalState = getSessionApproval(deepRunId);
+                    if (approvalState.state === 'none') {
+                        result = await runTests(req, ctx.workspaceRoot);
+                    } else if (consumeSessionApproval(deepRunId)) {
+                        result = await runTests(req, ctx.workspaceRoot, { skipApproval: true });
+                    } else {
+                        return 'run_tests: deep scan approval exhausted or not granted — no sandbox runs remaining';
+                    }
+                } else {
+                    result = await runTests(req, ctx.workspaceRoot);
+                }
+                if (result.status === 'refused' && result.refusalRule && tracker) {
+                    const count = (tracker.counts.get(result.refusalRule) ?? 0) + 1;
+                    tracker.counts.set(result.refusalRule, count);
+                    if (count >= 2) {
+                        tracker.disabled = true;
+                    }
+                    return result.output;
+                }
                 const lines: string[] = [
                     `run_tests ${a.mode}: ${result.status}`,
                 ];
@@ -598,6 +671,7 @@ export async function executeFlowAction(
     runId: string,
     client: ApiClient,
     target: AgentScanTarget,
+    opts?: ExecuteActionOptions,
 ): Promise<FlowActionResult> {
     const empty: StructuredFlowResult = {
         status: 'inconclusive',
@@ -620,7 +694,7 @@ export async function executeFlowAction(
             const results = await trackTaint(content, sinkLang);
             if (results.length === 0) {
                 return {
-                    observation: `No taint flows found in ${action.filePath}.${TAINT_EMPTY_SUFFIX}`,
+                    observation: TAINT_EMPTY_MSG_SINGLE(action.filePath),
                     flowResult: {
                         status: 'refuted',
                         source: undefined,
@@ -640,10 +714,11 @@ export async function executeFlowAction(
             const source: FlowEndpoint = { filePath: action.filePath, symbol: first.source, line: first.sourceLine };
             const sink: FlowEndpoint = { filePath: action.filePath, symbol: first.sink, line: first.sinkLine };
             const formatted = results.map(r => {
+                const kindLabel = r.sourceKind !== 'request input' ? ` [${r.sourceKind}]` : '';
                 const path = r.propagationPath
                     .map(p => `  L${p.line} ${p.operation}: ${p.description}`)
                     .join('\n');
-                return `${r.source} (L${r.sourceLine}) → ${r.sink} (L${r.sinkLine}) [${r.canonicalType}]${r.isTainted ? ' TAINTED' : ' (sanitized)'}\n${path}`;
+                return `${r.source} (L${r.sourceLine})${kindLabel} → ${r.sink} (L${r.sinkLine}) [${r.canonicalType}]${r.isTainted ? ' TAINTED' : ' (sanitized)'}\n${path}`;
             }).join('\n\n');
             return {
                 observation: redact(formatted),
@@ -678,7 +753,7 @@ export async function executeFlowAction(
             });
             if (results.length === 0) {
                 return {
-                    observation: `No cross-file taint flows found starting from ${action.filePath}.${TAINT_EMPTY_SUFFIX}`,
+                    observation: TAINT_EMPTY_MSG_CROSS(action.filePath),
                     flowResult: {
                         status: 'refuted',
                         source: undefined,
@@ -728,7 +803,7 @@ export async function executeFlowAction(
     }
 
     return {
-        observation: await executeAction(action, ctx, runId, client, target),
+        observation: await executeAction(action, ctx, runId, client, target, opts),
         flowResult: empty,
     };
 }

@@ -19,7 +19,7 @@ import * as path from 'path';
 import { ApprovalBroker } from '../approval/broker';
 import { runLocalTest, runTestCommand, type LocalTestResult } from './localTestRunner';
 import { validateTestCommand, type ValidatedTestCommand, formatValidatedCommand } from './testCommandPolicy';
-import { checkTestSafety } from './testSafety';
+import { checkTestSafety, type TestSafetyResult } from './testSafety';
 
 const MAX_SCRIPT_SIZE = 64 * 1024;
 const MAX_SETUP_SCRIPT_SIZE = 32 * 1024;
@@ -27,6 +27,43 @@ const MAX_OUTPUT = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 const SAFE_RUNNERS = new Set(['node', 'tsx', 'bun', 'deno', 'python', 'python3']);
+
+const SAFETY_HINTS: Array<{ pattern: RegExp; hint: string }> = [
+    { pattern: /fetch\(\)|exfiltrate/i, hint: 'use sc.invoke from ./expressRunner.cjs' },
+    { pattern: /module "(?:http|https|http2|net|tls|dgram)"/i, hint: 'use sc.invoke from ./expressRunner.cjs' },
+    { pattern: /process\.env/i, hint: 'pass values explicitly with process.env.KEY = "value"' },
+    { pattern: /process\.cwd/i, hint: 'use __dirname or a fixed path' },
+    { pattern: /dynamic require/i, hint: 'use a static require("./module")' },
+    { pattern: /dynamic import/i, hint: 'use a static import' },
+    { pattern: /process\.exit/i, hint: 'use console.error + throw instead' },
+    { pattern: /eval|new Function|new AsyncFunction/i, hint: 'call the function directly instead' },
+    { pattern: /module "(?:fs|node:fs)"/i, hint: 'use sc.mock from ./expressRunner.cjs or inline data' },
+    { pattern: /module "(?:child_process|node:child_process)"/i, hint: 'run commands through the sandbox harness' },
+];
+
+function safetyHint(reason: string): string {
+    for (const { pattern, hint } of SAFETY_HINTS) {
+        if (pattern.test(reason)) return hint;
+    }
+    return 'review the safety rules and rewrite the script';
+}
+
+function safetyRuleKey(reason: string): string {
+    if (/fetch|http|https|net|tls|dgram/i.test(reason)) return 'network';
+    if (/process\.env/i.test(reason)) return 'process.env';
+    if (/process\.cwd/i.test(reason)) return 'process.cwd';
+    if (/dynamic require|dynamic import/i.test(reason)) return 'dynamic-import';
+    if (/eval|new Function|new AsyncFunction/i.test(reason)) return 'eval';
+    if (/process\.exit/i.test(reason)) return 'process.exit';
+    if (/module "(?:fs|node:fs)/i.test(reason)) return 'fs';
+    if (/module "(?:child_process)/i.test(reason)) return 'child_process';
+    return reason.slice(0, 40);
+}
+
+export function formatRefusalMessage(reason: string): string {
+    const hint = safetyHint(reason);
+    return `refused: ${reason}. Allowed instead: ${hint}`;
+}
 
 export type RunTestsMode = 'existing' | 'generated';
 
@@ -51,7 +88,8 @@ export type RunTestsStatus =
     | 'timeout'
     | 'blocked'
     | 'sandbox-unavailable'
-    | 'denied';
+    | 'denied'
+    | 'refused';
 
 export interface RunTestsResult {
     approved: boolean;
@@ -63,6 +101,7 @@ export interface RunTestsResult {
     backend?: string;
     command?: { executable: string; args: string[] };
     durationMs: number;
+    refusalRule?: string;
 }
 
 function sha256Prefix(s: string): string {
@@ -112,6 +151,7 @@ function mapVerdict(verdict: LocalTestResult['verdict']): RunTestsStatus {
 export interface ValidationFailure {
     ok: false;
     error: string;
+    refusalRule?: string;
 }
 
 export function validateRunTestsRequest(req: RunTestsRequest, workspaceRoot: string): { ok: true; command?: ValidatedTestCommand } | ValidationFailure {
@@ -146,12 +186,12 @@ export function validateRunTestsRequest(req: RunTestsRequest, workspaceRoot: str
 
     const safety = checkTestSafety(req.script, workspaceRoot);
     if (!safety.allowed) {
-        return { ok: false, error: `script blocked by safety check: ${safety.reason}` };
+        return { ok: false, error: `script blocked by safety check: ${safety.reason}`, refusalRule: safetyRuleKey(safety.reason) };
     }
     if (req.setupScript) {
         const setupSafety = checkTestSafety(req.setupScript, workspaceRoot);
         if (!setupSafety.allowed) {
-            return { ok: false, error: `setupScript blocked by safety check: ${setupSafety.reason}` };
+            return { ok: false, error: `setupScript blocked by safety check: ${setupSafety.reason}`, refusalRule: safetyRuleKey(setupSafety.reason) };
         }
     }
 
@@ -201,24 +241,68 @@ export async function runTests(
         sandboxBackend?: any;
         /** Skip approval — for agent executor internal use only when the broker is managed externally. */
         broker?: ApprovalBroker;
+        /** Skip the per-run approval entirely — used when a deep-scan session approval already covers this run. */
+        skipApproval?: boolean;
     },
 ): Promise<RunTestsResult> {
     const startTime = Date.now();
     const validation = validateRunTestsRequest(req, workspaceRoot);
     if (!validation.ok) {
+        const isSafetyRefusal = !!validation.refusalRule;
         return {
             approved: false,
             mode: req.mode,
-            status: 'denied',
+            status: isSafetyRefusal ? 'refused' : 'denied',
             exitCode: -1,
-            output: `Validation error: ${validation.error}`,
+            output: isSafetyRefusal
+                ? formatRefusalMessage(validation.error.replace('script blocked by safety check: ', '').replace('setupScript blocked by safety check: ', ''))
+                : `Validation error: ${validation.error}`,
             durationMs: Date.now() - startTime,
+            ...(validation.refusalRule ? { refusalRule: validation.refusalRule } : {}),
         };
     }
 
     const command = validation.command;
     const summary = buildApprovalSummary(req, command);
         const operationParts = buildOperationParts(req, command, workspaceRoot);
+
+    if (options?.skipApproval) {
+        let testResult: LocalTestResult;
+        if (req.mode === 'existing' && command) {
+            testResult = await runTestCommand(
+                command.executable,
+                command.args,
+                workspaceRoot,
+                {
+                    timeoutMs: command.timeoutMs,
+                    signal: options?.signal,
+                    sandboxBackend: options?.sandboxBackend,
+                },
+            );
+        } else {
+            testResult = await runLocalTest(
+                req.script!,
+                req.runner!,
+                workspaceRoot,
+                {
+                    setupScript: req.setupScript || null,
+                    timeoutMs: req.timeoutMs || DEFAULT_TIMEOUT_MS,
+                    signal: options?.signal,
+                    sandboxBackend: options?.sandboxBackend,
+                },
+            );
+        }
+        return {
+            approved: true,
+            mode: req.mode,
+            status: mapVerdict(testResult.verdict),
+            exitCode: testResult.exitCode,
+            output: truncateOutput(testResult.output),
+            backend: testResult.backend,
+            command: command ? { executable: command.executable, args: command.args } : undefined,
+            durationMs: Date.now() - startTime,
+        };
+    }
 
     const ownsBroker = !options?.broker;
     const broker = options?.broker ?? new ApprovalBroker();

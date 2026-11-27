@@ -191,4 +191,138 @@ describe('Guard Effectiveness Evaluator', () => {
         expect(result).toHaveProperty('effective');
         expect(result).toHaveProperty('reason');
     });
+
+    // ── Authorization-role guard ──────────────────────────────────────────
+
+    it('recognizes requireRole as authorization-role', async () => {
+        const guard = `function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  next();
+}`;
+        const result = await evaluateGuard(guard, 'requireAdmin', 'broken_access_control', 'javascript');
+        expect(result.guardType).toBe('authorization-role');
+        expect(result.effective).toBe(true);
+    });
+
+    it('authorization-role is effective against missing_authorization', async () => {
+        const guard = `function requireAdmin(req, res, next) {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  next();
+}`;
+        const result = await evaluateGuard(guard, 'requireAdmin', 'missing_authorization', 'javascript');
+        expect(result.guardType).toBe('authorization-role');
+        expect(result.effective).toBe(true);
+    });
+
+    it('authorization-role is NOT effective against idor', async () => {
+        const guard = `function requireAdmin(req, res, next) {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  next();
+}`;
+        const result = await evaluateGuard(guard, 'requireAdmin', 'idor', 'javascript');
+        expect(result.guardType).toBe('authorization-role');
+        expect(result.effective).toBe(false);
+    });
+
+    // ── Authorization-owner guard ──────────────────────────────────────────
+
+    it('recognizes ownership check as authorization-owner', async () => {
+        const guard = `function checkOwner(req, res, next) {
+  const order = getOrder(req.params.id);
+  if (order.customerId !== req.user.sub) return res.status(403).json({ error: 'Access denied' });
+  next();
+}`;
+        const result = await evaluateGuard(guard, 'checkOwner', 'idor', 'javascript');
+        expect(result.guardType).toBe('authorization-owner');
+        expect(result.effective).toBe(true);
+    });
+
+    it('authorization-owner is effective against broken_access_control', async () => {
+        const guard = `function checkOwner(req, res, next) {
+  if (order.customerId !== req.user.sub) return res.status(403).json({ error: 'Access denied' });
+  next();
+}`;
+        const result = await evaluateGuard(guard, 'checkOwner', 'broken_access_control', 'javascript');
+        expect(result.guardType).toBe('authorization-owner');
+        expect(result.effective).toBe(true);
+    });
+
+    // ── Authentication guard ──────────────────────────────────────────────
+
+    it('jwt.verify is classified as authentication (not just auth-jwt-verify) for auth_bypass', async () => {
+        const guard = `function authMiddleware(req, res, next) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Missing token' });
+  req.user = jwt.verify(token, SECRET, { algorithms: ['HS256'] });
+  next();
+}`;
+        const result = await evaluateGuard(guard, 'authMiddleware', 'auth_bypass', 'javascript');
+        expect(result.guardType).toBe('auth-jwt-verify');
+    });
+});
+
+import { analyzeRouteGuards } from '../src/project-map/guardEvaluator';
+
+describe('Route Guard Analysis', () => {
+
+    it('fixture 12 flawed: GET guarded, POST/PUT/DELETE unguarded', async () => {
+        const fs = require('fs');
+        const path = require('path');
+        const adminPath = path.resolve(__dirname, '../../test_lab/assurance-fixtures/12-missing-auth-post-route/flawed/src/admin.ts');
+        const adminSource = fs.readFileSync(adminPath, 'utf8');
+        const wsRoot = path.resolve(__dirname, '../../test_lab/assurance-fixtures/12-missing-auth-post-route/flawed');
+        const analysis = await analyzeRouteGuards('src/admin.ts', adminSource, 'javascript', wsRoot);
+        expect(analysis.routes.length).toBeGreaterThan(0);
+
+        const getConfig = analysis.routes.find(r => r.method === 'GET' && r.path === '/admin/config');
+        expect(getConfig).toBeDefined();
+        expect(getConfig!.hasAuthentication).toBe(true);
+
+        const postConfig = analysis.routes.find(r => r.method === 'POST' && r.path === '/admin/config');
+        expect(postConfig).toBeDefined();
+        expect(postConfig!.hasAuthentication).toBe(false);
+        expect(postConfig!.hasRoleCheck).toBe(false);
+
+        const putConfig = analysis.routes.find(r => r.method === 'PUT' && r.path?.includes('/admin/config'));
+        expect(putConfig).toBeDefined();
+        expect(putConfig!.hasAuthentication).toBe(false);
+
+        const deleteConfig = analysis.routes.find(r => r.method === 'DELETE' && r.path?.includes('/admin/config'));
+        expect(deleteConfig).toBeDefined();
+        expect(deleteConfig!.hasAuthentication).toBe(false);
+    });
+
+    it('fixture 12 fixed: all routes guarded via router.use', async () => {
+        const fs = require('fs');
+        const path = require('path');
+        const adminPath = path.resolve(__dirname, '../../test_lab/assurance-fixtures/12-missing-auth-post-route/fixed/src/admin.ts');
+        const adminSource = fs.readFileSync(adminPath, 'utf8');
+        const wsRoot = path.resolve(__dirname, '../../test_lab/assurance-fixtures/12-missing-auth-post-route/fixed');
+        const analysis = await analyzeRouteGuards('src/admin.ts', adminSource, 'javascript', wsRoot);
+
+        const adminRoutes = analysis.routes.filter(r => r.path?.startsWith('/admin'));
+        for (const r of adminRoutes) {
+            expect(r.hasAuthentication).toBe(true);
+        }
+    });
+
+    it('fixture 06: bulk-ship has requireRole (authorization-role), cancel has owner check in handler', async () => {
+        const fs = require('fs');
+        const path = require('path');
+        const ordersPath = path.resolve(__dirname, '../../test_lab/assurance-fixtures/06-bulk-ship-state-skip/flawed/src/orders.ts');
+        const ordersSource = fs.readFileSync(ordersPath, 'utf8');
+        const wsRoot = path.resolve(__dirname, '../../test_lab/assurance-fixtures/06-bulk-ship-state-skip/flawed');
+        const analysis = await analyzeRouteGuards('src/orders.ts', ordersSource, 'javascript', wsRoot);
+
+        const bulkShip = analysis.routes.find(r => r.path === '/orders/bulk-ship');
+        expect(bulkShip).toBeDefined();
+        expect(bulkShip!.hasAuthentication).toBe(true);
+        expect(bulkShip!.hasRoleCheck).toBe(true);
+
+        const cancel = analysis.routes.find(r => r.path === '/orders/:id/cancel');
+        expect(cancel).toBeDefined();
+        expect(cancel!.hasAuthentication).toBe(true);
+        expect(cancel!.hasOwnerCheck).toBe(true);
+        expect(cancel!.inHandlerGuards.some(g => g.guardType === 'authorization-owner')).toBe(true);
+    });
 });

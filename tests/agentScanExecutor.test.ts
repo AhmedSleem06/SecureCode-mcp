@@ -21,6 +21,7 @@ vi.mock('../src/project-map/taintTracker', () => ({
 
 vi.mock('../src/project-map/guardEvaluator', () => ({
     evaluateGuard: vi.fn(),
+    analyzeRouteGuards: vi.fn().mockResolvedValue({ routes: [], summary: 'No HTTP routes found in this file.' }),
 }));
 
 vi.mock('../src/utils/searchCode', () => ({
@@ -40,7 +41,7 @@ vi.mock('../src/api/client', async (importOriginal) => {
 
 import { executeAction, executeReadFileAction } from '../src/attack/agentScanExecutor';
 import { trackTaint } from '../src/project-map/taintTracker';
-import { evaluateGuard } from '../src/project-map/guardEvaluator';
+import { evaluateGuard, analyzeRouteGuards } from '../src/project-map/guardEvaluator';
 import { searchCode, formatSearchResult } from '../src/utils/searchCode';
 import { ApiClient } from '../src/api/client';
 
@@ -142,7 +143,7 @@ describe('executeAction — trace_flow', () => {
         fs.unlinkSync(tmpFile);
     });
 
-    it('returns "No taint flows found" when trackTaint returns empty', async () => {
+    it('returns honest empty message when trackTaint returns empty', async () => {
         (trackTaint as any).mockResolvedValue([]);
 
         const tmpFile = path.join(os.tmpdir(), 'test-trace-empty.ts');
@@ -153,7 +154,8 @@ describe('executeAction — trace_flow', () => {
             ctx, 'run-1', client, target,
         );
 
-        expect(result).toContain('No taint flows found');
+        expect(result).toContain('No flow from request input to a dangerous call was found in');
+        expect(result).toContain('not');
 
         fs.unlinkSync(tmpFile);
     });
@@ -162,27 +164,49 @@ describe('executeAction — trace_flow', () => {
 describe('executeAction — check_guard', () => {
     beforeEach(() => vi.clearAllMocks());
 
-    it('calls evaluateGuard and returns formatted result', async () => {
+    it('calls evaluateGuard and returns formatted result for injection attacks', async () => {
         (evaluateGuard as any).mockResolvedValue({
-            guardName: 'requireAuth',
-            guardType: 'auth-jwt-verify',
-            attackType: 'broken_access_control',
+            guardName: 'sanitize',
+            guardType: 'sanitizer-numeric',
+            attackType: 'sql_injection',
             effective: true,
-            reason: 'JWT verification prevents unauthenticated access',
+            reason: 'parseInt stops SQL injection',
         });
 
-        const guardCode = 'export async function requireAuth(req, res, next) { /* jwt verify */ next(); }';
+        const guardCode = 'export function sanitize(x) { return parseInt(x, 10); }';
         const tmpFile = path.join(os.tmpdir(), 'test-guard.ts');
         fs.writeFileSync(tmpFile, guardCode);
 
         const result = await executeAction(
-            { type: 'check_guard', filePath: 'test-guard.ts', guardName: 'requireAuth', attackType: 'broken_access_control', rationale: 'check' },
+            { type: 'check_guard', filePath: 'test-guard.ts', guardName: 'sanitize', attackType: 'sql_injection', rationale: 'check' },
             ctx, 'run-1', client, target,
         );
 
         expect(evaluateGuard).toHaveBeenCalled();
         expect(result).toContain('EFFECTIVE');
-        expect(result).toContain('requireAuth');
+        expect(result).toContain('sanitize');
+        expect(result).toContain('sql_injection');
+
+        fs.unlinkSync(tmpFile);
+    });
+
+    it('uses route analysis for access-control attacks', async () => {
+        (analyzeRouteGuards as any).mockResolvedValue({
+            routes: [{ method: 'GET', path: '/admin', middleware: [], inHandlerGuards: [], hasAuthentication: false, hasRoleCheck: false, hasOwnerCheck: false }],
+            summary: 'GET /admin: no authentication or authorization middleware applies',
+        });
+
+        const guardCode = 'export function requireAuth(req, res, next) { next(); }';
+        const tmpFile = path.join(os.tmpdir(), 'test-guard-ac.ts');
+        fs.writeFileSync(tmpFile, guardCode);
+
+        const result = await executeAction(
+            { type: 'check_guard', filePath: 'test-guard-ac.ts', guardName: 'requireAuth', attackType: 'broken_access_control', rationale: 'check' },
+            ctx, 'run-1', client, target,
+        );
+
+        expect(analyzeRouteGuards).toHaveBeenCalled();
+        expect(result).toContain('Route guard analysis');
         expect(result).toContain('broken_access_control');
 
         fs.unlinkSync(tmpFile);

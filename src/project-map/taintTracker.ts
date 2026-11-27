@@ -27,9 +27,11 @@ import { matchSanitizer } from './sanitizers';
 export interface PropagationStep {
     line: number;       // 1-indexed
     variable: string;
-    operation: 'source' | 'assign' | 'concat' | 'template' | 'call-pass' | 'sink-arg';
+    operation: 'source' | 'assign' | 'concat' | 'template' | 'call-pass' | 'sink-arg' | 'store-write' | 'store-read';
     description: string;
 }
+
+export type TaintSourceKind = 'request input' | 'stored input' | 'identity claim';
 
 export interface TaintResult {
     source: string;
@@ -39,6 +41,8 @@ export interface TaintResult {
     canonicalType: string;
     propagationPath: PropagationStep[];
     isTainted: boolean;
+    sourceKind: TaintSourceKind;
+    sourceDescription?: string;
 }
 
 interface TaintInfo {
@@ -46,12 +50,14 @@ interface TaintInfo {
     sourceLine: number;
     path: PropagationStep[];
     sanitizersApplied: string[];
+    sourceKind: TaintSourceKind;
 }
 
 // ── Scope ───────────────────────────────────────────────────────────────────
 
 interface Scope {
     tainted: Map<string, TaintInfo>;
+    allTaints: Map<string, TaintInfo[]>;
     parent: Scope | null;
 }
 
@@ -62,6 +68,17 @@ function scopeGet(scope: Scope, name: string): TaintInfo | undefined {
         s = s.parent;
     }
     return undefined;
+}
+
+function scopeGetAll(scope: Scope, name: string): TaintInfo[] {
+    let s: Scope | null = scope;
+    while (s) {
+        const all = s.allTaints.get(name);
+        if (all && all.length > 0) return all;
+        if (s.tainted.has(name)) return [s.tainted.get(name)!];
+        s = s.parent;
+    }
+    return [];
 }
 
 // ── Node type sets ──────────────────────────────────────────────────────────
@@ -87,6 +104,17 @@ const STATEMENT_TYPES = new Set([
     'decorated_definition',
 ]);
 
+// ── Identity claim detection ────────────────────────────────────────────
+
+const IDENTITY_PREFIXES = [
+    'req.user.', 'req.auth.', 'request.user.', 'request.auth.',
+    'ctx.state.user.', 'req.user[', 'req.auth[', 'request.user[', 'request.auth[',
+];
+
+function isIdentityClaim(text: string): boolean {
+    return IDENTITY_PREFIXES.some(p => text.startsWith(p));
+}
+
 // ── Source detection ────────────────────────────────────────────────────────
 
 /**
@@ -94,10 +122,13 @@ const STATEMENT_TYPES = new Set([
  * if it is, null otherwise. Checks the text of the node against source
  * patterns (req.body, request.GET, etc.).
  */
-function detectSource(node: TreeSitterNode, sourceText: string, language: SinkLanguage): string | null {
+function detectSource(node: TreeSitterNode, sourceText: string, language: SinkLanguage): { text: string; kind: TaintSourceKind } | null {
     const text = sourceText.slice(node.startIndex, node.endIndex);
+    if (isIdentityClaim(text)) {
+        return { text, kind: 'identity claim' };
+    }
     const match = matchTaintSource(text, language);
-    return match ? text : null;
+    return match ? { text, kind: 'request input' } : null;
 }
 
 // ── Expression taint checking ───────────────────────────────────────────────
@@ -112,21 +143,29 @@ function checkExpressionTaint(
     sourceText: string,
     language: SinkLanguage,
     taintReturningFns: Set<string>,
+    stores?: ModuleStores,
 ): TaintInfo | null {
     // 1. Check if the node text is a source
-    const srcText = detectSource(node, sourceText, language);
-    if (srcText) {
+    const srcMatch = detectSource(node, sourceText, language);
+    if (srcMatch) {
         return {
-            source: srcText,
+            source: srcMatch.text,
             sourceLine: node.startPosition.row + 1,
             path: [{
                 line: node.startPosition.row + 1,
-                variable: srcText,
+                variable: srcMatch.text,
                 operation: 'source',
-                description: `Source: ${srcText}`,
+                description: `Source: ${srcMatch.text}`,
             }],
             sanitizersApplied: [],
+            sourceKind: srcMatch.kind,
         };
+    }
+
+    // 1b. Check store reads
+    if (stores) {
+        const storeRead = checkStoreReadTaint(node, sourceText, stores);
+        if (storeRead) return storeRead;
     }
 
     // 2. Identifier — check if it's in the tainted set
@@ -147,8 +186,9 @@ function checkExpressionTaint(
             const funcText = p.receiverText
                 ? `${p.receiverText}.${p.method}`
                 : p.method;
-            const srcMatch = matchTaintSource(funcText, language);
-            if (srcMatch) {
+            const funcSrcMatch = matchTaintSource(funcText, language);
+            const funcIdentity = isIdentityClaim(funcText);
+            if (funcSrcMatch || funcIdentity) {
                 return {
                     source: funcText,
                     sourceLine: node.startPosition.row + 1,
@@ -159,6 +199,7 @@ function checkExpressionTaint(
                         description: `Source: ${funcText}`,
                     }],
                     sanitizersApplied: [],
+                    sourceKind: funcIdentity ? 'identity claim' : 'request input',
                 };
             }
 
@@ -167,7 +208,7 @@ function checkExpressionTaint(
             if (taintReturningFns.has(fnName)) {
                 // Find the tainted argument to carry the source info
                 for (const arg of p.args) {
-                    const argTaint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
+                    const argTaint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns, stores);
                     if (argTaint) {
                         return {
                             ...argTaint,
@@ -191,6 +232,7 @@ function checkExpressionTaint(
                         description: `${fnName}() returns tainted data`,
                     }],
                     sanitizersApplied: [],
+                    sourceKind: 'request input',
                 };
             }
 
@@ -199,7 +241,7 @@ function checkExpressionTaint(
             // Catches passthrough wrappers like SQLAlchemy text(),
             // base64.b64decode(), str(), etc.
             for (const arg of p.args) {
-                const argTaint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
+                const argTaint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns, stores);
                 if (argTaint) {
                     return {
                         ...argTaint,
@@ -220,7 +262,7 @@ function checkExpressionTaint(
             if (func && (func.type === 'member_expression' || func.type === 'attribute')) {
                 const obj = func.child(0);
                 if (obj) {
-                    const objTaint = checkExpressionTaint(obj, scope, sourceText, language, taintReturningFns);
+                    const objTaint = checkExpressionTaint(obj, scope, sourceText, language, taintReturningFns, stores);
                     if (objTaint) {
                         return {
                             ...objTaint,
@@ -243,7 +285,7 @@ function checkExpressionTaint(
         || node.type === 'binary_operator') {
         const left = node.child(0);
         const right = node.child(node.childCount - 1);
-        const leftTaint = left ? checkExpressionTaint(left, scope, sourceText, language, taintReturningFns) : null;
+        const leftTaint = left ? checkExpressionTaint(left, scope, sourceText, language, taintReturningFns, stores) : null;
         if (leftTaint) {
             return {
                 ...leftTaint,
@@ -255,7 +297,7 @@ function checkExpressionTaint(
                 }],
             };
         }
-        const rightTaint = right ? checkExpressionTaint(right, scope, sourceText, language, taintReturningFns) : null;
+        const rightTaint = right ? checkExpressionTaint(right, scope, sourceText, language, taintReturningFns, stores) : null;
         if (rightTaint) {
             return {
                 ...rightTaint,
@@ -276,7 +318,7 @@ function checkExpressionTaint(
             if (child.type === 'template_substitution' || child.type === 'template_expr') {
                 const expr = child.namedChildren[0];
                 if (expr) {
-                    const taint = checkExpressionTaint(expr, scope, sourceText, language, taintReturningFns);
+                    const taint = checkExpressionTaint(expr, scope, sourceText, language, taintReturningFns, stores);
                     if (taint) {
                         return {
                             ...taint,
@@ -298,7 +340,7 @@ function checkExpressionTaint(
     if (node.type === 'member_expression' || node.type === 'attribute') {
         const obj = node.child(0);
         if (obj) {
-            return checkExpressionTaint(obj, scope, sourceText, language, taintReturningFns);
+            return checkExpressionTaint(obj, scope, sourceText, language, taintReturningFns, stores);
         }
     }
 
@@ -306,7 +348,7 @@ function checkExpressionTaint(
     if (node.type === 'subscript_expression' || node.type === 'subscript') {
         const obj = node.child(0);
         if (obj) {
-            return checkExpressionTaint(obj, scope, sourceText, language, taintReturningFns);
+            return checkExpressionTaint(obj, scope, sourceText, language, taintReturningFns, stores);
         }
     }
 
@@ -316,7 +358,7 @@ function checkExpressionTaint(
         || node.type === 'as_expression') {
         const inner = node.namedChildren[0];
         if (inner) {
-            return checkExpressionTaint(inner, scope, sourceText, language, taintReturningFns);
+            return checkExpressionTaint(inner, scope, sourceText, language, taintReturningFns, stores);
         }
     }
 
@@ -324,11 +366,148 @@ function checkExpressionTaint(
     if (node.type === 'augmented_assignment') {
         const right = node.child(node.childCount - 1);
         if (right) {
-            return checkExpressionTaint(right, scope, sourceText, language, taintReturningFns);
+            return checkExpressionTaint(right, scope, sourceText, language, taintReturningFns, stores);
+        }
+    }
+
+    // 10. Object literal — if any property value is tainted, the object is tainted
+    if (node.type === 'object' || node.type === 'object_expression') {
+        for (const child of node.namedChildren) {
+            if (child.type === 'pair' || child.type === 'property') {
+                const val = child.namedChildren[child.namedChildren.length - 1];
+                if (val) {
+                    const taint = checkExpressionTaint(val, scope, sourceText, language, taintReturningFns, stores);
+                    if (taint) return taint;
+                }
+            }
+            if (child.type === 'shorthand_property_identifier' || child.type === 'shorthand_property_identifier_pattern') {
+                const name = sourceText.slice(child.startIndex, child.endIndex);
+                const taint = scopeGet(scope, name);
+                if (taint) return taint;
+            }
+            if (child.type === 'spread_element') {
+                const inner = child.namedChildren[0];
+                if (inner) {
+                    const taint = checkExpressionTaint(inner, scope, sourceText, language, taintReturningFns, stores);
+                    if (taint) return taint;
+                }
+            }
+        }
+    }
+
+    // 11. Array literal — if any element is tainted, the array is tainted
+    if (node.type === 'array' || node.type === 'array_expression') {
+        for (const child of node.namedChildren) {
+            const taint = checkExpressionTaint(child, scope, sourceText, language, taintReturningFns, stores);
+            if (taint) return taint;
+        }
+    }
+
+    // 12. Conditional (ternary) expression — if either branch is tainted, result is tainted
+    if (node.type === 'ternary_expression' || node.type === 'conditional_expression') {
+        const children = node.namedChildren;
+        if (children.length >= 3) {
+            const thenTaint = checkExpressionTaint(children[1], scope, sourceText, language, taintReturningFns, stores);
+            if (thenTaint) return thenTaint;
+            const elseTaint = checkExpressionTaint(children[2], scope, sourceText, language, taintReturningFns, stores);
+            if (elseTaint) return elseTaint;
         }
     }
 
     return null;
+}
+
+// ── Multi-taint collection ─────────────────────────────────────────────
+
+function collectAllTaints(
+    node: TreeSitterNode,
+    scope: Scope,
+    sourceText: string,
+    language: SinkLanguage,
+    taintReturningFns: Set<string>,
+    stores?: ModuleStores,
+): TaintInfo[] {
+    const results: TaintInfo[] = [];
+    const seen = new Set<string>();
+
+    const collect = (n: TreeSitterNode): void => {
+        if (n.type === 'binary_expression' || n.type === 'binary_operator_expression'
+            || n.type === 'binary_operator') {
+            const left = n.child(0);
+            const right = n.child(n.childCount - 1);
+            if (left) collect(left);
+            if (right) collect(right);
+            return;
+        }
+        if (n.type === 'template_literal' || n.type === 'template_string') {
+            for (const child of n.namedChildren) {
+                if (child.type === 'template_substitution' || child.type === 'template_expr') {
+                    const expr = child.namedChildren[0];
+                    if (expr) collect(expr);
+                }
+            }
+            return;
+        }
+        const taint = checkExpressionTaint(n, scope, sourceText, language, taintReturningFns, stores);
+        if (taint) {
+            const key = `${taint.source}:${taint.sourceLine}:${taint.sourceKind}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                results.push(taint);
+            }
+        }
+    };
+
+    collect(node);
+    if (results.length === 0) {
+        const single = checkExpressionTaint(node, scope, sourceText, language, taintReturningFns, stores);
+        if (single) results.push(single);
+    }
+    return results;
+}
+
+
+function emitSinkResults(
+    sinkMatch: { def: SinkDefinition; args: TreeSitterNode[]; line: number },
+    scope: Scope,
+    sourceText: string,
+    language: SinkLanguage,
+    taintReturningFns: Set<string>,
+    onSink: (result: TaintResult) => void,
+    stores?: ModuleStores,
+): void {
+    for (const arg of sinkMatch.args) {
+        const taints = collectAllTaints(arg, scope, sourceText, language, taintReturningFns, stores);
+        if (taints.length <= 1 && isIdentifier(arg)) {
+            const name = sourceText.slice(arg.startIndex, arg.endIndex);
+            const all = scopeGetAll(scope, name);
+            if (all.length > taints.length) {
+                for (const t of all) {
+                    const key = `${t.source}:${t.sourceLine}:${t.sourceKind}`;
+                    if (!taints.some(x => `${x.source}:${x.sourceLine}:${x.sourceKind}` === key)) {
+                        taints.push(t);
+                    }
+                }
+            }
+        }
+        for (const taint of taints) {
+            onSink({
+                source: taint.source,
+                sourceLine: taint.sourceLine,
+                sink: sinkMatch.def.id,
+                sinkLine: sinkMatch.line + 1,
+                canonicalType: sinkMatch.def.canonicalType,
+                propagationPath: [...taint.path, {
+                    line: sinkMatch.line + 1,
+                    variable: sourceText.slice(arg.startIndex, arg.endIndex),
+                    operation: 'sink-arg',
+                    description: `${sinkMatch.def.id}(${sourceText.slice(arg.startIndex, arg.endIndex)})`,
+                }],
+                isTainted: true,
+                sourceKind: taint.sourceKind || 'request input',
+            });
+        }
+    }
 }
 
 // ── Sink matching ──────────────────────────────────────────────────────────
@@ -374,6 +553,198 @@ function matchSink(
     return null;
 }
 
+// ── Stored-data tracking ────────────────────────────────────────────────
+
+interface StoreTaintEntry {
+    storeName: string;
+    writeLine: number;
+    writeContext: string;
+    sourceTaint: TaintInfo;
+}
+
+interface ModuleStores {
+    taintedStores: Map<string, StoreTaintEntry>;
+}
+
+function makeStoreReadTaint(entry: StoreTaintEntry, readLine: number, readExpr: string): TaintInfo {
+    return {
+        source: entry.sourceTaint.source,
+        sourceLine: entry.sourceTaint.sourceLine,
+        path: [
+            ...entry.sourceTaint.path,
+            {
+                line: entry.writeLine,
+                variable: entry.storeName,
+                operation: 'store-write' as const,
+                description: `Stored into ${entry.storeName} (${entry.writeContext})`,
+            },
+            {
+                line: readLine,
+                variable: readExpr,
+                operation: 'store-read' as const,
+                description: `Read from ${entry.storeName}`,
+            },
+        ],
+        sanitizersApplied: [],
+        sourceKind: 'stored input',
+    };
+}
+
+const STORE_WRITE_METHODS = new Set(['set', 'push', 'unshift', 'add']);
+const STORE_READ_METHODS = new Set(['get', 'values', 'entries', 'keys', 'forEach', 'map', 'filter', 'find', 'some', 'every', 'reduce', 'flatMap']);
+
+function detectStoreWrite(
+    node: TreeSitterNode,
+    scope: Scope,
+    sourceText: string,
+    language: SinkLanguage,
+    taintReturningFns: Set<string>,
+    stores: ModuleStores,
+    fnContext: string,
+): void {
+    if (node.type === 'assignment_expression' || node.type === 'assignment'
+        || node.type === 'augmented_assignment') {
+        const lhs = node.child(0);
+        const rhs = node.child(node.childCount - 1);
+        if (!lhs || !rhs || lhs === rhs) return;
+
+        if (lhs.type === 'subscript_expression' || lhs.type === 'subscript') {
+            const obj = lhs.child(0);
+            if (obj && isIdentifier(obj)) {
+                const storeName = sourceText.slice(obj.startIndex, obj.endIndex);
+                const taint = checkExpressionTaint(rhs, scope, sourceText, language, taintReturningFns, stores);
+                if (taint) {
+                    stores.taintedStores.set(storeName, {
+                        storeName,
+                        writeLine: node.startPosition.row + 1,
+                        writeContext: fnContext,
+                        sourceTaint: taint,
+                    });
+                }
+            }
+        }
+
+        if (lhs.type === 'member_expression' || lhs.type === 'attribute') {
+            const obj = lhs.child(0);
+            if (obj && isIdentifier(obj)) {
+                const storeName = sourceText.slice(obj.startIndex, obj.endIndex);
+                const taint = checkExpressionTaint(rhs, scope, sourceText, language, taintReturningFns, stores);
+                if (taint) {
+                    stores.taintedStores.set(storeName, {
+                        storeName,
+                        writeLine: node.startPosition.row + 1,
+                        writeContext: fnContext,
+                        sourceTaint: taint,
+                    });
+                }
+            }
+        }
+    }
+
+    if (CALL_NODE_TYPES.has(node.type)) {
+        const p = callParts(node, sourceText);
+        if (!p || !p.receiver) return;
+        if (STORE_WRITE_METHODS.has(p.method)) {
+            for (const arg of p.args) {
+                const taint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns, stores);
+                if (taint) {
+                    stores.taintedStores.set(p.receiver, {
+                        storeName: p.receiver,
+                        writeLine: node.startPosition.row + 1,
+                        writeContext: fnContext,
+                        sourceTaint: taint,
+                    });
+                    return;
+                }
+            }
+            if (p.method === 'set' && p.args.length >= 2) {
+                const valArg = p.args[p.args.length - 1];
+                const valText = sourceText.slice(valArg.startIndex, valArg.endIndex);
+                const valTaint = scopeGet(scope, valText);
+                if (valTaint) {
+                    stores.taintedStores.set(p.receiver, {
+                        storeName: p.receiver,
+                        writeLine: node.startPosition.row + 1,
+                        writeContext: fnContext,
+                        sourceTaint: valTaint,
+                    });
+                    return;
+                }
+                for (const child of walk(valArg)) {
+                    if (isIdentifier(child)) {
+                        const name = sourceText.slice(child.startIndex, child.endIndex);
+                        const childTaint = scopeGet(scope, name);
+                        if (childTaint) {
+                            stores.taintedStores.set(p.receiver, {
+                                storeName: p.receiver,
+                                writeLine: node.startPosition.row + 1,
+                                writeContext: fnContext,
+                                sourceTaint: childTaint,
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+function checkStoreReadTaint(
+    node: TreeSitterNode,
+    sourceText: string,
+    stores: ModuleStores,
+): TaintInfo | null {
+    if (CALL_NODE_TYPES.has(node.type)) {
+        const p = callParts(node, sourceText);
+        if (p && p.receiver && STORE_READ_METHODS.has(p.method)) {
+            const entry = stores.taintedStores.get(p.receiver);
+            if (entry) {
+                return makeStoreReadTaint(entry, node.startPosition.row + 1, sourceText.slice(node.startIndex, node.endIndex));
+            }
+        }
+    }
+
+    if (node.type === 'member_expression' || node.type === 'attribute') {
+        const obj = node.child(0);
+        if (obj) {
+            if (isIdentifier(obj)) {
+                const name = sourceText.slice(obj.startIndex, obj.endIndex);
+                const entry = stores.taintedStores.get(name);
+                if (entry) {
+                    const prop = node.child(node.childCount - 1);
+                    const propText = prop ? sourceText.slice(prop.startIndex, prop.endIndex) : '';
+                    if (!STORE_READ_METHODS.has(propText) && !STORE_WRITE_METHODS.has(propText) && propText !== 'length' && propText !== 'size') {
+                        return makeStoreReadTaint(entry, node.startPosition.row + 1, sourceText.slice(node.startIndex, node.endIndex));
+                    }
+                }
+            }
+            if (CALL_NODE_TYPES.has(obj.type)) {
+                const p = callParts(obj, sourceText);
+                if (p && p.receiver && STORE_READ_METHODS.has(p.method)) {
+                    const entry = stores.taintedStores.get(p.receiver);
+                    if (entry) {
+                        return makeStoreReadTaint(entry, node.startPosition.row + 1, sourceText.slice(node.startIndex, node.endIndex));
+                    }
+                }
+            }
+        }
+    }
+
+    if (node.type === 'subscript_expression' || node.type === 'subscript') {
+        const obj = node.child(0);
+        if (obj && isIdentifier(obj)) {
+            const name = sourceText.slice(obj.startIndex, obj.endIndex);
+            const entry = stores.taintedStores.get(name);
+            if (entry) {
+                return makeStoreReadTaint(entry, node.startPosition.row + 1, sourceText.slice(node.startIndex, node.endIndex));
+            }
+        }
+    }
+
+    return null;
+}
+
 // ── Statement processing ───────────────────────────────────────────────────
 
 /** Extract variable names from a destructuring pattern (object/array). */
@@ -406,6 +777,7 @@ function processDeclarator(
     language: SinkLanguage,
     taintReturningFns: Set<string>,
     onSink?: (result: TaintResult) => void,
+    stores?: ModuleStores,
 ): void {
     const lhs = decl.child(0);
     const rhs = decl.child(decl.childCount - 1);
@@ -424,32 +796,16 @@ function processDeclarator(
         }
         if (sinkCheckNode && CALL_NODE_TYPES.has(sinkCheckNode.type)) {
             const sinkMatch = matchSink(sinkCheckNode, sourceText, language);
-            if (sinkMatch) {
-                for (const arg of sinkMatch.args) {
-                    const taint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
-                    if (taint) {
-                        onSink({
-                            source: taint.source,
-                            sourceLine: taint.sourceLine,
-                            sink: sinkMatch.def.id,
-                            sinkLine: sinkMatch.line + 1,
-                            canonicalType: sinkMatch.def.canonicalType,
-                            propagationPath: [...taint.path, {
-                                line: sinkMatch.line + 1,
-                                variable: sourceText.slice(arg.startIndex, arg.endIndex),
-                                operation: 'sink-arg',
-                                description: `${sinkMatch.def.id}(${sourceText.slice(arg.startIndex, arg.endIndex)})`,
-                            }],
-                            isTainted: true,
-                        });
-                    }
-                }
+            if (sinkMatch && onSink) {
+                emitSinkResults(sinkMatch, scope, sourceText, language, taintReturningFns, onSink, stores);
             }
         }
     }
 
-    const taint = checkExpressionTaint(rhs, scope, sourceText, language, taintReturningFns);
+    const taint = checkExpressionTaint(rhs, scope, sourceText, language, taintReturningFns, stores);
     if (!taint) return;
+
+    const allRhsTaints = collectAllTaints(rhs, scope, sourceText, language, taintReturningFns, stores);
 
     if (isIdentifier(lhs) || lhs.type === 'identifier') {
         const name = sourceText.slice(lhs.startIndex, lhs.endIndex);
@@ -462,6 +818,17 @@ function processDeclarator(
                 description: `${name} = ${sourceText.slice(rhs.startIndex, rhs.endIndex)}`,
             }],
         });
+        if (allRhsTaints.length > 1) {
+            scope.allTaints.set(name, allRhsTaints.map(t => ({
+                ...t,
+                path: [...t.path, {
+                    line: decl.startPosition.row + 1,
+                    variable: name,
+                    operation: 'assign' as const,
+                    description: `${name} = ${sourceText.slice(rhs.startIndex, rhs.endIndex)}`,
+                }],
+            })));
+        }
     } else if (lhs.type === 'object_pattern' || lhs.type === 'array_pattern'
         || lhs.type === 'object' || lhs.type === 'list_pattern') {
         for (const name of patternNames(lhs, sourceText)) {
@@ -490,6 +857,8 @@ function processExpression(
     language: SinkLanguage,
     taintReturningFns: Set<string>,
     onSink: (result: TaintResult) => void,
+    stores?: ModuleStores,
+    fnContext?: string,
 ): void {
     // Assignment: x = expr or x += expr
     if (node.type === 'assignment_expression' || node.type === 'assignment'
@@ -502,29 +871,11 @@ function processExpression(
         if (CALL_NODE_TYPES.has(rhs.type)) {
             const sinkMatch = matchSink(rhs, sourceText, language);
             if (sinkMatch) {
-                for (const arg of sinkMatch.args) {
-                    const taint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
-                    if (taint) {
-                        onSink({
-                            source: taint.source,
-                            sourceLine: taint.sourceLine,
-                            sink: sinkMatch.def.id,
-                            sinkLine: sinkMatch.line + 1,
-                            canonicalType: sinkMatch.def.canonicalType,
-                            propagationPath: [...taint.path, {
-                                line: sinkMatch.line + 1,
-                                variable: sourceText.slice(arg.startIndex, arg.endIndex),
-                                operation: 'sink-arg',
-                                description: `${sinkMatch.def.id}(${sourceText.slice(arg.startIndex, arg.endIndex)})`,
-                            }],
-                            isTainted: true,
-                        });
-                    }
-                }
+                emitSinkResults(sinkMatch, scope, sourceText, language, taintReturningFns, onSink, stores);
             }
         }
 
-        const taint = checkExpressionTaint(rhs, scope, sourceText, language, taintReturningFns);
+        const taint = checkExpressionTaint(rhs, scope, sourceText, language, taintReturningFns, stores);
 
         // Check for member-assignment sinks (el.innerHTML = tainted)
         if (taint && lhs.type === 'member_expression') {
@@ -549,6 +900,7 @@ function processExpression(
                                     description: `${def.id} = ${sourceText.slice(rhs.startIndex, rhs.endIndex)}`,
                                 }],
                                 isTainted: true,
+                            sourceKind: taint.sourceKind || 'request input',
                             });
                         }
                     }
@@ -567,7 +919,20 @@ function processExpression(
                     description: `${name} = ${sourceText.slice(rhs.startIndex, rhs.endIndex)}`,
                 }],
             });
+            const allRhsTaints = collectAllTaints(rhs, scope, sourceText, language, taintReturningFns, stores);
+            if (allRhsTaints.length > 1) {
+                scope.allTaints.set(name, allRhsTaints.map(t => ({
+                    ...t,
+                    path: [...t.path, {
+                        line: node.startPosition.row + 1,
+                        variable: name,
+                        operation: 'assign' as const,
+                        description: `${name} = ${sourceText.slice(rhs.startIndex, rhs.endIndex)}`,
+                    }],
+                })));
+            }
         }
+        if (stores) detectStoreWrite(node, scope, sourceText, language, taintReturningFns, stores, fnContext || 'module');
         return;
     }
 
@@ -588,26 +953,12 @@ function processExpression(
     for (const callNode of sinkCalls) {
     const sinkMatch = matchSink(callNode, sourceText, language);
     if (sinkMatch) {
-        for (const arg of sinkMatch.args) {
-            const taint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
-            if (taint) {
-                onSink({
-                    source: taint.source,
-                    sourceLine: taint.sourceLine,
-                    sink: sinkMatch.def.id,
-                    sinkLine: sinkMatch.line + 1,
-                    canonicalType: sinkMatch.def.canonicalType,
-                    propagationPath: [...taint.path, {
-                        line: sinkMatch.line + 1,
-                        variable: sourceText.slice(arg.startIndex, arg.endIndex),
-                        operation: 'sink-arg',
-                        description: `${sinkMatch.def.id}(${sourceText.slice(arg.startIndex, arg.endIndex)})`,
-                    }],
-                    isTainted: true,
-                });
-            }
-        }
+        emitSinkResults(sinkMatch, scope, sourceText, language, taintReturningFns, onSink, stores);
     }
+    }
+
+    if (stores && CALL_NODE_TYPES.has(node.type)) {
+        detectStoreWrite(node, scope, sourceText, language, taintReturningFns, stores, fnContext || 'module');
     }
 
     // Recurse into arrow/function callbacks passed as call arguments.
@@ -621,8 +972,8 @@ function processExpression(
             if (FUNCTION_NODE_TYPES.has(child.type)) {
                 const body = functionBody(child);
                 if (body) {
-                    const childScope: Scope = { tainted: new Map(), parent: scope };
-                    processScope(body, childScope, sourceText, language, taintReturningFns, onSink, () => {});
+                    const childScope: Scope = { tainted: new Map(), allTaints: new Map(), parent: scope };
+                    processScope(body, childScope, sourceText, language, taintReturningFns, onSink, () => {}, stores);
                 }
             }
         }
@@ -661,6 +1012,8 @@ function processScope(
     taintReturningFns: Set<string>,
     onSink: (result: TaintResult) => void,
     onReturn: (taint: TaintInfo | null) => void,
+    stores?: ModuleStores,
+    fnContext?: string,
 ): void {
     for (const stmt of bodyNode.namedChildren) {
         // Variable declaration
@@ -676,12 +1029,12 @@ function processScope(
                         );
                         const body = functionBody(rhs);
                         if (body) {
-                            const childScope: Scope = { tainted: new Map(), parent: scope };
-                            processScope(body, childScope, sourceText, language, taintReturningFns, onSink, onReturn);
+                            const childScope: Scope = { tainted: new Map(), allTaints: new Map(), parent: scope };
+                            processScope(body, childScope, sourceText, language, taintReturningFns, onSink, onReturn, stores, fnName);
                         }
                         continue;
                     }
-                    processDeclarator(decl, scope, sourceText, language, taintReturningFns, onSink);
+                    processDeclarator(decl, scope, sourceText, language, taintReturningFns, onSink, stores);
                 }
             }
             continue;
@@ -690,13 +1043,13 @@ function processScope(
         // Expression statement
         if (stmt.type === 'expression_statement') {
             const expr = stmt.namedChildren[0];
-            if (expr) processExpression(expr, scope, sourceText, language, taintReturningFns, onSink);
+            if (expr) processExpression(expr, scope, sourceText, language, taintReturningFns, onSink, stores, fnContext);
             continue;
         }
 
         // Python assignment (not inside expression_statement)
         if (stmt.type === 'assignment' || stmt.type === 'augmented_assignment') {
-            processExpression(stmt, scope, sourceText, language, taintReturningFns, onSink);
+            processExpression(stmt, scope, sourceText, language, taintReturningFns, onSink, stores, fnContext);
             continue;
         }
 
@@ -709,29 +1062,11 @@ function processScope(
                     if (CALL_NODE_TYPES.has(node.type)) {
                         const sinkMatch = matchSink(node, sourceText, language);
                         if (sinkMatch) {
-                            for (const arg of sinkMatch.args) {
-                                const taint = checkExpressionTaint(arg, scope, sourceText, language, taintReturningFns);
-                                if (taint) {
-                                    onSink({
-                                        source: taint.source,
-                                        sourceLine: taint.sourceLine,
-                                        sink: sinkMatch.def.id,
-                                        sinkLine: sinkMatch.line + 1,
-                                        canonicalType: sinkMatch.def.canonicalType,
-                                        propagationPath: [...taint.path, {
-                                            line: sinkMatch.line + 1,
-                                            variable: sourceText.slice(arg.startIndex, arg.endIndex),
-                                            operation: 'sink-arg',
-                                            description: `${sinkMatch.def.id}(${sourceText.slice(arg.startIndex, arg.endIndex)})`,
-                                        }],
-                                        isTainted: true,
-                                    });
-                                }
-                            }
+                            emitSinkResults(sinkMatch, scope, sourceText, language, taintReturningFns, onSink, stores);
                         }
                     }
                 }
-                const taint = checkExpressionTaint(expr, scope, sourceText, language, taintReturningFns);
+                const taint = checkExpressionTaint(expr, scope, sourceText, language, taintReturningFns, stores);
                 onReturn(taint);
             } else {
                 onReturn(null);
@@ -743,8 +1078,8 @@ function processScope(
         if (FUNCTION_NODE_TYPES.has(stmt.type)) {
             const body = functionBody(stmt);
             if (body) {
-                const childScope: Scope = { tainted: new Map(), parent: scope };
-                processScope(body, childScope, sourceText, language, taintReturningFns, onSink, onReturn);
+                const childScope: Scope = { tainted: new Map(), allTaints: new Map(), parent: scope };
+                processScope(body, childScope, sourceText, language, taintReturningFns, onSink, onReturn, stores, functionName(stmt, sourceText) || fnContext);
             }
             continue;
         }
@@ -753,11 +1088,60 @@ function processScope(
         if (stmt.type === 'export_statement') {
             for (const child of stmt.namedChildren) {
                 if (STATEMENT_TYPES.has(child.type)) {
-                    // Recursively process the exported declaration
-                    processScope({ namedChildren: [child] } as any, scope, sourceText, language, taintReturningFns, onSink, onReturn);
+                    processScope({ namedChildren: [child] } as any, scope, sourceText, language, taintReturningFns, onSink, onReturn, stores, fnContext);
                 }
             }
             continue;
+        }
+
+        // for..of / for..in iteration — taint loop variable from store
+        if ((stmt.type === 'for_in_statement' || stmt.type === 'for_each_statement') && stores) {
+            const children = stmt.namedChildren;
+            if (children.length >= 2) {
+                const iterVar = children[0];
+                const iterExpr = children[1];
+                if (iterExpr) {
+                    let exprTaint: TaintInfo | null = null;
+                    const storeRead = checkStoreReadTaint(iterExpr, sourceText, stores);
+                    if (storeRead) {
+                        exprTaint = storeRead;
+                    } else if (isIdentifier(iterExpr)) {
+                        const iterName = sourceText.slice(iterExpr.startIndex, iterExpr.endIndex);
+                        const storeEntry = stores.taintedStores.get(iterName);
+                        if (storeEntry) {
+                            exprTaint = makeStoreReadTaint(storeEntry, iterExpr.startPosition.row + 1, iterName);
+                        }
+                    }
+                    if (!exprTaint) {
+                        exprTaint = checkExpressionTaint(iterExpr, scope, sourceText, language, taintReturningFns, stores);
+                    }
+                    if (exprTaint) {
+                        let varName: string | null = null;
+                        if (iterVar.type === 'lexical_declaration' || iterVar.type === 'variable_declaration') {
+                            const decl = iterVar.namedChildren[0];
+                            if (decl) {
+                                const lhs = decl.child(0);
+                                if (lhs && isIdentifier(lhs)) {
+                                    varName = sourceText.slice(lhs.startIndex, lhs.endIndex);
+                                }
+                            }
+                        } else if (isIdentifier(iterVar)) {
+                            varName = sourceText.slice(iterVar.startIndex, iterVar.endIndex);
+                        }
+                        if (varName) {
+                            scope.tainted.set(varName, {
+                                ...exprTaint,
+                                path: [...exprTaint.path, {
+                                    line: stmt.startPosition.row + 1,
+                                    variable: varName,
+                                    operation: 'assign',
+                                    description: `${varName} from iteration`,
+                                }],
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         // Control flow — recurse into body
@@ -772,14 +1156,14 @@ function processScope(
                 if (child.type === 'with_item' || child.type === 'with_clause') {
                     for (const item of walk(child)) {
                         if (item !== child && CALL_NODE_TYPES.has(item.type)) {
-                            processExpression(item, scope, sourceText, language, taintReturningFns, onSink);
+                            processExpression(item, scope, sourceText, language, taintReturningFns, onSink, stores, fnContext);
                         }
                     }
                 } else if (child.type === 'statement_block' || child.type === 'block'
                     || STATEMENT_TYPES.has(child.type)) {
                     processScope(
                         child.type === 'statement_block' || child.type === 'block' ? child : { namedChildren: [child] } as any,
-                        scope, sourceText, language, taintReturningFns, onSink, onReturn,
+                        scope, sourceText, language, taintReturningFns, onSink, onReturn, stores, fnContext,
                     );
                 }
             }
@@ -808,7 +1192,7 @@ function findTaintReturningFunctions(
         const body = functionBody(node);
         if (!body) continue;
 
-        const scope: Scope = { tainted: new Map(), parent: null };
+        const scope: Scope = { tainted: new Map(), allTaints: new Map(), parent: null };
         let returnsTainted = false;
         processScope(body, scope, sourceText, language, new Set(), () => {}, (taint) => {
             if (taint) returnsTainted = true;
@@ -856,7 +1240,7 @@ export async function trackTaint(
     };
 
     // Process module level
-    const moduleScope: Scope = { tainted: new Map(), parent: null };
+    const moduleScope: Scope = { tainted: new Map(), allTaints: new Map(), parent: null };
 
     // Pre-seed parameters as taint sources (for cross-file analysis)
     if (seedParams) {
@@ -871,11 +1255,13 @@ export async function trackTaint(
                     description: `Parameter ${param} (tainted by caller)`,
                 }],
                 sanitizersApplied: [],
+                sourceKind: 'request input',
             });
         }
     }
 
-    processScope(root, moduleScope, source, language, taintReturningFns, onSink, () => {});
+    const moduleStores: ModuleStores = { taintedStores: new Map() };
+    processScope(root, moduleScope, source, language, taintReturningFns, onSink, () => {}, moduleStores);
 
     return results;
 }

@@ -40,6 +40,7 @@ vi.mock('../src/attack/agentScanExecutor', async (importOriginal) => {
             flowResult: { status: 'refuted', hops: [], truncated: false },
         })),
         extractFunctionBoundaries: actual.extractFunctionBoundaries,
+        createRunTestsRefusalTracker: actual.createRunTestsRefusalTracker,
     };
 });
 

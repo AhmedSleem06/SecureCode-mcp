@@ -18,7 +18,8 @@ import { trackTaint } from '../src/project-map/taintTracker';
 import { trackTaintCrossFile } from '../src/project-map/crossFileTaintTracker';
 import { ApiClient } from '../src/api/client';
 
-const SUFFIX = ' The tracker found no request-input sources it recognises in this file; this is not evidence the file is safe.';
+const SINGLE_MSG = (f: string) => `No flow from request input to a dangerous call was found in ${f}. Stored-data flows inside this file are followed; flows through other services, queues or databases are not.`;
+const CROSS_MSG = (f: string) => `No flow from request input to a dangerous call was found starting from ${f}. Stored-data flows inside each file are followed; flows through other services, queues or databases are not.`;
 const WS = fs.mkdtempSync(path.join(os.tmpdir(), 'honest-tools-'));
 const ctx = { workspaceRoot: WS, apiUrl: 'http://localhost:3000', apiToken: 'test-token' } as any;
 const target = { filePath: 'rpc.ts', language: 'typescript', fileContent: 'export const x = 1;' };
@@ -49,26 +50,26 @@ describe('taint empty results', () => {
     it('trace_flow empty result says it is not evidence of safety', async () => {
         (trackTaint as any).mockResolvedValue([]);
         const out = await executeAction({ type: 'trace_flow', filePath: 'rpc.ts', rationale: 'r' } as any, ctx, 'run-1', client, target as any);
-        expect(out).toBe(`No taint flows found in rpc.ts.${SUFFIX}`);
+        expect(out).toBe(SINGLE_MSG('rpc.ts'));
     });
 
     it('trace_flow_cross_file empty result says it is not evidence of safety', async () => {
         (trackTaintCrossFile as any).mockResolvedValue([]);
         const out = await executeAction({ type: 'trace_flow_cross_file', filePath: 'rpc.ts', rationale: 'r' } as any, ctx, 'run-1', client, target as any);
-        expect(out).toBe(`No cross-file taint flows found starting from rpc.ts.${SUFFIX}`);
+        expect(out).toBe(CROSS_MSG('rpc.ts'));
     });
 
     it('structured trace_flow keeps refuted status with the new text', async () => {
         (trackTaint as any).mockResolvedValue([]);
         const res = await executeFlowAction({ type: 'trace_flow', filePath: 'rpc.ts', rationale: 'r' } as any, ctx, 'run-1', client, target as any);
-        expect(res.observation).toBe(`No taint flows found in rpc.ts.${SUFFIX}`);
+        expect(res.observation).toBe(SINGLE_MSG('rpc.ts'));
         expect(res.flowResult.status).toBe('refuted');
     });
 
     it('structured trace_flow_cross_file keeps refuted status with the new text', async () => {
         (trackTaintCrossFile as any).mockResolvedValue([]);
         const res = await executeFlowAction({ type: 'trace_flow_cross_file', filePath: 'rpc.ts', rationale: 'r' } as any, ctx, 'run-1', client, target as any);
-        expect(res.observation).toBe(`No cross-file taint flows found starting from rpc.ts.${SUFFIX}`);
+        expect(res.observation).toBe(CROSS_MSG('rpc.ts'));
         expect(res.flowResult.status).toBe('refuted');
     });
 });

@@ -134,6 +134,26 @@ function withProofArtifact(result: VerifyLoopResult, opts: VerifyLoopOptions, co
     return result;
 }
 
+export function computeFailureSignature(testResult: LocalTestResult, analyzeResp?: { verdict?: string; reason?: string }, validityResult?: { valid: boolean; reason?: string }): string {
+    const parts: string[] = [];
+    if (testResult.verdict === 'blocked') parts.push('blocked');
+    else if (testResult.verdict === 'timeout') parts.push('timeout');
+    else if (testResult.verdict === 'error') {
+        const firstLine = testResult.output.split('\n')[0]?.slice(0, 120) ?? '';
+        if (/cannot find module|cannot resolve|module not found/i.test(firstLine)) parts.push('import-error');
+        else if (/mock|stub|spy/i.test(firstLine)) parts.push('mock-error');
+        else parts.push('error');
+        parts.push(firstLine.replace(/\d+/g, '#'));
+    } else if (testResult.verdict === 'pass' || testResult.verdict === 'fail') {
+        if (validityResult && !validityResult.valid && validityResult.reason) {
+            parts.push('invalid', validityResult.reason.slice(0, 120));
+        } else if (analyzeResp?.verdict === 'INCONCLUSIVE') {
+            parts.push('inconclusive', (analyzeResp.reason ?? '').slice(0, 120));
+        }
+    }
+    return parts.join(':');
+}
+
 export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoopResult> {
     const { finding, filePath, code, relatedFiles, workspaceRoot, language, client, onProgress } = opts;
     const tracker = opts.budgetTracker;
@@ -141,6 +161,8 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
     const previousErrors: string[] = [];
     let lastTestScript = '';
     let lastTestOutput = '';
+    let lastFailureSig = '';
+    let consecutiveSameFailure = 0;
 
     // Per-finding round cap = min(per-finding default, budget's per-finding cap).
     const maxRounds = tracker
@@ -317,6 +339,11 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         }
         if (testResult.verdict === 'blocked') {
             previousErrors.push(`Round ${round}: test script rejected by the static safety check — ${testResult.output.slice(0, 300)}. Remove that construct (payload text inside string literals is fine).`);
+            const sig = computeFailureSignature(testResult);
+            if (sig === lastFailureSig) { consecutiveSameFailure++; } else { consecutiveSameFailure = 1; lastFailureSig = sig; }
+            if (consecutiveSameFailure >= 2) {
+                return finish({ verdict: 'INCONCLUSIVE', reason: `same failure twice: ${sig}`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, subVerdict: 'blocked' });
+            }
             if (round >= maxRounds) {
                 return finish({
                     verdict: 'INCONCLUSIVE',
@@ -342,8 +369,12 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
             });
         }
         if (testResult.verdict === 'timeout') {
-            // Treat as a retryable error — feed it back to the LLM.
             previousErrors.push(`Round ${round}: timed out — ${testResult.output.slice(0, 500)}`);
+            const sig = computeFailureSignature(testResult);
+            if (sig === lastFailureSig) { consecutiveSameFailure++; } else { consecutiveSameFailure = 1; lastFailureSig = sig; }
+            if (consecutiveSameFailure >= 2) {
+                return finish({ verdict: 'INCONCLUSIVE', reason: `same failure twice: ${sig}`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, subVerdict: 'analyzed' });
+            }
             if (round >= maxRounds) {
                 return finish({
                     verdict: 'INCONCLUSIVE',
@@ -625,6 +656,11 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         if (analyzeResp.verdict === 'UNPROVEN') {
             if (!validity.valid) {
                 previousErrors.push(`Round ${round}: test was invalid — ${validity.reason}. Rewrite the test to avoid this.`);
+                const sig = computeFailureSignature(testResult, analyzeResp, validity);
+                if (sig === lastFailureSig) { consecutiveSameFailure++; } else { consecutiveSameFailure = 1; lastFailureSig = sig; }
+                if (consecutiveSameFailure >= 2) {
+                    return finish({ verdict: 'INCONCLUSIVE', reason: `same failure twice: ${sig}`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed', proofEvidence, proofGateResult: gateResult });
+                }
                 if (round >= maxRounds) {
                     return finish({ verdict: 'INCONCLUSIVE', reason: `Test invalid: ${validity.reason}`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed', proofEvidence, proofGateResult: gateResult });
                 }
@@ -635,6 +671,14 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
 
         if (!analyzeResp.shouldRetry || round >= maxRounds) {
             return finish({ verdict: 'INCONCLUSIVE', reason: analyzeResp.reason || `Could not verify after ${round} round(s).`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed', proofEvidence, proofGateResult: gateResult });
+        }
+
+        {
+            const sig = computeFailureSignature(testResult, analyzeResp, validity);
+            if (sig === lastFailureSig) { consecutiveSameFailure++; } else { consecutiveSameFailure = 1; lastFailureSig = sig; }
+            if (consecutiveSameFailure >= 2) {
+                return finish({ verdict: 'INCONCLUSIVE', reason: `same failure twice: ${sig}`, roundsUsed: round, testScript: lastTestScript, testOutput: lastTestOutput, backend: testResult.backend || '', subVerdict: 'analyzed', proofEvidence, proofGateResult: gateResult });
+            }
         }
 
         previousErrors.push(`Round ${round}: ${testResult.verdict} — ${testResult.output.slice(0, 500)}`);

@@ -60,7 +60,7 @@ import {
 } from '../attack/agentScanCredits';
 import type { AgentScanFinding, AgentScanSegment, AgentScanTarget, VerificationLevel, AgentScanMode } from '../attack/agentScanProtocol';
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
-import { ApprovalBroker, consumeSessionApproval, revokeSessionApproval } from '../approval/broker';
+import { ApprovalBroker, consumeSessionApproval, revokeSessionApproval, getSessionApproval } from '../approval/broker';
 import { getGitChangedFiles } from '../utils/gitContext';
 import { computeBlastRadius } from '../project-map/blastRadius';
 import { recordScanAuditSample } from '../audit/scanAuditLog';
@@ -70,8 +70,12 @@ import {
     type FindingReviewItem,
 } from '../audit/findingReviewQueue';
 import type { FixResponse } from '../api/types';
-import { runAssuranceAttackTests, type AssuranceAttackTestOutcome } from '../assurance/attackTests';
+import { runAssuranceAttackTests, DEEP_SANDBOX_RUN_CAP, type AssuranceAttackTestOutcome } from '../assurance/attackTests';
 import { GridState, type AssuranceResult } from '../assurance/gridState';
+
+const DEEP_SCAN_APPROVAL_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
+const NOT_TESTED_NO_APPROVAL = 'not tested (no approval)';
+const NOT_TESTED_SUMMARY = 'Attack tests were not run (approval not given); checklist items are reviewed, not tested.';
 
 interface ProvenFinding extends AgentScanFinding {
     proven: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'NOT_REPRODUCIBLE' | 'SKIPPED';
@@ -551,6 +555,39 @@ async function scanTarget(
 
     const requestedMode = mapModeToWire(args.mode);
     const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
+
+    let deepScanApprovalRunId: string | undefined;
+    let deepScanApprovalPromise: Promise<import('../approval/types').SessionApprovalResult> | undefined;
+    let deepScanBroker: ApprovalBroker | null = null;
+    const isRequestedDeep = requestedMode === 'assurance';
+
+    if (isRequestedDeep) {
+        const fileLabel = filePath || 'inline-code';
+        const scanApprovalRunId = `deep-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        deepScanApprovalRunId = scanApprovalRunId;
+        deepScanBroker = new ApprovalBroker();
+        try {
+            await deepScanBroker.start();
+        } catch {
+            deepScanBroker = null;
+            deepScanApprovalRunId = undefined;
+        }
+        if (deepScanBroker) {
+            const wallClockBudgetMs = 30 * 60 * 1000;
+            const ttlMs = wallClockBudgetMs + 30 * 60 * 1000;
+            const summary = `This deep scan may run up to ${DEEP_SANDBOX_RUN_CAP} sandbox tests (attack tests and the agent's own tests) on ${fileLabel} — network off, workspace read-only — for this scan only.`;
+            deepScanApprovalPromise = deepScanBroker.requestSessionApproval(
+                { runId: scanApprovalRunId, tool: 'deep-scan', maxTests: DEEP_SANDBOX_RUN_CAP, ttlMs },
+                summary,
+                {
+                    timeoutMs: DEEP_SCAN_APPROVAL_PROMPT_TIMEOUT_MS,
+                    workspaceRoot: ctx.workspaceRoot,
+                    onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required for deep scan — open ${url}`) : undefined,
+                },
+            );
+        }
+    }
+
     const agentResult = await runAgentScan(ctx, part ? { ...target, segment: part.segment } : target, {
         signal: (args as any)._signal as AbortSignal | undefined,
         onProgress: (steps, max, msg) => {
@@ -560,6 +597,7 @@ async function scanTarget(
         ...(part ? { segment: part.segment } : {}),
         ...(typeof (args as any)._role === 'string' ? { role: (args as any)._role } : {}),
         ...(requestedMode ? { requestedMode } : {}),
+        ...(deepScanApprovalRunId ? { deepScanRunId: deepScanApprovalRunId } : {}),
     });
     const scanRunId = agentResult.runId;
     runCloser.attach(
@@ -1155,6 +1193,39 @@ async function scanTarget(
         grid.redteamRounds = assuranceData.redteamRounds ?? 0;
         for (const w of assuranceData.warnings ?? []) grid.addWarning(String(w));
 
+        let deepApprovalGranted = false;
+        if (deepScanApprovalPromise) {
+            try {
+                const approvalResult = await deepScanApprovalPromise;
+                deepApprovalGranted = approvalResult.granted;
+            } catch {
+                deepApprovalGranted = false;
+            }
+            if (deepScanBroker) {
+                await deepScanBroker.stop().catch(() => undefined);
+                deepScanBroker = null;
+            }
+        }
+
+        if (deepScanApprovalRunId && !deepApprovalGranted) {
+            for (const cell of grid.cells) {
+                if (cell.status === 'open' || cell.status === 'safe' || cell.status === 'depends') {
+                    if (cell.closure !== 'tested') {
+                        grid.applyCellUpdates([{
+                            cellId: cell.id,
+                            status: cell.status,
+                            closure: cell.closure,
+                            note: NOT_TESTED_NO_APPROVAL,
+                        }], [{ start: 1, end: 999999 }]);
+                    }
+                }
+            }
+            grid.attackTests = {
+                approval: { granted: false, reason: NOT_TESTED_SUMMARY },
+                ran: 0, blocked: 0, exploited: 0, untestable: 0, skipped: 0, costUsd: 0,
+            };
+            grid.addWarning(NOT_TESTED_SUMMARY);
+        } else {
         try {
             if (progress) progress(0, 1, 'Running assurance attack tests...');
             const attackOutcome = await runAssuranceAttackTests({
@@ -1165,6 +1236,7 @@ async function scanTarget(
                 scenarios: grid.scenarios,
                 signal: abortSignal,
                 progress: (msg) => { if (progress) progress(0, 1, msg); },
+                ...(deepScanApprovalRunId ? { deepScanRunId: deepScanApprovalRunId } : {}),
             });
             grid.applyAttackOutcome(attackOutcome);
             const SEV_RANK: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2 };
@@ -1268,9 +1340,21 @@ async function scanTarget(
             grid.addWarning(`Attack tests failed: ${atkErr?.message || atkErr}`);
             console.warn(`[Agent Scan] Assurance attack tests failed: ${atkErr?.message || atkErr}`);
         }
+        } // end else (deep approval granted)
+
+        if (deepScanApprovalRunId) {
+            revokeSessionApproval(deepScanApprovalRunId);
+        }
 
         grid.persist(ctx.workspaceRoot, scanRunId || `scan-${Date.now()}`);
         assuranceResult = grid.toResult();
+    }
+
+    if (deepScanBroker) {
+        await deepScanBroker.stop().catch(() => undefined);
+    }
+    if (deepScanApprovalRunId) {
+        revokeSessionApproval(deepScanApprovalRunId);
     }
 
     const settlement = await runCloser.close();
@@ -1292,7 +1376,8 @@ async function scanTarget(
         }
         : {};
     const creditText = formatCreditUsage(creditFields);
-    const approvalText = '';
+    const deepApprovalDenied = isRequestedDeep && assuranceResult?.attackTests?.approval?.granted === false;
+    const approvalText = deepApprovalDenied ? NOT_TESTED_SUMMARY : '';
     const availableFixes = provenFindings.filter(f => f.fixStatus === 'available');
     const fixesAvailableField = availableFixes.length > 0
         ? {

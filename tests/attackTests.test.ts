@@ -106,7 +106,7 @@ afterEach(() => {
 });
 
 describe('selectAssuranceScenarios', () => {
-    it('picks safe risk>=3 cells and depends/reasoning risk>=4 cells, highest risk first, breadth-first, max 3 per cell', () => {
+    it('picks safe risk>=3 cells and depends/reasoning risk>=4 cells, highest risk first, goal-based, max 3 per cell', () => {
         const cells = [
             cell('c1', 3, 'safe', 'traced'),
             cell('c2', 5, 'safe', 'traced'),
@@ -124,7 +124,7 @@ describe('selectAssuranceScenarios', () => {
             scen('s12', 'c9'), scen('s13', 'c1', 3, { test: 'blocked' }), scen('s14', 'c1', 3, { test: 'skipped' }),
         ];
         const picked = selectAssuranceScenarios(cells, scenarios, 20).map((p) => p.scenario.id);
-        expect(picked).toEqual(['s3', 's7', 's11', 's1', 's2', 's14', 's4']);
+        expect(picked).toEqual(['s3', 's7', 's11', 's1', 's2', 's4', 's14']);
         expect(picked.filter((id) => ['s2', 's3', 's4', 's5'].includes(id))).toHaveLength(3);
         expect(selectAssuranceScenarios(cells, scenarios, 2).map((p) => p.scenario.id)).toEqual(['s3', 's7']);
     });

@@ -15,6 +15,7 @@ vi.mock('../src/attack/agentScanExecutor', () => ({
     executeReadFileAction: vi.fn(),
     executeFlowAction: vi.fn(),
     extractFunctionBoundaries: vi.fn(),
+    createRunTestsRefusalTracker: () => ({ counts: new Map(), disabled: false }),
 }));
 
 import { runAgentScan } from '../src/attack/agentScanLoop';

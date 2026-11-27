@@ -284,8 +284,6 @@ describe('runVerifyLoop', () => {
     });
 
     it('retries on timeout and returns INCONCLUSIVE after exhausting rounds', async () => {
-        // Each round: generate → runLocalTest(timeout) → no analyze (timeout is retryable)
-        // The loop feeds the timeout error back to generate on the next round.
         vi.mocked(runLocalTest).mockResolvedValue({
             verdict: 'timeout',
             output: 'timed out',
@@ -293,7 +291,6 @@ describe('runVerifyLoop', () => {
         });
 
         const postJson = vi.fn();
-        // Every generate call returns canTest:true
         postJson.mockResolvedValue({
             canTest: true,
             testScript: 'console.log("x")',
@@ -301,11 +298,10 @@ describe('runVerifyLoop', () => {
             description: 'test',
         });
 
-        // Use a budget with maxRoundsPerFinding: 2 to limit iterations
         const { VerifyBudgetTracker, defaultVerifyBudget } = await import('../src/attack/agentScanProtocol');
         const budget = defaultVerifyBudget();
         budget.maxRoundsPerFinding = 2;
-        budget.maxLlmCalls = 100; // plenty
+        budget.maxLlmCalls = 100;
         const tracker = new VerifyBudgetTracker(budget);
 
         const result = await runVerifyLoop({
@@ -321,7 +317,7 @@ describe('runVerifyLoop', () => {
 
         expect(result.verdict).toBe('INCONCLUSIVE');
         expect(result.roundsUsed).toBeGreaterThanOrEqual(2);
-        expect(result.reason.toLowerCase()).toContain('timed out');
+        expect(result.reason.toLowerCase()).toMatch(/timed? out|same failure twice.*timeout/);
     });
 });
 

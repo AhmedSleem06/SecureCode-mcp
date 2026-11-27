@@ -22,6 +22,7 @@ export interface AssuranceAttackTestInput {
     maxTests?: number;
     signal?: AbortSignal;
     progress?: (message: string) => void;
+    deepScanRunId?: string;
 }
 
 export interface AssuranceAttackTestOutcome {
@@ -43,6 +44,10 @@ export const ASSURANCE_APPROVAL_TTL_MS = 2 * 60 * 60 * 1000;
 export const ASSURANCE_TEST_TIMEOUT_MS = 30_000;
 export const ASSURANCE_DEFAULT_MAX_USD = 1.5;
 export const ASSURANCE_CONSECUTIVE_UNTESTABLE_LIMIT = 3;
+export const DEEP_SANDBOX_RUN_CAP = 60;
+export const ASSURANCE_PER_TEST_COST_ESTIMATE_USD = 0.10;
+export const ASSURANCE_SANDBOX_TIME_BUDGET_MS = 15 * 60 * 1000;
+export const ASSURANCE_AI_COST_BUDGET_USD = 2.00;
 const NOTE_OUTPUT_CHARS = 300;
 const TESTED_STATUSES = new Set(['blocked', 'exploited', 'untestable']);
 const CLOSURE_STRENGTH: Record<string, number> = { untestable: 1, reasoning: 2, traced: 3, tested: 4 };
@@ -93,11 +98,15 @@ function isEligibleCell(cell: GridCell): boolean {
 }
 
 /**
- * Eligible cells sorted by risk (then weakest closure first); scenarios are taken breadth-first —
- * every cell's best scenario before any cell's second — up to 3 per cell and maxTests overall.
+ * Eligible cells sorted by risk; scenarios are selected goal-first:
+ *   1. Best weakness scenario for every cell with risk >= 4
+ *   2. Best weakness scenario for cells with risk 3
+ *   3. Second scenarios for risk >= 4 cells
+ * Hard cap DEEP_SANDBOX_RUN_CAP (60), budget checked at runtime.
+ * Hardening scenarios are excluded as before.
  */
 export function selectAssuranceScenarios(cells: GridCell[], scenarios: Scenario[], maxTests = ASSURANCE_DEFAULT_MAX_TESTS): SelectedScenario[] {
-    const limit = Math.max(0, Math.min(Math.floor(maxTests), SESSION_APPROVAL_MAX_TESTS));
+    const limit = Math.max(0, Math.min(Math.floor(maxTests), DEEP_SANDBOX_RUN_CAP));
     const order = new Map(cells.map((c, i) => [c.id, i]));
     const eligible = cells.filter(isEligibleCell).sort((a, b) =>
         (b.risk - a.risk)
@@ -113,14 +122,37 @@ export function selectAssuranceScenarios(cells: GridCell[], scenarios: Scenario[
     }));
     const out: SelectedScenario[] = [];
     const seen = new Set<string>();
-    for (let tier = 0; tier < ASSURANCE_MAX_SCENARIOS_PER_CELL; tier++) {
-        for (const { cell, list } of perCell) {
-            if (out.length >= limit) return out;
-            const scenario = list[tier];
-            if (!scenario || seen.has(scenario.id)) continue;
-            seen.add(scenario.id);
-            out.push({ cell, scenario });
+
+    const push = (cell: GridCell, scenario: Scenario): boolean => {
+        if (out.length >= limit || seen.has(scenario.id)) return false;
+        seen.add(scenario.id);
+        out.push({ cell, scenario });
+        return true;
+    };
+
+    for (const { cell, list } of perCell) {
+        if (cell.risk >= 4 && list[0]) push(cell, list[0]);
+        if (out.length >= limit) return out;
+    }
+    for (const { cell, list } of perCell) {
+        if (cell.risk === 3 && list[0]) push(cell, list[0]);
+        if (out.length >= limit) return out;
+    }
+    for (const { cell, list } of perCell) {
+        if (cell.risk >= 4) {
+            for (let i = 1; i < list.length; i++) {
+                if (!push(cell, list[i])) break;
+            }
         }
+        if (out.length >= limit) return out;
+    }
+    for (const { cell, list } of perCell) {
+        if (cell.risk < 4) {
+            for (let i = 1; i < list.length; i++) {
+                if (!push(cell, list[i])) break;
+            }
+        }
+        if (out.length >= limit) return out;
     }
     return out;
 }
@@ -523,14 +555,24 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
 
     const broker = new ApprovalBroker();
     let brokerStarted = false;
+    const useDeepScanApproval = !!input.deepScanRunId;
+    const effectiveRunId = useDeepScanApproval ? input.deepScanRunId! : runId;
+    const backendLabel = sandbox.name;
     try {
+        if (useDeepScanApproval) {
+            const existing = getSessionApproval(input.deepScanRunId!);
+            outcome.approval = { granted: existing.granted, reason: existing.reason };
+            if (!existing.granted) {
+                markRest(0, 'skipped', existing.reason);
+                return finalize();
+            }
+        } else {
         try {
             await broker.start();
             brokerStarted = true;
         } catch {
             brokerStarted = false;
         }
-        const backendLabel = sandbox.name;
         const isDocker = backendLabel === 'docker';
         const summary = isDocker
             ? `Run up to ${selected.length} attack tests for ${fileRel} in the Docker sandbox.`
@@ -552,6 +594,7 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
             markRest(0, 'skipped', approval.reason);
             return finalize();
         }
+        } // end else (no deep-scan approval)
 
         const testFileDir = path.join(ctx.workspaceRoot, '.securecode');
         const absTarget = path.isAbsolute(target.filePath) ? target.filePath : path.join(ctx.workspaceRoot, target.filePath);
@@ -565,7 +608,7 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
         } catch {
             relatedFiles = [];
         }
-        const sandboxIsolation = backendLabel === 'docker' ? 'full' : backendLabel.includes('reduced') ? 'reduced' : (backendLabel === 'local' ? 'reduced' : 'full');
+        const sandboxIsolation = sandbox.name === 'docker' ? 'full' : sandbox.name.includes('reduced') ? 'reduced' : (sandbox.name === 'local' ? 'reduced' : 'full');
         const env: RunEnv = {
             input,
             client: new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken }),
@@ -577,12 +620,13 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
             addCost: (usd) => {
                 if (typeof usd === 'number' && Number.isFinite(usd) && usd > 0) outcome.costUsd += usd;
             },
-            consumeGrant: () => consumeSessionApproval(runId),
+            consumeGrant: () => consumeSessionApproval(effectiveRunId),
         };
         const fileLines = target.fileContent.split('\n').length;
         const maxUsd = getAssuranceMaxUsd();
         let consecutiveUntestable = 0;
         let lastFailureClass = '';
+        const sandboxStartMs = Date.now();
 
         for (let i = 0; i < selected.length; i++) {
             const { cell, scenario } = selected[i];
@@ -590,12 +634,21 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
                 markRest(i, 'skipped', 'Cancelled before the attack test ran.');
                 break;
             }
-            if (!consumeSessionApproval(runId)) {
-                markRest(i, 'skipped', getSessionApproval(runId).reason);
+            if (!consumeSessionApproval(effectiveRunId)) {
+                markRest(i, 'skipped', getSessionApproval(effectiveRunId).reason);
                 break;
             }
             if (outcome.costUsd >= maxUsd) {
                 markRest(i, 'skipped', `Attack test budget reached ($${maxUsd.toFixed(2)}).`);
+                break;
+            }
+            const elapsedMs = Date.now() - sandboxStartMs;
+            if (elapsedMs >= ASSURANCE_SANDBOX_TIME_BUDGET_MS) {
+                markRest(i, 'skipped', `Attack test time budget reached (${Math.round(elapsedMs / 1000)}s).`);
+                break;
+            }
+            if (outcome.costUsd >= ASSURANCE_AI_COST_BUDGET_USD) {
+                markRest(i, 'skipped', `Attack test AI cost budget reached ($${outcome.costUsd.toFixed(2)}).`);
                 break;
             }
             input.progress?.(`Attack test ${i + 1}/${selected.length}: scenario ${scenario.id} on ${cell.title} (risk ${cell.risk})`);
@@ -663,7 +716,9 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
         }
         return finalize();
     } finally {
-        revokeSessionApproval(runId);
+        if (!useDeepScanApproval) {
+            revokeSessionApproval(runId);
+        }
         if (brokerStarted) await broker.stop().catch(() => undefined);
     }
 }

@@ -22,6 +22,7 @@ vi.mock('../src/attack/agentScanExecutor', () => ({
     executeReadFileAction: vi.fn(),
     executeFlowAction: vi.fn(),
     extractFunctionBoundaries: vi.fn(),
+    createRunTestsRefusalTracker: () => ({ counts: new Map(), disabled: false }),
 }));
 
 vi.mock('../src/project-map/endpointDiscovery', () => ({

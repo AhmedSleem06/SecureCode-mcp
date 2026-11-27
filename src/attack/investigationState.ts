@@ -709,6 +709,14 @@ export class InvestigationState {
         );
     }
 
+    wasFileRead(filePath: string): boolean {
+        const norm = InvestigationState.normalizePath(filePath);
+        for (const [key, cov] of this.fileCoverages) {
+            if (key === norm && cov.ranges.length > 0) return true;
+        }
+        return false;
+    }
+
     /**
      * Return the gaps in coverage for a file — the line ranges that have NOT
      * been read yet. Returns [] if the file is fully covered or not tracked.

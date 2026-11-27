@@ -41,6 +41,7 @@ export interface AssuranceResult {
     scenarios: Scenario[];
     counts: AssuranceCounts;
     redteamRounds: number;
+    redteamStopReason?: 'no-new-high-risk-gaps' | 'round-limit' | 'budget';
     attackTests: AttackTestSummary | null;
     warnings: string[];
 }
@@ -153,6 +154,7 @@ export class GridState {
     private lineIndex: Map<string, number> | null = null;
     inventory: FileInventory | null;
     redteamRounds = 0;
+    redteamStopReason?: 'no-new-high-risk-gaps' | 'round-limit' | 'budget';
     attackTests: AttackTestSummary | null = null;
     readonly warnings: string[] = [];
 
@@ -367,6 +369,7 @@ export class GridState {
             scenarios: this.scenarioList.filter(s => ids.has(s.cellId)).map(s => ({ ...s })),
             counts: this.counts(scope),
             redteamRounds: this.redteamRounds,
+            ...(this.redteamStopReason ? { redteamStopReason: this.redteamStopReason } : {}),
             attackTests: this.attackTests ? { ...this.attackTests } : null,
             warnings: [...this.warnings],
         };

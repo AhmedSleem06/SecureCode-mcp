@@ -22,7 +22,11 @@ export type AttackType =
     | 'open_redirect'
     | 'prototype_pollution'
     | 'insecure_deserialization'
-    | 'broken_access_control';
+    | 'broken_access_control'
+    | 'missing_authorization'
+    | 'idor'
+    | 'privilege_escalation'
+    | 'auth_bypass';
 
 /** Guard types we can identify and evaluate. */
 export type GuardType =
@@ -42,6 +46,9 @@ export type GuardType =
     | 'cors-strict'             // strict CORS config
     | 'cors-permissive'         // permissive CORS (origin: '*')
     | 'validator'               // schema validation (zod, joi, pydantic)
+    | 'authorization-role'      // role check (req.user.role, requireRole, hasRole, isAdmin)
+    | 'authorization-owner'     // ownership check (ownerId === req.user.sub)
+    | 'authentication'          // token verification middleware (jwt.verify, session check)
     | 'unknown';                // guard detected but type not recognized
 
 export interface GuardEvaluation {
@@ -157,6 +164,27 @@ export const GUARD_EFFECTIVENESS: Record<GuardType, Partial<Record<AttackType, b
         sql_injection: false,
         xss: false,
     },
+    'authorization-role': {
+        broken_access_control: true,
+        missing_authorization: true,
+        privilege_escalation: true,
+        auth_bypass: false,
+        idor: false,
+    },
+    'authorization-owner': {
+        broken_access_control: true,
+        idor: true,
+        missing_authorization: true,
+        privilege_escalation: false,
+        auth_bypass: false,
+    },
+    'authentication': {
+        broken_access_control: false,
+        missing_authorization: false,
+        idor: false,
+        privilege_escalation: false,
+        auth_bypass: true,
+    },
     'unknown': {},
 };
 
@@ -201,6 +229,19 @@ export const GUARD_BYPASS_EXAMPLES: Partial<Record<GuardType, Partial<Record<Att
         sql_injection: "Schema validation only stops SQLi if the schema enforces numeric/enum type",
         xss: "Schema validation only stops XSS if the schema enforces no HTML or sanitizes",
     },
+    'authorization-role': {
+        auth_bypass: "Role checks only run after authentication — if auth is bypassed, role checks are skipped",
+        idor: "Role check verifies the user has the right role but does not check resource ownership",
+    },
+    'authorization-owner': {
+        privilege_escalation: "Ownership check verifies the resource belongs to the user but does not check admin/elevated role",
+        auth_bypass: "Ownership checks only run after authentication — if auth is bypassed, ownership checks are skipped",
+    },
+    'authentication': {
+        broken_access_control: "Authentication verifies identity but does not check authorization (role or resource ownership)",
+        missing_authorization: "Authentication verifies identity but does not enforce what the user may access",
+        idor: "Authentication verifies identity but does not enforce resource ownership",
+    },
 };
 
 /** Reasons explaining why a guard is effective. */
@@ -225,7 +266,18 @@ export const GUARD_EFFECTIVE_REASONS: Partial<Record<GuardType, Partial<Record<A
         // because it only proves identity, not resource authorization.
     },
     'auth-session': {
-        // Session auth is no longer marked as effective for broken_access_control
-        // because it only proves identity, not resource authorization.
+    },
+    'authorization-role': {
+        broken_access_control: 'Role check ensures only users with the required role can access this route',
+        missing_authorization: 'Role check prevents unauthorized role access',
+        privilege_escalation: 'Role check prevents lower-privilege users from accessing higher-privilege routes',
+    },
+    'authorization-owner': {
+        broken_access_control: 'Ownership check ensures users can only access their own resources',
+        idor: 'Ownership check compares resource owner with authenticated user identity',
+        missing_authorization: 'Ownership check prevents access to resources belonging to other users',
+    },
+    'authentication': {
+        auth_bypass: 'Token/session verification prevents unauthenticated access',
     },
 };

@@ -94,6 +94,12 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
         requiresApproval: true,
         approvalNote: 'Deep scan attack tests run code in the sandbox. One approval per scan covers a fixed number of runs for a limited time.',
     },
+    'securecode.deep-scan': {
+        name: 'securecode.deep-scan',
+        category: 'sandboxed-verification',
+        requiresApproval: true,
+        approvalNote: 'One approval per deep scan covers all sandbox runs (attack tests and run_tests) for this scan.',
+    },
     'securecode.fix-generation': {
         name: 'securecode.fix-generation',
         category: 'paid-generation',
@@ -105,6 +111,7 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
 export const SESSION_APPROVAL_POLICY_NAMES: Record<SessionApprovalTool, string> = {
     'assurance-tests': 'securecode.assurance-tests',
     'fix-generation': 'securecode.fix-generation',
+    'deep-scan': 'securecode.deep-scan',
 };
 
 export type SessionApprovalPolicyDecision =

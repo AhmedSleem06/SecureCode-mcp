@@ -306,6 +306,12 @@ export interface EvidenceGateInput {
     openLeadsRejectedOnce: boolean;
     /** Findings to check against delivered lines; defaults to the proposal's findings. */
     findings?: AgentScanFinding[];
+    /** Connected files from the file inventory (deep mode). */
+    connectedFiles?: Array<{ file: string; relation: string; reason: string }>;
+    /** Grid cells for the assurance grid (deep mode). */
+    gridCells?: GridCell[];
+    /** Number of times the connected/grid requirements have been rejected. */
+    doneRuleRejections?: number;
 }
 
 export interface FinishGateInput {
@@ -468,6 +474,66 @@ function evaluateEvidenceChecks(
             suggestedNextAction: 'read_file',
             priority: 'medium',
         });
+    }
+
+    const AUTH_STORE_KEYWORDS = ['auth', 'guard', 'middleware', 'session', 'token', 'password', 'credential', 'db', 'database', 'store', 'model', 'repository', 'schema', 'query', 'prisma', 'sequelize', 'mongoose', 'knex', 'typeorm'];
+    const isAuthOrStore = (reason: string, relation: string): boolean => {
+        const low = `${reason} ${relation}`.toLowerCase();
+        return AUTH_STORE_KEYWORDS.some(kw => low.includes(kw));
+    };
+    const secondRejectionAllowed = (gate.doneRuleRejections ?? 0) >= 1;
+    const doneRuleReasons: FinishGateReason[] = [];
+    const doneRuleGaps: FinishGateCoverageGap[] = [];
+
+    if (gate.connectedFiles && gate.connectedFiles.length > 0) {
+        for (const cf of gate.connectedFiles) {
+            if (!isAuthOrStore(cf.reason, cf.relation)) continue;
+            const normFile = normalizeGatePath(cf.file);
+            const readOrGapped = input.investigation.wasFileRead(normFile)
+                || (proposal.coverageGaps ?? []).some(g => (g.file && normalizeGatePath(g.file) === normFile) || normalizeGatePath(g.title).includes(normFile));
+            if (!readOrGapped) {
+                doneRuleReasons.push({
+                    code: 'connected-file-unread',
+                    description: `Connected file not read: ${cf.file} (${cf.relation}: ${cf.reason})`,
+                });
+                doneRuleGaps.push({
+                    title: `Connected file not read: ${cf.file}`,
+                    detail: `${cf.file} (${cf.relation}: ${cf.reason}) holds auth/data-store logic used by the target's routes but was not read or listed as a coverage gap.`,
+                    file: cf.file,
+                    requiredEvidence: [`Read ${cf.file} or list it as a coverage gap`],
+                    suggestedNextAction: 'read_file',
+                    priority: 'high',
+                });
+            }
+        }
+    }
+
+    if (gate.gridCells && gate.gridCells.length > 0) {
+        for (const cell of gate.gridCells) {
+            if (cell.risk < 4) continue;
+            if (cell.evidenceLines && cell.evidenceLines.length > 0) continue;
+            doneRuleReasons.push({
+                code: 'high-risk-cell-no-evidence',
+                description: `Risk-${cell.risk} cell ${cell.id} (${cell.title}) has no evidence lines`,
+            });
+            doneRuleGaps.push({
+                title: `No evidence lines for risk-${cell.risk} cell: ${cell.title}`,
+                detail: `Grid cell ${cell.id} (${cell.attackType}, risk ${cell.risk}) has no evidence lines cited. Cite the specific lines that support the cell's status.`,
+                file: target.filePath,
+                requiredEvidence: [`Cite evidence lines for cell ${cell.id}`],
+                suggestedNextAction: 'read_file',
+                priority: 'high',
+            });
+        }
+    }
+
+    if (doneRuleReasons.length > 0) {
+        if (secondRejectionAllowed) {
+            coverageGaps.push(...doneRuleGaps);
+        } else {
+            reasons.push(...doneRuleReasons);
+            coverageGaps.push(...doneRuleGaps);
+        }
     }
 }
 
