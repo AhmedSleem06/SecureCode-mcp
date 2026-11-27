@@ -235,14 +235,6 @@ export function actionFingerprint(action: AgentScanAction): string {
             return `check_policy:${a.filePath || ''}${reqScope}`;
         case 'read_config':
             return `read_config:${a.configKind || 'all'}${reqScope}`;
-        case 'get_endpoints':
-            return `get_endpoints:${a.glob || ''}${reqScope}`;
-        case 'find_tests':
-            return `find_tests:${a.filePath || ''}:${a.symbol || ''}${reqScope}`;
-        case 'find_definition':
-            return `find_definition:${a.filePath || ''}:${a.symbol || ''}`;
-        case 'find_references':
-            return `find_references:${a.filePath || ''}:${a.symbol || ''}`;
         case 'call_graph':
             return `call_graph:${a.filePath || ''}:${a.functionName || ''}`;
         default:
@@ -294,7 +286,7 @@ function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget,
     const stamp = (action: AgentScanAction): AgentScanAction =>
         Object.assign({}, action, { requirementId: req.id });
 
-    switch (tool) {
+    switch (tool as string) {
         case 'read_file': {
             // Ranged read: a rangeless read on a large file returns a
             // function map (no content, no progress), so derive the next
@@ -337,7 +329,8 @@ function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget,
             } as AgentScanAction);
         case 'get_endpoints':
             return stamp({
-                type: 'get_endpoints',
+                type: 'search_code',
+                pattern: 'router\\.|app\\.',
                 rationale: req.description,
             } as AgentScanAction);
         case 'trace_flow':
@@ -354,13 +347,7 @@ function actionForRequirement(req: EvidenceRequirement, target: AgentScanTarget,
                 rationale: req.description,
             } as AgentScanAction);
         case 'find_tests':
-            return stamp({
-                type: 'find_tests',
-                filePath: targetFile,
-                rationale: req.description,
-            } as AgentScanAction);
         case 'find_definition':
-            return null;
         case 'find_references':
             return null;
         default:

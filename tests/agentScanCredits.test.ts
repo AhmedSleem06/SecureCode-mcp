@@ -49,7 +49,7 @@ function checklist(extraPerStep: (i: number) => Record<string, unknown> = () => 
         step({ type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, 38, extraPerStep(1)),
         step({ type: 'check_policy', filePath: 'test.ts', rationale: 'r' }, 37, extraPerStep(2)),
         step({ type: 'read_config', configKind: 'all', rationale: 'r' }, 36, extraPerStep(3)),
-        step({ type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, 35, extraPerStep(4)),
+        step({ type: 'list_files', path: 'tests', rationale: 'r' }, 35, extraPerStep(4)),
         step({ type: 'finish', findings, summary, selfCritique: 'done' }, 34, extraPerStep(5)),
     ];
 }

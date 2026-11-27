@@ -1,63 +1,95 @@
 import * as semver from 'semver';
-import { ResolvedPackage, Vulnerability } from './types';
+import { ResolvedPackage, Vulnerability, AffectedRange } from './types';
 
-/**
- * Compute the smallest version bump that exits ALL affected ranges for a
- * given vulnerable package.
- *
- * Strategy:
- *   - Collect all explicit `fixed` bounds from affected ranges; the smallest
- *     such fixed version is the minimal safe bump (you must reach at least it).
- *   - If no `fixed` is available, but `introduced` is, there is no known fix —
- *     return undefined and surface "no known fix" upstream.
- *   - For npm-family we use `semver.minSatisfying` against the candidate set
- *     and validate via `semver.valid`. For Python we fall back to a simple
- *     dotted-version comparator since we deliberately do not depend on a
- *     full PEP 440 library.
- *
- * The result is a *version string* (e.g. "4.17.21") suitable for an in-place
- * manifest edit. We do NOT try to pick the smallest *major* bump — the user
- * asked for the smallest version that exits all ranges, which is exactly
- * the smallest `fixed` across all advisory ranges.
- */
 export function computeMinSafeVersion(
     pkg: ResolvedPackage,
     vulns: Vulnerability[],
 ): string | undefined {
-    const candidates: string[] = [];
+    const ecoFamily = ecosystemFamily(pkg.ecosystem);
+    const ranges: Array<{ introduced?: string; fixed?: string; lastAffected?: string }> = [];
     for (const v of vulns) {
         for (const a of v.affected) {
-            if (a.fixed) candidates.push(a.fixed);
+            if (a.raw) {
+                try {
+                    const parsed = JSON.parse(a.raw);
+                    if (parsed.type === 'GIT') continue;
+                } catch {}
+            }
+            if (ecoFamily && a.ecosystem && ecosystemFamily(a.ecosystem) !== ecoFamily) continue;
+            ranges.push({
+                introduced: a.introduced,
+                fixed: a.fixed && /^\d/.test(a.fixed) ? a.fixed : undefined,
+                lastAffected: a.lastAffected,
+            });
         }
     }
-    if (candidates.length === 0) return undefined;
+    if (ranges.length === 0) return undefined;
 
-    if (isNpmFamily(pkg)) {
-        // Pick the smallest valid semver among candidates.
-        const valid = candidates
-            .map(c => semver.coerce(c))
-            .filter((c): c is semver.SemVer => c !== null)
-            .map(c => c.version)
-            .sort((a, b) => semver.compare(a, b));
-        return valid[0];
+    const cmp = isNpmFamily(pkg) ? compareSemver : comparePep440Loose;
+
+    let candidate = pkg.version;
+    for (let iter = 0; iter < 200; iter++) {
+        let advanced = false;
+        for (const r of ranges) {
+            if (!isInRange(candidate, r, cmp)) continue;
+            if (!r.fixed) return undefined;
+            if (cmp(r.fixed, candidate) > 0) {
+                candidate = r.fixed;
+                advanced = true;
+            }
+        }
+        if (!advanced) break;
     }
 
-    // Python: simple dotted-numeric compare.
-    const valid = candidates
-        .filter(c => /^\d+(\.\d+)*([._-]?[a-z0-9]+)?$/i.test(c))
-        .sort(comparePep440Loose);
-    return valid[0];
+    if (cmp(candidate, pkg.version) <= 0) {
+        return undefined;
+    }
+    return candidate;
+}
+
+function ecosystemFamily(eco: string): string {
+    switch (eco) {
+        case 'npm': case 'yarn': case 'pnpm': return 'npm';
+        case 'pip': case 'pipenv': case 'PyPI': return 'pypi';
+        case 'go': case 'Go': return 'go';
+        case 'cargo': case 'crates.io': return 'cargo';
+        case 'rubygems': case 'RubyGems': return 'rubygems';
+        case 'composer': case 'Packagist': return 'composer';
+        case 'nuget': case 'NuGet': return 'nuget';
+        case 'pub': case 'Pub': return 'pub';
+        default: return eco.toLowerCase();
+    }
+}
+
+function isInRange(
+    version: string,
+    range: { introduced?: string; fixed?: string; lastAffected?: string },
+    cmp: (a: string, b: string) => number,
+): boolean {
+    if (range.introduced && range.introduced !== '0') {
+        if (cmp(version, range.introduced) < 0) return false;
+    }
+    if (range.fixed) {
+        if (cmp(version, range.fixed) >= 0) return false;
+    }
+    if (!range.fixed && range.lastAffected) {
+        if (cmp(version, range.lastAffected) > 0) return false;
+    }
+    return true;
+}
+
+function compareSemver(a: string, b: string): number {
+    const sa = semver.coerce(a);
+    const sb = semver.coerce(b);
+    if (!sa || !sb) return comparePep440Loose(a, b);
+    return semver.compare(sa, sb);
 }
 
 function isNpmFamily(pkg: ResolvedPackage): boolean {
-    return pkg.ecosystem === 'npm' || pkg.ecosystem === 'yarn' || pkg.ecosystem === 'pnpm';
+    return pkg.ecosystem === 'npm' || pkg.ecosystem === 'yarn' || pkg.ecosystem === 'pnpm'
+        || pkg.ecosystem === 'cargo' || pkg.ecosystem === 'nuget' || pkg.ecosystem === 'pub';
 }
 
-/**
- * Loose PEP 440-ish comparator for dotted versions like "1.2.3" or "1.2.3rc1".
- * Returns -1, 0, or 1. Good enough for "smallest fixed version" — not a
- * general PEP 440 implementation (we explicitly avoid the `packaging` dep).
- */
 export function comparePep440Loose(a: string, b: string): number {
     const pa = parseLooseVersion(a);
     const pb = parseLooseVersion(b);
@@ -66,7 +98,6 @@ export function comparePep440Loose(a: string, b: string): number {
         const bi = pb.nums[i] ?? 0;
         if (ai !== bi) return ai - bi;
     }
-    // Pre-release sorts before release (1.2.3rc1 < 1.2.3) — match PEP 440.
     if (pa.pre && !pb.pre) return -1;
     if (!pa.pre && pb.pre) return 1;
     if (pa.pre && pb.pre) return pa.pre < pb.pre ? -1 : pa.pre > pb.pre ? 1 : 0;
@@ -74,17 +105,13 @@ export function comparePep440Loose(a: string, b: string): number {
 }
 
 function parseLooseVersion(v: string): { nums: number[]; pre?: string } {
-    const m = v.match(/^(\d+(?:\.\d+)*)(?:([a-z]+\d*))?$/i);
+    const m = v.match(/^(\d+(?:\.\d+)*)(?:[._-]?([a-z]+\d*))?$/i);
     if (!m) return { nums: [0] };
     const nums = m[1].split('.').map(n => parseInt(n, 10));
     const pre = m[2];
     return { nums, pre };
 }
 
-/**
- * Build a human-readable upgrade suggestion for the webview / Apply flow.
- * e.g. "Upgrade lodash 4.17.19 -> 4.17.21"
- */
 export function upgradeSuggestion(
     pkg: ResolvedPackage,
     minSafe: string,

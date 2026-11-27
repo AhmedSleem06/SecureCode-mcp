@@ -137,7 +137,7 @@ export async function toolScanSecrets(ctx: ServerContext, args: any): Promise<un
             }
 
             const code = fs.readFileSync(absPath, 'utf8');
-            const findings = detectSecrets(code);
+            const findings = detectSecrets(code, { fileName: path.basename(absPath) });
 
             if (findings.length > 0) {
                 const lines = code.split('\n');

@@ -17,7 +17,7 @@ export interface ScanFinding {
     end: { line: number; col: number };
     source?: 'code' | 'dependency';
     dependency?: {
-        ecosystem: 'npm' | 'yarn' | 'pnpm' | 'pip' | 'pipenv';
+        ecosystem: string;
         name: string;
         installedVersion: string;
         fixedVersion?: string;

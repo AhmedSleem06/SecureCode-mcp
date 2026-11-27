@@ -33,5 +33,8 @@ export async function toolScanDependencies(ctx: ServerContext, _args: any): Prom
         unresolvedCount: result.unresolvedCount,
         lockfiles: result.lockfiles,
         ghsaSkipped: result.ghsaSkipped ?? false,
+        ...(result.unsupportedFiles && result.unsupportedFiles.length > 0
+            ? { unsupportedFiles: result.unsupportedFiles }
+            : {}),
     };
 }

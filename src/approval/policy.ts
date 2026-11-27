@@ -9,11 +9,6 @@ export interface ToolPolicy {
 }
 
 export const TOOL_POLICIES: Record<string, ToolPolicy> = {
-    'securecode.scan': {
-        name: 'securecode.scan',
-        category: 'read-only',
-        requiresApproval: false,
-    },
     'securecode.architecture': {
         name: 'securecode.architecture',
         category: 'read-only',
@@ -21,11 +16,6 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
     },
     'securecode.scan-dependencies': {
         name: 'securecode.scan-dependencies',
-        category: 'read-only',
-        requiresApproval: false,
-    },
-    'securecode.scan-batch': {
-        name: 'securecode.scan-batch',
         category: 'read-only',
         requiresApproval: false,
     },
@@ -71,23 +61,8 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
         category: 'read-only',
         requiresApproval: false,
     },
-    'securecode.record-false-positive': {
-        name: 'securecode.record-false-positive',
-        category: 'read-only',
-        requiresApproval: false,
-    },
-    'securecode.get-agent-memory': {
-        name: 'securecode.get-agent-memory',
-        category: 'read-only',
-        requiresApproval: false,
-    },
-    'securecode.clear-agent-memory': {
-        name: 'securecode.clear-agent-memory',
-        category: 'read-only',
-        requiresApproval: false,
-    },
-    'securecode.add-known-fact': {
-        name: 'securecode.add-known-fact',
+    'securecode.memory': {
+        name: 'securecode.memory',
         category: 'read-only',
         requiresApproval: false,
     },
@@ -98,11 +73,6 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
     },
     'securecode.decide-finding': {
         name: 'securecode.decide-finding',
-        category: 'read-only',
-        requiresApproval: false,
-    },
-    'securecode.clear-finding-reviews': {
-        name: 'securecode.clear-finding-reviews',
         category: 'read-only',
         requiresApproval: false,
     },
@@ -117,17 +87,6 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
         category: 'paid-generation',
         requiresApproval: true,
         approvalNote: 'Test execution runs code in a sandbox. Approval required before execution.',
-    },
-    'securecode.attack': {
-        name: 'securecode.attack',
-        category: 'paid-generation',
-        requiresApproval: true,
-        approvalNote: 'Attack sends HTTP probes to a localhost server. Approval required. Currently disabled via SECURECODE_ATTACK_ENABLED.',
-    },
-    'securecode.runtime-probe': {
-        name: 'securecode.runtime-probe',
-        category: 'paid-generation',
-        requiresApproval: true,
     },
     'securecode.assurance-tests': {
         name: 'securecode.assurance-tests',

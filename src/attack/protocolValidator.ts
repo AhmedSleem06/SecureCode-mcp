@@ -55,10 +55,9 @@ function isOptionalNumber(x: unknown): x is number | undefined { return x === un
 
 const VALID_ACTION_TYPES = new Set([
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
-    'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
+    'check_guard', 'check_policy',
     'list_files', 'call_graph', 'git_blame', 'git_history', 'git_diff',
-    'check_dependencies', 'read_config', 'find_definition',
-    'find_references', 'find_tests', 'run_tests',
+    'check_dependencies', 'read_config', 'run_tests',
     'finish', 'system_event',
 ]);
 
@@ -126,14 +125,6 @@ export function validateAction(raw: unknown): ValidationResult<AgentScanAction> 
             if (!isString(raw.filePath) || raw.filePath.length === 0) return err('check_policy requires "filePath"');
             return ok(raw as unknown as AgentScanAction);
         }
-        case 'get_endpoints': {
-            if (!isOptionalString(raw.glob)) return err('get_endpoints glob must be string or null');
-            return ok(raw as unknown as AgentScanAction);
-        }
-        case 'list_imports': {
-            if (!isString(raw.filePath) || raw.filePath.length === 0) return err('list_imports requires "filePath"');
-            return ok(raw as unknown as AgentScanAction);
-        }
         case 'list_files': {
             if (!isOptionalString(raw.path)) return err('list_files path must be string or null');
             if (!isOptionalString(raw.glob)) return err('list_files glob must be string or null');
@@ -167,23 +158,6 @@ export function validateAction(raw: unknown): ValidationResult<AgentScanAction> 
             if (!isString(raw.configKind) || !['auth','cors','rate_limit','headers','env','all'].includes(raw.configKind)) {
                 return err('read_config requires "configKind" (auth, cors, rate_limit, headers, env, all)');
             }
-            return ok(raw as unknown as AgentScanAction);
-        }
-        case 'find_definition': {
-            if (!isString(raw.filePath) || raw.filePath.length === 0) return err('find_definition requires "filePath"');
-            if (!isString(raw.symbol) || raw.symbol.length === 0) return err('find_definition requires "symbol"');
-            if (!isOptionalNumber(raw.line)) return err('find_definition line must be number or null');
-            return ok(raw as unknown as AgentScanAction);
-        }
-        case 'find_references': {
-            if (!isString(raw.filePath) || raw.filePath.length === 0) return err('find_references requires "filePath"');
-            if (!isString(raw.symbol) || raw.symbol.length === 0) return err('find_references requires "symbol"');
-            if (!isOptionalNumber(raw.line)) return err('find_references line must be number or null');
-            return ok(raw as unknown as AgentScanAction);
-        }
-        case 'find_tests': {
-            if (!isString(raw.filePath) || raw.filePath.length === 0) return err('find_tests requires "filePath"');
-            if (!isOptionalString(raw.symbol)) return err('find_tests symbol must be string or null');
             return ok(raw as unknown as AgentScanAction);
         }
         case 'run_tests': {

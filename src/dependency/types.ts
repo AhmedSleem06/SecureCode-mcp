@@ -8,10 +8,10 @@
  */
 
 /** Ecosystems we can parse a lockfile for. */
-export type Ecosystem = 'npm' | 'yarn' | 'pnpm' | 'pip' | 'pipenv';
+export type Ecosystem = 'npm' | 'yarn' | 'pnpm' | 'pip' | 'pipenv' | 'go' | 'cargo' | 'rubygems' | 'composer' | 'nuget' | 'pub';
 
 /** OSV ecosystem identifier used in OSV.dev API payloads. */
-export type OsvEcosystem = 'npm' | 'PyPI';
+export type OsvEcosystem = 'npm' | 'PyPI' | 'Go' | 'crates.io' | 'RubyGems' | 'Packagist' | 'NuGet' | 'Pub';
 
 /**
  * A single resolved dependency as extracted from a lockfile.
@@ -55,13 +55,10 @@ export interface ParsedLockfile {
 
 /** An affected version range as returned by OSV / GHSA. */
 export interface AffectedRange {
-    /** OSV ecosystem ('npm' | 'PyPI'). */
     ecosystem: OsvEcosystem;
-    /** Lower bound of the affected range, inclusive (optional). */
     introduced?: string;
-    /** Upper bound of the affected range, exclusive (the "first fixed" version). */
     fixed?: string;
-    /** Raw range string for diagnostics. */
+    lastAffected?: string;
     raw?: string;
 }
 
@@ -90,6 +87,8 @@ export interface Vulnerability {
     exploitAvailable?: boolean;
     /** Published date (ISO) when available. */
     published?: string;
+    /** Aliases (CVE ids, GHSA ids) from the OSV record. */
+    aliases?: string[];
 }
 
 /** A vulnerability matched to a resolved package. */

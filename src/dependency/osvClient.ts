@@ -3,7 +3,10 @@ import { ResolvedPackage, Vulnerability, AffectedRange, OsvEcosystem } from './t
 import { CacheStore } from './finding';
 
 const OSV_QUERYBATCH_URL = 'https://api.osv.dev/v1/querybatch';
+const OSV_VULN_URL = 'https://api.osv.dev/v1/vulns';
 const OSV_BATCH_SIZE = 1000; // OSV limit per batch request.
+const OSV_HYDRATE_CONCURRENCY = 8;
+const OSV_HYDRATE_TIMEOUT_MS = 15000;
 const GHSA_ADVISORIES_URL = 'https://api.github.com/advisories';
 const GHSA_PER_PAGE = 100;
 // Unauthenticated: 60 req/hr. With token: 5000 req/hr.
@@ -35,6 +38,18 @@ function osvEcosystemOf(pkg: ResolvedPackage): OsvEcosystem | null {
         case 'pip':
         case 'pipenv':
             return 'PyPI';
+        case 'go':
+            return 'Go';
+        case 'cargo':
+            return 'crates.io';
+        case 'rubygems':
+            return 'RubyGems';
+        case 'composer':
+            return 'Packagist';
+        case 'nuget':
+            return 'NuGet';
+        case 'pub':
+            return 'Pub';
         default:
             return null;
     }
@@ -53,11 +68,15 @@ function osvEcosystemOf(pkg: ResolvedPackage): OsvEcosystem | null {
  */
 export async function queryOsvBatch(
     packages: ResolvedPackage[],
+    cache?: CacheStore,
 ): Promise<Map<string, Vulnerability[]>> {
     const out = new Map<string, Vulnerability[]>();
 
     const queryable = packages.filter(p => !p.unresolved && !!p.version && !!p.name);
     if (queryable.length === 0) return out;
+
+    const idsByKey = new Map<string, string[]>();
+    const allIds = new Set<string>();
 
     for (let i = 0; i < queryable.length; i += OSV_BATCH_SIZE) {
         const slice = queryable.slice(i, i + OSV_BATCH_SIZE);
@@ -66,9 +85,6 @@ export async function queryOsvBatch(
         for (const p of slice) {
             const eco = osvEcosystemOf(p);
             if (!eco) continue;
-            // npm-family names must match the npm registry casing OSV expects;
-            // OSV is case-sensitive on the npm ecosystem. Use the original name
-            // (npm is case-insensitive in practice but OSV stores as-published).
             queries.push({ package: { name: p.name, ecosystem: eco }, version: p.version });
             keyForIndex.push(`${eco}:${p.name}@${p.version}`);
         }
@@ -100,11 +116,6 @@ export async function queryOsvBatch(
         }
         if (!resp || !Array.isArray(resp.results)) continue;
 
-        // Positional alignment guard: OSV querybatch contract guarantees
-        // results.length === queries.length, with null entries for no-match.
-        // If the response is shorter, the positional mapping would silently
-        // misattribute advisory IDs across packages. Skip the batch rather
-        // than risk cross-package ID leakage.
         if (resp.results.length !== keyForIndex.length) {
             console.warn(`[OSV] batch result length mismatch: ${resp.results.length} vs ${keyForIndex.length} queries — skipping batch to prevent ID misattribution`);
             continue;
@@ -116,70 +127,203 @@ export async function queryOsvBatch(
             const r = resp.results[j];
             const vulns = r?.vulns;
             if (!vulns || vulns.length === 0) continue;
-            const list: Vulnerability[] = [];
+            const ids: string[] = [];
             for (const v of vulns) {
-                const affected: AffectedRange[] = [];
-                if (Array.isArray(v.affected)) {
-                    for (const a of v.affected) {
-                        const ranges: any[] = a?.ranges || [];
-                        for (const rng of ranges) {
-                            if (!Array.isArray(rng.events)) continue;
-                            let introduced: string | undefined;
-                            let fixed: string | undefined;
-                            for (const ev of rng.events) {
-                                if (typeof ev.introduced === 'string') introduced = ev.introduced;
-                                if (typeof ev.fixed === 'string') fixed = ev.fixed;
-                            }
-                            affected.push({
-                                ecosystem: (a?.package?.ecosystem as OsvEcosystem) || 'npm',
-                                introduced,
-                                fixed,
-                                raw: JSON.stringify(rng),
-                            });
-                        }
-                    }
+                if (v.id) {
+                    ids.push(v.id);
+                    allIds.add(v.id);
                 }
-                let cvssScore: number | undefined;
-                if (Array.isArray(v.severity)) {
-                    for (const s of v.severity) {
-                        if (s?.type === 'CVSS_V3' && typeof s.score === 'string') {
-                            // Try plain numeric score first (some records use "7.5").
-                            const num = parseFloat(s.score);
-                            if (!Number.isNaN(num) && s.score.trim().length <= 5) {
-                                cvssScore = num;
-                            } else {
-                                // Parse CVSS vector string (e.g. "CVSS:3.1/AV:N/AC:L/...").
-                                // Extract the base score from the vector by counting
-                                // the metrics — but since the vector doesn't contain a
-                                // precomputed score, fall back to NVD enrichment which
-                                // has the real baseScore field.
-                                // NVD enrichment (enrichWithNvd) will fill this in
-                                // if the record has a CVE alias.
-                            }
-                        }
-                    }
-                }
-                const references: string[] = [];
-                if (Array.isArray(v.references)) {
-                    for (const ref of v.references) {
-                        if (typeof ref?.url === 'string') references.push(ref.url);
-                    }
-                }
-                list.push({
-                    id: v.id,
-                    source: 'osv',
-                    sources: ['osv'],
-                    summary: v.summary || '',
-                    affected,
-                    cvssScore,
-                    references,
-                });
             }
-            out.set(key, list);
+            idsByKey.set(key, ids);
         }
     }
 
+    if (allIds.size === 0) return out;
+
+    const hydrated = await hydrateOsvVulns(Array.from(allIds), cache);
+
+    for (const [key, ids] of idsByKey) {
+        const list: Vulnerability[] = [];
+        for (const id of ids) {
+            const v = hydrated.get(id);
+            if (v) list.push(v);
+        }
+        if (list.length > 0) out.set(key, list);
+    }
+
     return out;
+}
+
+async function fetchOsvVuln(id: string): Promise<any | null> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), OSV_HYDRATE_TIMEOUT_MS);
+            const r = await fetch(`${OSV_VULN_URL}/${encodeURIComponent(id)}`, {
+                signal: controller.signal,
+            });
+            clearTimeout(timeout);
+            if (r.ok) return await r.json();
+            if (r.status >= 400 && r.status < 500) return null;
+        } catch {
+            if (attempt === 1) return null;
+        }
+    }
+    return null;
+}
+
+async function hydrateOsvVulns(
+    ids: string[],
+    cache?: CacheStore,
+): Promise<Map<string, Vulnerability>> {
+    const result = new Map<string, Vulnerability>();
+    const toFetch: string[] = [];
+
+    for (const id of ids) {
+        if (cache) {
+            const cached = cache.get<Vulnerability>(`osv.vuln.${id}`);
+            if (cached) {
+                result.set(id, cached);
+                continue;
+            }
+        }
+        toFetch.push(id);
+    }
+
+    for (let i = 0; i < toFetch.length; i += OSV_HYDRATE_CONCURRENCY) {
+        const chunk = toFetch.slice(i, i + OSV_HYDRATE_CONCURRENCY);
+        const fetched = await Promise.allSettled(chunk.map(id => fetchOsvVuln(id)));
+        for (let j = 0; j < chunk.length; j++) {
+            const f = fetched[j];
+            if (f.status !== 'fulfilled' || !f.value) continue;
+            const raw = f.value;
+            const vuln = parseOsvVuln(raw);
+            if (vuln) {
+                result.set(chunk[j], vuln);
+                if (cache) cache.update(`osv.vuln.${chunk[j]}`, vuln);
+            }
+        }
+    }
+
+    return result;
+}
+
+function parseOsvVuln(raw: any): Vulnerability | null {
+    if (!raw || !raw.id) return null;
+
+    const affected: AffectedRange[] = [];
+    if (Array.isArray(raw.affected)) {
+        for (const a of raw.affected) {
+            const ranges: any[] = a?.ranges || [];
+            for (const rng of ranges) {
+                if (!Array.isArray(rng.events)) continue;
+                let introduced: string | undefined;
+                let fixed: string | undefined;
+                let lastAffected: string | undefined;
+                for (const ev of rng.events) {
+                    if (typeof ev.introduced === 'string') introduced = ev.introduced;
+                    if (typeof ev.fixed === 'string') fixed = ev.fixed;
+                    if (typeof ev.last_affected === 'string') lastAffected = ev.last_affected;
+                }
+                affected.push({
+                    ecosystem: (a?.package?.ecosystem as OsvEcosystem) || 'npm',
+                    introduced,
+                    fixed,
+                    lastAffected,
+                    raw: JSON.stringify(rng),
+                });
+            }
+        }
+    }
+
+    let cvssScore: number | undefined;
+    if (Array.isArray(raw.severity)) {
+        for (const s of raw.severity) {
+            if (s?.type === 'CVSS_V3' && typeof s.score === 'string') {
+                const num = parseFloat(s.score);
+                if (!Number.isNaN(num) && s.score.trim().length <= 5) {
+                    cvssScore = num;
+                } else if (s.score.startsWith('CVSS:')) {
+                    const baseScore = extractCvssBaseScore(s.score);
+                    if (baseScore !== undefined) cvssScore = baseScore;
+                }
+            }
+        }
+    }
+    if (cvssScore === undefined && Array.isArray(raw.affected)) {
+        for (const a of raw.affected) {
+            const dbSev = a?.database_specific?.severity || a?.ecosystem_specific?.severity;
+            if (typeof dbSev === 'string') {
+                const mapped = severityStringToScore(dbSev);
+                if (mapped !== undefined) cvssScore = mapped;
+                break;
+            }
+        }
+    }
+    if (cvssScore === undefined && typeof raw.database_specific?.severity === 'string') {
+        const mapped = severityStringToScore(raw.database_specific.severity);
+        if (mapped !== undefined) cvssScore = mapped;
+    }
+
+    const aliases: string[] = Array.isArray(raw.aliases) ? raw.aliases.filter((a: any) => typeof a === 'string') : [];
+
+    const references: string[] = [];
+    if (Array.isArray(raw.references)) {
+        for (const ref of raw.references) {
+            if (typeof ref?.url === 'string') references.push(ref.url);
+        }
+    }
+
+    return {
+        id: raw.id,
+        source: 'osv',
+        sources: ['osv'],
+        summary: raw.summary || raw.details?.slice(0, 200) || '',
+        affected,
+        cvssScore,
+        references,
+        aliases,
+    };
+}
+
+function extractCvssBaseScore(vector: string): number | undefined {
+    const parts = vector.split('/');
+    const metrics: Record<string, string> = {};
+    for (const p of parts) {
+        const [k, v] = p.split(':');
+        if (k && v) metrics[k] = v;
+    }
+    const av = { N: 0.85, A: 0.62, L: 0.55, P: 0.2 }[metrics['AV'] || ''];
+    const ac = { L: 0.77, H: 0.44 }[metrics['AC'] || ''];
+    if (av === undefined || ac === undefined) return undefined;
+    const pr = metrics['PR'] === 'N' ? 0.85 : metrics['PR'] === 'L' ? 0.62 : 0.27;
+    const ui = metrics['UI'] === 'N' ? 0.85 : 0.68;
+    const impactC = { H: 0.56, L: 0.22, N: 0 }[metrics['C'] || ''] ?? 0;
+    const impactI = { H: 0.56, L: 0.22, N: 0 }[metrics['I'] || ''] ?? 0;
+    const impactA = { H: 0.56, L: 0.22, N: 0 }[metrics['A'] || ''] ?? 0;
+    const iss = 1 - ((1 - impactC) * (1 - impactI) * (1 - impactA));
+    if (iss <= 0) return 0;
+    const scope = metrics['S'] === 'C' ? 'changed' : 'unchanged';
+    const impact = scope === 'changed'
+        ? 7.52 * (iss - 0.029) - 3.25 * Math.pow(iss - 0.02, 15)
+        : 6.42 * iss;
+    const exploitability = 8.22 * av * ac * pr * ui;
+    if (impact <= 0) return 0;
+    const raw = scope === 'changed'
+        ? Math.min(1.08 * (impact + exploitability), 10)
+        : Math.min(impact + exploitability, 10);
+    return Math.round(raw * 10) / 10;
+}
+
+function severityStringToScore(sev: string): number | undefined {
+    switch (sev.toUpperCase()) {
+        case 'CRITICAL': return 9.0;
+        case 'HIGH': return 7.5;
+        case 'MODERATE':
+        case 'MEDIUM': return 5.0;
+        case 'LOW': return 2.5;
+        default: return undefined;
+    }
 }
 
 /**
@@ -208,7 +352,18 @@ export async function queryGhsaViaCli(
     for (const p of queryable) {
         const eco = osvEcosystemOf(p);
         if (!eco) continue;
-        const ghEco = eco === 'npm' ? 'npm' : 'pip';
+        const ghEcoMap: Partial<Record<OsvEcosystem, string>> = {
+            'npm': 'npm',
+            'PyPI': 'pip',
+            'Go': 'go',
+            'crates.io': 'rust',
+            'RubyGems': 'rubygems',
+            'Packagist': 'composer',
+            'NuGet': 'nuget',
+            'Pub': 'pub',
+        };
+        const ghEco = ghEcoMap[eco];
+        if (!ghEco) continue;
         let advisories: any[];
         try {
             advisories = await queryGhsaRest(ghEco, p.name);
@@ -408,16 +563,21 @@ export async function enrichWithNvd(
 ): Promise<Vulnerability[]> {
     for (const v of records) {
         if (v.cvssScore !== undefined) continue;
-        // Only CVE-ids are resolvable on NVD.
-        if (!/^CVE-\d{4}-\d+$/i.test(v.id)) continue;
+        let cveId: string | undefined;
+        if (/^CVE-\d{4}-\d+$/i.test(v.id)) {
+            cveId = v.id;
+        } else if (Array.isArray(v.aliases)) {
+            cveId = v.aliases.find(a => /^CVE-\d{4}-\d+$/i.test(a));
+        }
+        if (!cveId) continue;
 
-        const cacheKey = NVD_CACHE_KEY_PREFIX + v.id;
+        const cacheKey = NVD_CACHE_KEY_PREFIX + cveId;
         const cached = state.get<NvdCacheEntry>(cacheKey);
         let entry: NvdCacheEntry | null;
         if (cached && Date.now() - cached.fetchedAt < NVD_TTL_MS) {
             entry = cached;
         } else {
-            entry = await nvdLookup(v.id);
+            entry = await nvdLookup(cveId);
             if (entry) state.update(cacheKey, entry);
         }
         if (entry?.score !== undefined) {

@@ -2,14 +2,11 @@ import * as readline from 'readline';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { JsonRpcRequest, JsonRpcResponse, ToolDef, ServerContext } from './types';
-import { TOOLS, ATTACK_ENABLED } from './tools';
+import { TOOLS, RENAMED_TOOLS } from './tools';
 import { validateAllToolsHavePolicies } from '../approval/policy';
-import { toolScan } from '../tools/scan';
 import { toolMap } from '../tools/map';
 import { toolFix } from '../tools/fix';
-import { toolAttack } from '../tools/attack';
 import { toolScanDependencies } from '../tools/scanDependencies';
-import { toolScanBatch } from '../tools/scanBatch';
 import { toolScanSecrets } from '../tools/scanSecrets';
 import {
     toolAgentScanViaJob,
@@ -22,8 +19,8 @@ import {
 } from '../tools/jobTools';
 import { getGlobalJobRunner } from '../jobs/jobRunner';
 import { toolRunTests } from '../tools/runTests';
-import { toolRecordFalsePositive, toolGetAgentMemory, toolClearAgentMemory, toolAddKnownFact } from '../tools/agentMemoryTools';
-import { toolReviewFindings, toolDecideFinding, toolClearFindingReviews } from '../tools/findingReviewTools';
+import { toolMemory } from '../tools/agentMemoryTools';
+import { toolReviewFindings, toolDecideFinding } from '../tools/findingReviewTools';
 
 const PROTOCOL_VERSION = '2025-03-26';
 const SERVER_NAME = 'securecode-mcp';
@@ -47,7 +44,6 @@ function error(id: number | string | null, code: number, message: string, data?:
     send({ jsonrpc: '2.0', id, error: { code, message, data } });
 }
 
-/** Send a progress notification so the MCP client knows the server is still working. */
 function sendProgress(progressToken: string | number | undefined, progress: number, total: number, message: string): void {
     if (progressToken === undefined) return;
     send({
@@ -58,7 +54,6 @@ function sendProgress(progressToken: string | number | undefined, progress: numb
 }
 
 const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<unknown>> = {
-    'securecode.scan': toolScan,
     'securecode.architecture': (ctx, args) =>
         toolMap(ctx, {
             action: 'architecture',
@@ -67,9 +62,7 @@ const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<u
             _progress: args?._progress,
         }),
     'securecode.fix': toolFix,
-    ...(ATTACK_ENABLED ? { 'securecode.attack': toolAttack } : {}),
     'securecode.scan-dependencies': toolScanDependencies,
-    'securecode.scan-batch': toolScanBatch,
     'securecode.scan-secrets': toolScanSecrets,
     'securecode.agent-scan': toolAgentScanViaJob,
     'securecode.agent-scan-batch': toolAgentScanBatchViaJob,
@@ -79,13 +72,9 @@ const TOOL_HANDLERS: Record<string, (ctx: ServerContext, args: any) => Promise<u
     'securecode.job-cancel': toolJobCancel,
     'securecode.job-list': toolJobList,
     'securecode.run-tests': toolRunTests,
-    'securecode.record-false-positive': toolRecordFalsePositive,
-    'securecode.get-agent-memory': toolGetAgentMemory,
-    'securecode.clear-agent-memory': toolClearAgentMemory,
-    'securecode.add-known-fact': toolAddKnownFact,
+    'securecode.memory': toolMemory,
     'securecode.review-findings': toolReviewFindings,
     'securecode.decide-finding': toolDecideFinding,
-    'securecode.clear-finding-reviews': toolClearFindingReviews,
 };
 
 const _policyMissing = validateAllToolsHavePolicies(Object.keys(TOOL_HANDLERS));
@@ -121,8 +110,6 @@ function validateArgs(tool: ToolDef, args: any): string | null {
     return null;
 }
 
-/** Extract a workspace path from the MCP initialize request's workspaceFolders.
- * Cursor/VS Code send `file:///...` URIs. Falls back to the existing ctx.workspaceRoot. */
 function resolveWorkspaceFromInit(params: any, fallback: string): string {
     const folders = params?.workspaceFolders;
     if (Array.isArray(folders) && folders.length > 0) {
@@ -130,9 +117,7 @@ function resolveWorkspaceFromInit(params: any, fallback: string): string {
         if (typeof uri === 'string') {
             let p: string;
             if (uri.startsWith('file://')) {
-                // file:///D:/foo or file:///home/user/foo
                 p = uri.replace(/^file:\/\/\/?/, '');
-                // On Windows, restore the drive colon: /D:/foo -> D:/foo
                 if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
                 p = decodeURIComponent(p);
             } else {
@@ -141,13 +126,11 @@ function resolveWorkspaceFromInit(params: any, fallback: string): string {
             p = path.resolve(p);
             if (fs.existsSync(p)) return p;
         }
-        // Some clients send `rootPath` instead of `workspaceFolders`
         if (typeof folders[0] === 'string') {
             const p = path.resolve(folders[0]);
             if (fs.existsSync(p)) return p;
         }
     }
-    // VS Code legacy field
     const rootPath = params?.rootPath;
     if (typeof rootPath === 'string' && rootPath) {
         const p = path.resolve(rootPath);
@@ -206,6 +189,13 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
                 console.error(`[securecode-mcp] progress token: ${progressToken === undefined ? 'absent (client will not show live progress)' : 'present'}`);
                 const handler = name ? TOOL_HANDLERS[name] : undefined;
                 if (!handler) {
+                    const renamedMsg = name ? RENAMED_TOOLS[name] : undefined;
+                    if (renamedMsg) {
+                        return {
+                            jsonrpc: '2.0', id,
+                            error: { code: -32601, message: `Tool "${name}" has been ${renamedMsg}.` },
+                        };
+                    }
                     return { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${name}` } };
                 }
                 const toolDef = TOOLS.find((t) => t.name === name);
@@ -216,14 +206,10 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
                 if (invalid) {
                     return { jsonrpc: '2.0', id, error: { code: -32602, message: invalid } };
                 }
-                // Pass progress callback to the handler via args
                 if (progressToken !== undefined) {
                     args._progress = (progress: number, total: number, message: string) =>
                         sendProgress(progressToken, progress, total, message);
                 }
-                // Cancellation: hand the handler an AbortSignal tied to this
-                // request id so notifications/cancelled can stop long-running
-                // work (a 30-45 min agent scan) instead of orphaning it.
                 const cancelController = new AbortController();
                 args._signal = cancelController.signal;
                 activeToolCalls.set(id as string | number, cancelController);
@@ -263,8 +249,6 @@ async function handleRequest(ctx: ServerContext, req: JsonRpcRequest): Promise<J
     }
 }
 
-/** Parse a URI or path to a filesystem path.
- * Handles file:// URIs (VS Code), plain Windows paths (Cursor), and POSIX paths. */
 function uriToPath(uri: string): string | null {
     let p: string;
     if (uri.startsWith('file://')) {
@@ -272,14 +256,12 @@ function uriToPath(uri: string): string | null {
         if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
         p = decodeURIComponent(p);
     } else {
-        // Cursor sends plain paths like "d:\BunyanTech\..." or "D:/foo"
         p = uri;
     }
     p = path.resolve(p);
     return fs.existsSync(p) ? p : null;
 }
 
-/** Handle the client's response to our roots/list request. */
 function handleRootsResponse(ctx: ServerContext, response: any): void {
     try {
         const roots = response.result?.roots;
@@ -321,9 +303,6 @@ export function startServer(ctx: ServerContext): void {
             return;
         }
 
-        // Check if this is a RESPONSE to a server-initiated request (e.g. roots/list).
-        // Responses have `id` + `result` or `error` but no `method`.
-        // This check runs BEFORE the method validation so responses aren't rejected.
         const maybeResponse = parsed as any;
         if (maybeResponse.id !== undefined && maybeResponse.id !== null && typeof maybeResponse.method !== 'string') {
             if (pendingRootsRequests.has(maybeResponse.id)) {

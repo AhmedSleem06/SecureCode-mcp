@@ -36,7 +36,7 @@ describe('selectInvestigationProfile', () => {
     it('selects Auth Service profile for auth file', () => {
         const profile = selectInvestigationProfile({ filePath: 'src/auth/ServerAuth.ts' });
         expect(profile.name).toBe('auth-service');
-        expect(profile.requiredSteps).toContain('tests-found');
+        expect(profile.requiredSteps).not.toContain('tests-found');
     });
 
     it('selects Auth Service profile for token file', () => {
@@ -50,7 +50,7 @@ describe('selectInvestigationProfile', () => {
             architectureContext: 'Express routes defined in http.ts',
         });
         expect(profile.name).toBe('http-route');
-        expect(profile.requiredSteps).toContain('route-discovery');
+        expect(profile.requiredSteps).not.toContain('route-discovery');
         expect(profile.requiredSteps).toContain('policy-check');
     });
 
@@ -179,7 +179,7 @@ export class ServerAuth extends ServiceMap.Service<ServerAuth, ServerAuthShape>(
     it('declaration profile requires only an initial read and an implementation search', () => {
         expect(DECLARATION_PROFILE.requirements.map(r => r.id)).toEqual(['decl-initial-read', 'decl-find-implementation']);
         const find = DECLARATION_PROFILE.requirements[1];
-        expect(find.requiredTools).toEqual(['search_code', 'find_references']);
+        expect(find.requiredTools).toEqual(['search_code']);
         expect(find.acceptsNegative).toBe(true);
     });
 

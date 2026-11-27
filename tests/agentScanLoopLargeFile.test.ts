@@ -120,7 +120,7 @@ describe('runAgentScan — visible read window', () => {
             read(1, 200, 35),
             stepResponse({ type: 'trace_flow_cross_file', filePath: 'w.ts', rationale: 'trace' }, 34),
             stepResponse({ type: 'read_config', configKind: 'all', rationale: 'config' }, 33),
-            stepResponse({ type: 'find_tests', filePath: 'w.ts', rationale: 'tests' }, 32),
+            stepResponse({ type: 'list_files', path: 'tests', rationale: 'tests' }, 32),
             stepResponse({ type: 'finish', findings: [], summary: 'done', selfCritique: 'done' }, 31),
         ]);
 
@@ -170,7 +170,7 @@ describe('runAgentScan — traced flow makes a finding ready', () => {
             stepResponse({ type: 'trace_flow', filePath: 'bugs.ts', rationale: 'trace' }, 38),
             stepResponse({ type: 'trace_flow_cross_file', filePath: 'bugs.ts', rationale: 'trace' }, 37),
             stepResponse({ type: 'read_config', configKind: 'all', rationale: 'config' }, 36),
-            stepResponse({ type: 'find_tests', filePath: 'bugs.ts', rationale: 'tests' }, 35),
+            stepResponse({ type: 'list_files', path: 'tests', rationale: 'tests' }, 35),
             stepResponse({
                 type: 'finish',
                 findings: [{ line: 12, type: 'sql_injection', severity: 'critical', confidence: 90, evidence: 'db.query("..." + req.query.id)', why: 'User input concatenated into SQL' }],
@@ -210,7 +210,7 @@ describe('runAgentScan — large-file read recovery', () => {
             stepResponse({ type: 'read_file', path: 'big.ts', startLine: 400, endLine: 450, rationale: 're-read remainder' }, 34),
             stepResponse({ type: 'trace_flow_cross_file', filePath: 'big.ts', rationale: 'trace' }, 33),
             stepResponse({ type: 'read_config', configKind: 'all', rationale: 'config' }, 32),
-            stepResponse({ type: 'find_tests', filePath: 'big.ts', rationale: 'tests' }, 31),
+            stepResponse({ type: 'list_files', path: 'tests', rationale: 'tests' }, 31),
             stepResponse({ type: 'finish', findings: [], summary: 'done', selfCritique: 'done' }, 30),
         ]);
 
@@ -278,10 +278,9 @@ describe('runAgentScan — large-file read recovery', () => {
             startResponse(),
             stepResponse({ ...dupRead }, 39),   // T[0]: full read, coverage 1..100
             dup(38), dup(37), dup(36),          // blocked 1,2,3 → recovery A (cross-file-flow)
-            dup(35), dup(34), dup(33),          // blocked 1,2,3 → recovery B (tests-found)
-            dup(32), dup(31), dup(30),          // blocked 1,2,3 → recovery C (threat-model → read_config)
-            stepResponse({ type: 'trace_flow_cross_file', filePath: 'small.ts', rationale: 'trace' }, 29),
-            stepResponse({ type: 'finish', findings: [], summary: 'done', selfCritique: 'done' }, 28),
+            dup(35), dup(34), dup(33),          // blocked 1,2,3 → recovery B (threat-model → read_config)
+            stepResponse({ type: 'trace_flow_cross_file', filePath: 'small.ts', rationale: 'trace' }, 32),
+            stepResponse({ type: 'finish', findings: [], summary: 'done', selfCritique: 'done' }, 31),
         ]);
 
         const result = await runAgentScan(ctx, target, {});
@@ -295,13 +294,12 @@ describe('runAgentScan — large-file read recovery', () => {
         // (cross-file flow → tests → config) instead of re-proposing the
         // same action until triple-rejection terminated the run.
         const recoverySteps = result.transcript.filter(s => s.observation?.startsWith('[DETERMINISTIC RECOVERY]'));
-        expect(recoverySteps.length).toBe(3);
+        expect(recoverySteps.length).toBe(2);
         expect(recoverySteps.map(s => s.action.type)).toEqual([
-            'trace_flow_cross_file', 'find_tests', 'read_config',
+            'trace_flow_cross_file', 'read_config',
         ]);
         expect(recoverySteps[0].action).toMatchObject({ filePath: 'small.ts', requirementId: 'util-cross-file-flow' });
-        expect(recoverySteps[1].action).toMatchObject({ filePath: 'small.ts', requirementId: 'util-tests-found' });
-        expect(recoverySteps[2].action).toMatchObject({ configKind: 'all', requirementId: 'util-threat-model' });
+        expect(recoverySteps[1].action).toMatchObject({ configKind: 'all', requirementId: 'util-threat-model' });
 
         // No duplicate-recovery rejection was ever issued.
         const warned = (console.warn as any).mock.calls.some((c: any[]) => String(c[0]).includes('Duplicate recovery action'));

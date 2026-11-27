@@ -220,31 +220,27 @@ describe('SecureCode MCP — protocol conformance', () => {
         const res = await client.request('tools/list');
         const names = res.tools.map((t: any) => t.name);
         expect(names).toEqual(expect.arrayContaining([
-            'securecode.scan',
             'securecode.architecture',
             'securecode.fix',
             'securecode.scan-dependencies',
-            'securecode.scan-batch',
             'securecode.scan-secrets',
             'securecode.agent-scan',
             'securecode.agent-scan-batch',
             'securecode.run-tests',
-            'securecode.record-false-positive',
-            'securecode.get-agent-memory',
-            'securecode.clear-agent-memory',
-            'securecode.add-known-fact',
+            'securecode.memory',
             'securecode.review-findings',
             'securecode.decide-finding',
-            'securecode.clear-finding-reviews',
             'securecode.agent-scan-start',
             'securecode.agent-scan-batch-start',
             'securecode.job-status',
             'securecode.job-cancel',
             'securecode.job-list',
         ]));
+        expect(names).not.toContain('securecode.scan');
         expect(names).not.toContain('securecode.attack');
+        expect(names).not.toContain('securecode.scan-batch');
         expect(names).not.toContain('securecode.map');
-        expect(names.length).toBe(21);
+        expect(names.length).toBe(15);
     });
 
     it('job start tools reuse the legacy input schemas', async () => {
@@ -271,35 +267,27 @@ describe('SecureCode MCP — protocol conformance', () => {
         }
     });
 
-    it('securecode.scan forwards to the API and returns findings', async () => {
-        const res = await client.callTool('securecode.scan', {
-            code: 'const id = req.query.id;\ndb.query("SELECT * FROM users WHERE id = " + id);',
-            language: 'javascript',
-        });
-        expect(res.content).toBeDefined();
-        expect(res.content[0].type).toBe('text');
-        const payload = JSON.parse(res.content[0].text);
-        expect(payload.scanType).toBe('advanced');
-        expect(payload.findings.length).toBeGreaterThan(0);
-        expect(payload.findings[0].type).toBe('sql_injection');
-        expect(payload.findings[0].severity).toBe('HIGH');
-    });
-
-    it('securecode.scan reads from disk when given filePath', async () => {
-        const res = await client.callTool('securecode.scan', {
-            filePath: 'vuln.js',
-        });
-        const payload = JSON.parse(res.content[0].text);
-        expect(payload.scanType).toBe('advanced');
-        expect(payload.findings.length).toBeGreaterThan(0);
-    });
-
-    it('securecode.scan rejects a filePath outside the workspace', async () => {
+    it('removed tool securecode.scan returns a helpful rename error', async () => {
         try {
-            await client.callTool('securecode.scan', { filePath: '../etc/passwd' });
+            await client.callTool('securecode.scan', {
+                code: 'const x = 1;',
+                language: 'javascript',
+            });
             expect(false).toBe(true);
         } catch (err: any) {
-            expect(err.message).toMatch(/outside the workspace/i);
+            expect(err.message).toContain('removed');
+            expect(err.message).toContain('agent-scan');
+        }
+    });
+
+    it('removed tool securecode.record-false-positive returns rename hint', async () => {
+        try {
+            await client.callTool('securecode.record-false-positive', {
+                filePath: 'x.ts', findingType: 'xss', line: 1, evidence: 'x', reason: 'test',
+            });
+            expect(false).toBe(true);
+        } catch (err: any) {
+            expect(err.message).toContain('securecode.memory');
         }
     });
 

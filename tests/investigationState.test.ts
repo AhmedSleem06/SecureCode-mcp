@@ -146,10 +146,10 @@ describe('InvestigationState', () => {
         expect(state.getCompletedSteps()).toContain('config-inspection');
     });
 
-    it('marks route-discovery after get_endpoints', () => {
+    it('removed get_endpoints no longer marks route-discovery (removed from checklist)', () => {
         const state = new InvestigationState();
         state.recordToolUse('get_endpoints');
-        expect(state.getCompletedSteps()).toContain('route-discovery');
+        expect(state.getCompletedSteps()).not.toContain('route-discovery');
     });
 
     it('reports incomplete steps', () => {

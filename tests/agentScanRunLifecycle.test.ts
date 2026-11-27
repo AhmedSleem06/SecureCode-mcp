@@ -189,16 +189,16 @@ describe('toolAgentScan — API run lifecycle and scan budget', () => {
         expect(result.summary).toContain('2 credits were refunded.');
     });
 
-    it('sends runId to the API sandbox fallback', async () => {
+    it('returns INCONCLUSIVE directly when sandbox-unavailable (no server fallback)', async () => {
         vi.mocked(runVerifyLoop).mockResolvedValue({ verdict: 'INCONCLUSIVE', reason: 'no sandbox', roundsUsed: 0, testScript: '', testOutput: '', subVerdict: 'sandbox-unavailable' } as any);
-        const postJson = mockApi({
-            '/sandbox/prove': () => ({ proven: 'UNPROVEN', rationale: 'safe' }),
-        });
+        const postJson = mockApi();
 
-        await runScan();
+        const result = await runScan();
 
         const prove = (postJson.mock.calls as any[]).find(c => c[0] === '/sandbox/prove');
-        expect(prove[1].runId).toBe('run-77');
+        expect(prove).toBeUndefined();
+        expect(result.agentFindings[0].proven).toBe('INCONCLUSIVE');
+        expect(result.agentFindings[0].verifySubVerdict).toBe('sandbox-unavailable');
         expect(closeCalls(postJson)).toHaveLength(1);
     });
 
@@ -261,23 +261,15 @@ describe('toolAgentScan — API run lifecycle and scan budget', () => {
         expect(closeCalls(postJson)).toHaveLength(1);
     });
 
-    it('treats a 402 budget error from the API sandbox as exhausted, not a crash', async () => {
+    it('sandbox-unavailable plus verify error falls back to INCONCLUSIVE cleanly', async () => {
         vi.mocked(runAgentScan).mockResolvedValue(agentResult({ findings: [finding(4), finding(5)] }));
         vi.mocked(runVerifyLoop).mockResolvedValue({ verdict: 'INCONCLUSIVE', reason: 'no sandbox', roundsUsed: 0, testScript: '', testOutput: '', subVerdict: 'sandbox-unavailable' } as any);
-        mockApi({
-            '/sandbox/prove': () => {
-                const err: any = new Error('Scan budget exhausted');
-                err.status = 402;
-                err.apiCode = 'AGENT_SCAN_BUDGET_EXHAUSTED';
-                throw err;
-            },
-        });
+        mockApi();
 
         const result = await runScan();
 
-        expect(vi.mocked(runVerifyLoop)).toHaveBeenCalledTimes(1);
         expect(result.agentFindings.map((f: any) => f.proven)).toEqual(['INCONCLUSIVE', 'INCONCLUSIVE']);
-        expect(result.agentFindings[1].provenReason).toContain('top up credits');
+        expect(result.agentFindings[0].verifySubVerdict).toBe('sandbox-unavailable');
     });
 
     it('old API result (no runId, no credits) keeps working without a close call', async () => {

@@ -51,18 +51,6 @@ import { runVerifyLoop } from '../attack/verifyLoop';
 import { runFixVerifyLoop } from '../attack/fixVerifyLoop';
 import { mergeFixedCode } from '../attack/fixCodeMerge';
 import { testFix } from '../project-map/fixTester';
-import {
-    detectDevServer,
-    executeProbePlan,
-    isProbeEligible,
-    isProbeEligibleType,
-    hasProbeEligibleReason,
-    matchEndpointForFinding,
-    deriveEndpointFallback,
-    type DevServerTarget,
-    type ProbeEndpointCandidate,
-} from '../attack/runtimeProbe';
-import { detectRuntime } from '../utils/runtimeDetect';
 import { VerifyBudgetTracker, defaultVerifyBudget, defaultFixVerifyBudget, AGENT_SCAN_DEFAULTS, type VerifyBudget, type AgentScanScope, type FixVerificationStatus } from '../attack/agentScanProtocol';
 import {
     AgentScanRunCloser,
@@ -70,7 +58,7 @@ import {
     formatCreditUsage,
     VERIFY_BUDGET_EXHAUSTED_REASON,
 } from '../attack/agentScanCredits';
-import type { AgentScanFinding, AgentScanSegment, AgentScanTarget, VerificationLevel } from '../attack/agentScanProtocol';
+import type { AgentScanFinding, AgentScanSegment, AgentScanTarget, VerificationLevel, AgentScanMode } from '../attack/agentScanProtocol';
 import { SANDBOX_UNAVAILABLE_MESSAGE } from '../utils/localTestRunner';
 import { ApprovalBroker, consumeSessionApproval, revokeSessionApproval } from '../approval/broker';
 import { getGitChangedFiles } from '../utils/gitContext';
@@ -81,7 +69,7 @@ import {
     type ReviewReason,
     type FindingReviewItem,
 } from '../audit/findingReviewQueue';
-import type { SandboxProveResponse, FixResponse, VerifyProbePlanResponse } from '../api/types';
+import type { FixResponse } from '../api/types';
 import { runAssuranceAttackTests, type AssuranceAttackTestOutcome } from '../assurance/attackTests';
 import { GridState, type AssuranceResult } from '../assurance/gridState';
 
@@ -113,12 +101,6 @@ interface ProvenFinding extends AgentScanFinding {
     proofGateResult?: import('../attack/proofTypes').ProofGateResult;
     /** Whether human review is required before acting on this finding. */
     humanReviewRequired?: boolean;
-    /** Redacted live-server evidence from the runtime probe, when one executed. */
-    probeEvidence?: string;
-    /** Deterministic rule that decided the runtime probe verdict. */
-    probeRule?: string;
-    /** Runtime probe could verify this finding but was blocked (no dev server, approval denied, or plan refused). */
-    probePending?: boolean;
 }
 
 export interface FixVerificationResult {
@@ -131,37 +113,33 @@ export interface FixVerificationResult {
     fixedCodeHash: string;
 }
 
-/** Prove high/critical/medium findings — skip only low. */
 function shouldProve(finding: AgentScanFinding): boolean {
     return finding.severity === 'critical' || finding.severity === 'high' || finding.severity === 'medium';
 }
 
-/** Max runtime-probe verifications per scan — each probe plan draws from the scan's credit budget. */
-const MAX_PROBE_FINDINGS_PER_SCAN = 3;
+function shouldProveQuick(finding: AgentScanFinding): boolean {
+    return finding.severity === 'critical' || finding.severity === 'high';
+}
+
+function mapModeToWire(mode: string | undefined): 'quick' | 'standard' | 'assurance' | undefined {
+    switch (mode) {
+        case 'quick': return 'quick';
+        case 'standard': return 'standard';
+        case 'deep': return 'assurance';
+        default: return undefined;
+    }
+}
 
 const RUN_CLOSE_TIMEOUT_MS = 30_000;
 
-/**
- * Map a verification verdict to a precision verification level.
- *
- * PROVEN via local sandbox → exploit-confirmed (end-to-end test ran)
- * PROVEN via API sandbox → impact-confirmed (server-side test ran)
- * PROVEN via runtime probe → impact-confirmed (live-server evidence)
- * UNPROVEN → logic-confirmed (test proved behavior is safe)
- * INCONCLUSIVE/SKIPPED → logic-confirmed (couldn't determine)
- *
- * If the finding already has a verificationLevel from the agent, keep the
- * higher of the two (agent's level vs verify-mapped level).
- */
 function mapVerificationLevel(
     proven: string,
     viaApiSandbox: boolean,
     agentLevel?: VerificationLevel,
-    viaRuntimeProbe?: boolean,
 ): VerificationLevel {
     let mapped: VerificationLevel;
     if (proven === 'PROVEN') {
-        mapped = viaApiSandbox || viaRuntimeProbe ? 'impact-confirmed' : 'exploit-confirmed';
+        mapped = viaApiSandbox ? 'impact-confirmed' : 'exploit-confirmed';
     } else if (proven === 'UNPROVEN') {
         mapped = 'logic-confirmed';
     } else {
@@ -182,7 +160,6 @@ function mapVerificationLevel(
  * Falls back to 'inconclusive-verification' when no specific reason is known.
  */
 function mapToReviewReason(finding: ProvenFinding): ReviewReason {
-    if (finding.probePending) return 'runtime-probe-pending';
     const sv = finding.verifySubVerdict;
     switch (sv) {
         case 'sandbox-unavailable': return 'sandbox-unavailable';
@@ -565,6 +542,7 @@ async function scanTarget(
     const skipFix = !!args._skipFix;
     const { code, language, filePath, endpointContext, relatedFiles, scope, architectureContextStr, memoryFingerprint, useCache, target } = prep;
 
+    const requestedMode = mapModeToWire(args.mode);
     const client = new ApiClient({ baseUrl: ctx.apiUrl, token: ctx.apiToken });
     const agentResult = await runAgentScan(ctx, part ? { ...target, segment: part.segment } : target, {
         signal: (args as any)._signal as AbortSignal | undefined,
@@ -574,6 +552,7 @@ async function scanTarget(
         deferClose: true,
         ...(part ? { segment: part.segment } : {}),
         ...(typeof (args as any)._role === 'string' ? { role: (args as any)._role } : {}),
+        ...(requestedMode ? { requestedMode } : {}),
     });
     const scanRunId = agentResult.runId;
     runCloser.attach(
@@ -583,6 +562,7 @@ async function scanTarget(
         agentResult.terminationReason,
     );
     const runIdField = scanRunId ? { runId: scanRunId } : {};
+    const isQuickMode = agentResult.scanMode === 'quick';
 
     if (agentResult.status === 'failed') {
         if (!part) throw new Error(agentResult.error || 'Agent scan failed to start.');
@@ -619,18 +599,20 @@ async function scanTarget(
     let budgetExhaustedCount = 0;
     let scanBudgetExhausted = false;
     let scanBudgetExhaustedCount = 0;
-    const runtimeProbeDisabled = process.env.SECURECODE_DISABLE_RUNTIME_PROBE === '1';
-    const probeCandidates: Array<{ finding: ProvenFinding; endpoint: ProbeEndpointCandidate }> = [];
 
-    const proveable = agentResult.findings.filter(shouldProve);
+    const proveFn = isQuickMode ? shouldProveQuick : shouldProve;
+    const proveable = agentResult.findings.filter(proveFn);
     if (proveable.length > 0 && progress) {
         progress(0, proveable.length, `Verifying ${proveable.length} finding(s)...`);
     }
 
     let proveIdx = 0;
     for (const finding of agentResult.findings) {
-        if (!shouldProve(finding)) {
-            provenFindings.push({ ...finding, proven: 'SKIPPED', provenReason: 'Low severity — not verified' });
+        if (!proveFn(finding)) {
+            const reason = isQuickMode
+                ? `quick mode: proof skipped for ${finding.severity} findings`
+                : 'Low severity — not verified';
+            provenFindings.push({ ...finding, proven: 'SKIPPED', provenReason: reason });
             continue;
         }
 
@@ -728,86 +710,16 @@ async function scanTarget(
                 break;
             }
 
-            // No local sandbox (Docker/Deno) on the user's machine. Fall back to
-            // the API-side sandbox on Vultr, which has Docker installed. This
-            // gives every user exploit verification without a local install.
             if (result.subVerdict === 'sandbox-unavailable') {
-                try {
-                    const proveResp = await client.postJson<SandboxProveResponse>('/sandbox/prove', {
-                        code,
-                        language,
-                        vulnerabilityType: finding.type,
-                        line: finding.line,
-                        lineEnd: finding.lineEnd,
-                        evidence: finding.evidence,
-                        why: finding.why,
-                        ...runIdField,
-                    });
-                    provenFindings.push({
-                        ...finding,
-                        proven: proveResp.proven,
-                        provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
-                        verifySubVerdict: result.subVerdict,
-                        verificationLevel: mapVerificationLevel(proveResp.proven, true, finding.verificationLevel),
-                        proofEvidence: proveResp.proofEvidence,
-                        proofGateResult: proveResp.proofGateResult,
-                    });
-                } catch (proveErr: any) {
-                    if (isAgentScanBudgetExhausted(proveErr)) {
-                        scanBudgetExhausted = true;
-                        scanBudgetExhaustedCount++;
-                        provenFindings.push({
-                            ...finding,
-                            proven: 'INCONCLUSIVE',
-                            provenReason: VERIFY_BUDGET_EXHAUSTED_REASON,
-                            verifySubVerdict: 'budget-exhausted',
-                            verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
-                        });
-                        continue;
-                    }
-                    sandboxUnavailableCount++;
-                    provenFindings.push({
-                        ...finding,
-                        proven: 'INCONCLUSIVE',
-                        provenReason: result.reason,
-                        verifySubVerdict: result.subVerdict,
-                        verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
-                    });
-                }
+                sandboxUnavailableCount++;
+                provenFindings.push({
+                    ...finding,
+                    proven: 'INCONCLUSIVE',
+                    provenReason: result.reason,
+                    verifySubVerdict: result.subVerdict,
+                    verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
+                });
                 continue;
-            }
-
-            // Runtime-probe candidate: an INCONCLUSIVE verify whose shape
-            // (HTTP-routable vuln type + timeout/full-runtime reason) means
-            // the live dev server could exercise what the sandbox could not.
-            // Endpoint candidates come from the project map first, then the
-            // framework fallback (derived from route registrations in the
-            // scanned code / finding evidence) for files the map doesn't
-            // extract — Effect-TS, NestJS, Hono, Koa.
-            // Collected here, resolved after the loop so the whole scan gets
-            // one approval and one severity-ordered probe budget.
-            if (
-                !runtimeProbeDisabled &&
-                result.verdict === 'INCONCLUSIVE' &&
-                isProbeEligibleType(finding.type) &&
-                hasProbeEligibleReason(result.reason ?? '')
-            ) {
-                const probeEndpoint = matchEndpointForFinding(finding, endpointContext)
-                    ?? deriveEndpointFallback(finding, code);
-                if (probeEndpoint) {
-                    const probeFinding: ProvenFinding = {
-                        ...finding,
-                        proven: 'INCONCLUSIVE',
-                        provenReason: result.reason,
-                        verifySubVerdict: result.subVerdict,
-                        verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
-                        proofEvidence: result.proofEvidence,
-                        proofGateResult: result.proofGateResult,
-                    };
-                    provenFindings.push(probeFinding);
-                    probeCandidates.push({ finding: probeFinding, endpoint: probeEndpoint });
-                    continue;
-                }
             }
 
             provenFindings.push({
@@ -832,192 +744,21 @@ async function scanTarget(
                 });
                 continue;
             }
-            console.warn(`[Agent Scan] Verify loop failed: ${err.message}. Falling back to sandbox prove.`);
-            try {
-                const proveResp = await client.postJson<SandboxProveResponse>('/sandbox/prove', {
-                    code,
-                    language,
-                    vulnerabilityType: finding.type,
-                    line: finding.line,
-                    lineEnd: finding.lineEnd,
-                    evidence: finding.evidence,
-                    why: finding.why,
-                    ...runIdField,
-                });
-                provenFindings.push({
-                    ...finding,
-                    proven: proveResp.proven,
-                    provenReason: proveResp.rationale || proveResp.skipReason || proveResp.sandbox?.reason,
-                    verificationLevel: mapVerificationLevel(proveResp.proven, true, finding.verificationLevel),
-                    proofEvidence: proveResp.proofEvidence,
-                    proofGateResult: proveResp.proofGateResult,
-                });
-            } catch (err2: any) {
-                const exhausted = isAgentScanBudgetExhausted(err2);
-                if (exhausted) {
-                    scanBudgetExhausted = true;
-                    scanBudgetExhaustedCount++;
-                }
-                provenFindings.push({
-                    ...finding,
-                    proven: 'INCONCLUSIVE',
-                    provenReason: exhausted
-                        ? VERIFY_BUDGET_EXHAUSTED_REASON
-                        : `Verify failed: ${err.message}; Sandbox fallback also failed: ${err2.message}`,
-                    ...(exhausted ? { verifySubVerdict: 'budget-exhausted' } : {}),
-                    verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
-                });
+            console.warn(`[Agent Scan] Verify loop failed: ${err.message}. Marking INCONCLUSIVE.`);
+            const exhausted = isAgentScanBudgetExhausted(err);
+            if (exhausted) {
+                scanBudgetExhausted = true;
+                scanBudgetExhaustedCount++;
             }
-        }
-    }
-
-    // 4-pre. Runtime probe — live-server verification for HTTP-shaped findings
-    // the sandbox could not exercise (timeout / full-runtime shapes). One
-    // approval covers the whole scan; at most MAX_PROBE_FINDINGS_PER_SCAN
-    // findings are probed, severity-first; the rest stay INCONCLUSIVE and are
-    // queued for review with the dev-server hint.
-    let probeBlockedCount = 0;
-    let approvalSkippedCount = 0;
-    if (probeCandidates.length > 0 && !runtimeProbeDisabled) {
-        const markAllProbeBlocked = (suffix: string) => {
-            for (const candidate of probeCandidates) {
-                candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''}${suffix}`;
-                candidate.finding.probePending = true;
-            }
-            probeBlockedCount += probeCandidates.length;
-        };
-
-        let devServer: DevServerTarget | null = null;
-        try {
-            devServer = await detectDevServer(ctx.workspaceRoot);
-        } catch {
-            devServer = null;
-        }
-
-        if (!devServer) {
-            markAllProbeBlocked(' Live-server probe available — start your dev server and re-scan to attempt runtime proof.');
-        } else {
-            const probeBroker = new ApprovalBroker();
-            let probeBrokerReady = true;
-            try {
-                await probeBroker.start();
-            } catch {
-                probeBrokerReady = false;
-            }
-            try {
-                const probeSummary =
-                    `Runtime probe verification: ${probeCandidates.length} finding(s) need live-server confirmation against ${devServer.host}:${devServer.port}. ` +
-                    'Planned: short HTTP probe plans (baseline + attack requests, read-only payloads).';
-                const probeApproval = probeBrokerReady
-                    ? await probeBroker.requestApproval(
-                        'securecode.runtime-probe',
-                        probeSummary,
-                        [
-                            devServer.host,
-                            devServer.port,
-                            ...probeCandidates.map(c => `${c.endpoint.method} ${String(c.endpoint.mountedPath ?? '') || c.endpoint.path}`),
-                        ],
-                        120_000,
-                        'paid-generation',
-                        ctx.workspaceRoot,
-                        { onUrl: progress ? (url) => progress(0, 1, `⏸ Approval required — open ${url} (expires in 120s)`) : undefined },
-                    )
-                    : { approved: false, reason: 'Approval broker unavailable', requestId: '', duration: 0 };
-
-                if (!probeApproval.approved) {
-                    const skipReason = probeApproval.reason === 'User denied'
-                        ? PROOF_SKIPPED_DENIED_REASON
-                        : PROOF_SKIPPED_NO_APPROVAL_REASON;
-                    for (const candidate of probeCandidates) {
-                        candidate.finding.provenReason = [skipReason, candidate.finding.provenReason].filter(Boolean).join(' ');
-                    }
-                    approvalSkippedCount += probeCandidates.length;
-                    markAllProbeBlocked(' Live-server probe available — start your dev server and re-scan to attempt runtime proof.');
-                } else {
-                    const severityRank: string[] = ['critical', 'high', 'medium', 'low'];
-                    const orderedCandidates = [...probeCandidates].sort((a, b) =>
-                        severityRank.indexOf(a.finding.severity) - severityRank.indexOf(b.finding.severity));
-                    let probedCount = 0;
-                    const runtimeInfo = filePath ? detectRuntime(ctx.workspaceRoot, filePath) : null;
-                    for (const candidate of orderedCandidates) {
-                        if (scanBudgetExhausted) {
-                            probeBlockedCount++;
-                            candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Runtime probe skipped: ${VERIFY_BUDGET_EXHAUSTED_REASON}`;
-                            candidate.finding.probePending = true;
-                            continue;
-                        }
-                        if (probedCount >= MAX_PROBE_FINDINGS_PER_SCAN) {
-                            probeBlockedCount++;
-                            candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Live-server probe budget reached (${MAX_PROBE_FINDINGS_PER_SCAN} per scan) — re-scan to attempt runtime proof of this finding.`;
-                            candidate.finding.probePending = true;
-                            continue;
-                        }
-                        try {
-                            const planResp = await client.postJson<VerifyProbePlanResponse>('/verify/probe-plan', {
-                                finding: {
-                                    type: candidate.finding.type,
-                                    line: candidate.finding.line,
-                                    lineEnd: candidate.finding.lineEnd,
-                                    evidence: candidate.finding.evidence,
-                                    why: candidate.finding.why,
-                                    severity: candidate.finding.severity,
-                                },
-                                endpoint: {
-                                    method: candidate.endpoint.method,
-                                    path: (candidate.endpoint.mountedPath as string) || candidate.endpoint.path,
-                                    mountedPath: candidate.endpoint.mountedPath as string | undefined,
-                                    params: candidate.endpoint.params as unknown[] | undefined,
-                                    authScheme: candidate.endpoint.authScheme as string | undefined,
-                                    middleware: candidate.endpoint.middleware as unknown[] | undefined,
-                                },
-                                framework: runtimeInfo?.framework ?? undefined,
-                                devServerPort: devServer.port,
-                                ...runIdField,
-                            });
-                            if (!planResp.canProbe || !planResp.plan) {
-                                probeBlockedCount++;
-                                candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Runtime probe skipped: ${planResp.skipReason || 'API declined to build a probe plan.'}`;
-                                candidate.finding.probePending = true;
-                                continue;
-                            }
-                            const probeResult = await executeProbePlan(planResp.plan, {
-                                signal: abortSignal,
-                                host: devServer.host,
-                                port: devServer.port,
-                            });
-                            probedCount++;
-                            candidate.finding.probeEvidence = probeResult.evidence;
-                            candidate.finding.probeRule = probeResult.rule;
-                            const liveEvidence = probeResult.evidence.length > 300
-                                ? probeResult.evidence.slice(0, 300) + '…'
-                                : probeResult.evidence;
-                            if (probeResult.verdict === 'PROVEN') {
-                                candidate.finding.proven = 'PROVEN';
-                                candidate.finding.provenReason = `Runtime probe confirmed (${probeResult.rule}): ${probeResult.reason} — live evidence: ${liveEvidence}`;
-                                candidate.finding.verificationLevel = mapVerificationLevel('PROVEN', false, candidate.finding.verificationLevel, true);
-                            } else if (probeResult.verdict === 'UNPROVEN') {
-                                candidate.finding.proven = 'UNPROVEN';
-                                candidate.finding.provenReason = `Runtime probe refuted (${probeResult.rule}): ${probeResult.reason} — live evidence: ${liveEvidence}`;
-                                candidate.finding.verificationLevel = mapVerificationLevel('UNPROVEN', false, candidate.finding.verificationLevel, true);
-                            } else {
-                                candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Runtime probe inconclusive: ${probeResult.reason}`;
-                            }
-                        } catch (probeErr: any) {
-                            if (isAgentScanBudgetExhausted(probeErr)) {
-                                scanBudgetExhausted = true;
-                                probeBlockedCount++;
-                                candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Runtime probe skipped: ${VERIFY_BUDGET_EXHAUSTED_REASON}`;
-                                candidate.finding.probePending = true;
-                                continue;
-                            }
-                            candidate.finding.provenReason = `${candidate.finding.provenReason ?? ''} Runtime probe failed: ${probeErr?.message || probeErr}`;
-                            candidate.finding.probePending = true;
-                        }
-                    }
-                }
-            } finally {
-                await probeBroker.stop();
-            }
+            provenFindings.push({
+                ...finding,
+                proven: 'INCONCLUSIVE',
+                provenReason: exhausted
+                    ? VERIFY_BUDGET_EXHAUSTED_REASON
+                    : `Verify failed: ${err.message}`,
+                ...(exhausted ? { verifySubVerdict: 'budget-exhausted' } : {}),
+                verificationLevel: mapVerificationLevel('INCONCLUSIVE', false, finding.verificationLevel),
+            });
         }
     }
 
@@ -1082,7 +823,7 @@ async function scanTarget(
     // 4b. Generate fixes for proven/suspected findings (requires approval)
     const isAssuranceMode = !!(agentResult as any).assurance?.cells?.length;
     const generateFixesRequested = !!(args as any).generateFixes;
-    if (skipFix) {
+    if (skipFix || isQuickMode) {
         console.log('[Agent Scan] Skipping fix generation (_skipFix=true)');
     } else {
     const fixableFindings = provenFindings.filter(f =>
@@ -1144,7 +885,6 @@ async function scanTarget(
             try {
                 const verificationEvidenceParts: string[] = [];
                 if (finding.provenReason) verificationEvidenceParts.push(`Original verification: ${finding.provenReason}`);
-                if (finding.probeEvidence) verificationEvidenceParts.push(`Runtime probe (${finding.probeRule}): ${String(finding.probeEvidence).slice(0, 1200)}`);
                 if (finding.proofEvidence) verificationEvidenceParts.push(`Proof evidence: ${JSON.stringify(finding.proofEvidence).slice(0, 1200)}`);
                 const verificationEvidence = verificationEvidenceParts.join('\n\n');
 
@@ -1348,10 +1088,6 @@ async function scanTarget(
         const creditHint = `Exploit verification stopped for ${scanBudgetExhaustedCount} finding(s): this scan's credit budget ran out. Top up credits and re-scan to verify them.`;
         verifyHint = verifyHint ? `${verifyHint}\n${creditHint}` : creditHint;
     }
-    if (probeBlockedCount > 0) {
-        const probeHint = `${probeBlockedCount} finding(s) could be runtime-probe verified — start your dev server (detected port hints: 3000/5173/8080) and re-scan, or set SECURECODE_DEV_SERVER_PORT.`;
-        verifyHint = verifyHint ? `${verifyHint}\n${probeHint}` : probeHint;
-    }
 
     // 6a. Record metadata-only audit sample (no source code, no evidence strings)
     try {
@@ -1553,7 +1289,7 @@ async function scanTarget(
         }
         : {};
     const creditText = formatCreditUsage(creditFields);
-    const approvalText = approvalSkippedCount > 0 ? formatApprovalSkipped(approvalSkippedCount) : '';
+    const approvalText = '';
     const availableFixes = provenFindings.filter(f => f.fixStatus === 'available');
     const fixesAvailableField = availableFixes.length > 0
         ? {
@@ -2109,7 +1845,7 @@ function clampConfidenceByCapability(
 
     for (const f of findings) {
         const original = f.confidence;
-        const ceiling = confidenceCeilingForFinding(f.proven, cap.tier, evidenceTools, f.proven === 'PROVEN' && !!f.probeRule);
+        const ceiling = confidenceCeilingForFinding(f.proven, cap.tier, evidenceTools, false);
         // The ceiling is the maximum allowed confidence for this verdict +
         // capability combination. PROVEN findings have no ceiling (undefined)
         // — they're already proven, let the LLM's confidence stand (but still

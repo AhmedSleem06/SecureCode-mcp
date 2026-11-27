@@ -275,6 +275,7 @@ async function toolAgentScanBatchInner(
                 _skipCoordinator: true,
                 _noCache: noCache,
                 _signal: signal,
+                ...(args.mode ? { mode: args.mode } : {}),
                 ...(file.role ? { _role: file.role } : {}),
                 _progress: progress ? (p: number, t: number, m: string) => {
                     progress(file.rank, selection.selected.length,

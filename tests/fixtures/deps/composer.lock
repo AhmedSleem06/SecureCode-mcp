@@ -1,0 +1,23 @@
+{
+    "_readme": ["This file locks the dependencies."],
+    "content-hash": "abc123",
+    "packages": [
+        {
+            "name": "symfony/console",
+            "version": "v5.0.0",
+            "type": "library"
+        },
+        {
+            "name": "guzzlehttp/guzzle",
+            "version": "v6.5.0",
+            "type": "library"
+        }
+    ],
+    "packages-dev": [
+        {
+            "name": "phpunit/phpunit",
+            "version": "v9.0.0",
+            "type": "library"
+        }
+    ]
+}

@@ -527,7 +527,6 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                 suggestedNextAction: step === 'config-inspection' ? 'read_config'
                     : step === 'policy-check' ? 'check_policy'
                     : step === 'cross-file-flow' ? 'trace_flow_cross_file'
-                    : step === 'route-discovery' ? 'get_endpoints'
                     : step === 'auth-symbol-search' ? 'search_code'
                     : 'continue investigation',
                 priority: 'high',

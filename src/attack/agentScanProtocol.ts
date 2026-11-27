@@ -56,9 +56,9 @@ export const AGENT_SCAN_PROTOCOL_VERSION = 5;
 
 export const AGENT_SCAN_SUPPORTED_ACTIONS: AgentScanActionType[] = [
     'read_file', 'search_code', 'trace_flow', 'trace_flow_cross_file',
-    'check_guard', 'check_policy', 'get_endpoints', 'list_imports',
+    'check_guard', 'check_policy',
     'list_files', 'call_graph', 'git_blame', 'git_history', 'git_diff',
-    'check_dependencies', 'read_config', 'find_definition', 'find_references', 'find_tests', 'run_tests',
+    'check_dependencies', 'read_config', 'run_tests',
     'finish',
 ];
 
@@ -91,7 +91,7 @@ export interface AgentHarnessSettings {
     scanMode: AgentScanMode;
 }
 
-export type AgentScanMode = 'standard' | 'assurance';
+export type AgentScanMode = 'quick' | 'standard' | 'assurance';
 
 export const DEFAULT_AGENT_HARNESS: AgentHarnessSettings = {
     gateMode: 'checklist',
@@ -112,7 +112,7 @@ export function clampHarnessSettings(raw: unknown, fallback: AgentHarnessSetting
     const fullReadWindow = typeof w === 'number' && Number.isInteger(w)
         ? Math.min(HARNESS_FULL_READ_WINDOW_MAX, Math.max(HARNESS_FULL_READ_WINDOW_MIN, w))
         : fallback.fullReadWindow;
-    const scanMode = r.scanMode === 'standard' || r.scanMode === 'assurance' ? r.scanMode : fallback.scanMode;
+    const scanMode = r.scanMode === 'quick' || r.scanMode === 'standard' || r.scanMode === 'assurance' ? r.scanMode : fallback.scanMode;
     return { gateMode, fullReadWindow, reReadPolicy, scanMode };
 }
 
@@ -354,19 +354,6 @@ export interface AgentScanTraceFlowCrossFileAction extends AgentScanNotebookFiel
     rationale: string;
 }
 
-export interface AgentScanGetEndpointsAction extends AgentScanNotebookFields {
-    type: 'get_endpoints';
-    /** Optional glob filter (e.g. "*.ts"). */
-    glob?: string;
-    rationale: string;
-}
-
-export interface AgentScanListImportsAction extends AgentScanNotebookFields {
-    type: 'list_imports';
-    filePath: string;
-    rationale: string;
-}
-
 export interface AgentScanListFilesAction extends AgentScanNotebookFields {
     type: 'list_files';
     /** Directory to list (relative to workspace root). Defaults to root. */
@@ -425,37 +412,6 @@ export interface AgentScanReadConfigAction extends AgentScanNotebookFields {
     type: 'read_config';
     /** What kind of config to look for. */
     configKind: 'auth' | 'cors' | 'rate_limit' | 'headers' | 'env' | 'all';
-    rationale: string;
-}
-
-export interface AgentScanFindDefinitionAction extends AgentScanNotebookFields {
-    type: 'find_definition';
-    /** Workspace-relative path to the file where the symbol is referenced. */
-    filePath: string;
-    /** The symbol name to find the definition of. */
-    symbol: string;
-    /** Optional 1-indexed line (for disambiguation). */
-    line?: number;
-    rationale: string;
-}
-
-export interface AgentScanFindReferencesAction extends AgentScanNotebookFields {
-    type: 'find_references';
-    /** Workspace-relative path to the file where the symbol is defined. */
-    filePath: string;
-    /** The symbol name to find references to. */
-    symbol: string;
-    /** Optional 1-indexed line (for disambiguation). */
-    line?: number;
-    rationale: string;
-}
-
-export interface AgentScanFindTestsAction extends AgentScanNotebookFields {
-    type: 'find_tests';
-    /** Workspace-relative path to the source file to find tests for. */
-    filePath: string;
-    /** Optional symbol name — if provided, also search test files for references. */
-    symbol?: string;
     rationale: string;
 }
 
@@ -682,8 +638,6 @@ export type AgentScanAction =
     | AgentScanTraceFlowCrossFileAction
     | AgentScanCheckGuardAction
     | AgentScanCheckPolicyAction
-    | AgentScanGetEndpointsAction
-    | AgentScanListImportsAction
     | AgentScanListFilesAction
     | AgentScanCallGraphAction
     | AgentScanGitBlameAction
@@ -691,9 +645,6 @@ export type AgentScanAction =
     | AgentScanGitDiffAction
     | AgentScanCheckDependenciesAction
     | AgentScanReadConfigAction
-    | AgentScanFindDefinitionAction
-    | AgentScanFindReferencesAction
-    | AgentScanFindTestsAction
     | AgentScanRunTestsAction
     | AgentScanFinishAction
     | AgentScanSystemEventAction;
@@ -705,8 +656,6 @@ export type AgentScanActionType =
     | 'trace_flow_cross_file'
     | 'check_guard'
     | 'check_policy'
-    | 'get_endpoints'
-    | 'list_imports'
     | 'list_files'
     | 'call_graph'
     | 'git_blame'
@@ -714,9 +663,6 @@ export type AgentScanActionType =
     | 'git_diff'
     | 'check_dependencies'
     | 'read_config'
-    | 'find_definition'
-    | 'find_references'
-    | 'find_tests'
     | 'run_tests'
     | 'finish'
     | 'system_event';
@@ -938,6 +884,7 @@ export interface AgentScanResult {
     creditExtensionsGranted?: number;
     creditsRefunded?: number;
     segment?: AgentScanSegment;
+    scanMode?: AgentScanMode;
 }
 
 // ── Verify budget ───────────────────────────────────────────────────────────

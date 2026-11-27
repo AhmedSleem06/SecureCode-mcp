@@ -6,6 +6,14 @@ import { parseYarnLockfile } from './parsers/yarn';
 import { parsePnpmLockfile } from './parsers/pnpm';
 import { parseRequirementsTxt } from './parsers/requirements';
 import { parsePipfileLock } from './parsers/pipfile';
+import { parseGoMod } from './parsers/gomod';
+import { parseCargoLock } from './parsers/cargo';
+import { parseGemfileLock } from './parsers/gemfile';
+import { parseComposerLock } from './parsers/composer';
+import { parsePoetryLock } from './parsers/poetry';
+import { parseUvLock } from './parsers/uv';
+import { parsePackagesLockJson } from './parsers/nuget';
+import { parsePubspecLock } from './parsers/pubspec';
 
 /**
  * The "resolver". For npm/yarn/pnpm/Pipfile.lock the lockfile ALREADY contains
@@ -23,6 +31,14 @@ const LOCKFILE_NAMES: Array<{ name: string; ecosystem: Ecosystem }> = [
     { name: 'pnpm-lock.yaml', ecosystem: 'pnpm' },
     { name: 'Pipfile.lock', ecosystem: 'pipenv' },
     { name: 'requirements.txt', ecosystem: 'pip' },
+    { name: 'go.mod', ecosystem: 'go' },
+    { name: 'Cargo.lock', ecosystem: 'cargo' },
+    { name: 'Gemfile.lock', ecosystem: 'rubygems' },
+    { name: 'composer.lock', ecosystem: 'composer' },
+    { name: 'poetry.lock', ecosystem: 'pip' },
+    { name: 'uv.lock', ecosystem: 'pip' },
+    { name: 'packages.lock.json', ecosystem: 'nuget' },
+    { name: 'pubspec.lock', ecosystem: 'pub' },
 ];
 
 export interface WorkspaceLockfiles {
@@ -31,6 +47,12 @@ export interface WorkspaceLockfiles {
     pnpm: string[];
     pipenv: string[];
     pip: string[];
+    go: string[];
+    cargo: string[];
+    rubygems: string[];
+    composer: string[];
+    nuget: string[];
+    pub: string[];
 }
 
 /**
@@ -39,7 +61,10 @@ export interface WorkspaceLockfiles {
  * vendored deps.
  */
 export function findLockfiles(workspaceRoot: string): WorkspaceLockfiles {
-    const out: WorkspaceLockfiles = { npm: [], yarn: [], pnpm: [], pipenv: [], pip: [] };
+    const out: WorkspaceLockfiles = {
+        npm: [], yarn: [], pnpm: [], pipenv: [], pip: [],
+        go: [], cargo: [], rubygems: [], composer: [], nuget: [], pub: [],
+    };
     const skip = new Set(['node_modules', '.git', '.venv', 'venv', 'env', 'dist', 'build', '.next', '.turbo']);
 
     const walk = (dir: string, depth: number) => {
@@ -70,11 +95,9 @@ export function findLockfiles(workspaceRoot: string): WorkspaceLockfiles {
     // De-duplicate by directory+ecosystem (a project should only have one
     // lockfile per ecosystem per folder, but monorepos can have several).
     const dedup = (arr: string[]) => Array.from(new Set(arr));
-    out.npm = dedup(out.npm);
-    out.yarn = dedup(out.yarn);
-    out.pnpm = dedup(out.pnpm);
-    out.pipenv = dedup(out.pipenv);
-    out.pip = dedup(out.pip);
+    for (const key of Object.keys(out) as Array<keyof WorkspaceLockfiles>) {
+        out[key] = dedup(out[key]);
+    }
     return out;
 }
 
@@ -92,6 +115,22 @@ export function parseLockfile(lockfilePath: string): ParsedLockfile | null {
             return parsePipfileLock(lockfilePath);
         case 'requirements.txt':
             return parseRequirementsTxt(lockfilePath);
+        case 'go.mod':
+            return parseGoMod(lockfilePath);
+        case 'Cargo.lock':
+            return parseCargoLock(lockfilePath);
+        case 'Gemfile.lock':
+            return parseGemfileLock(lockfilePath);
+        case 'composer.lock':
+            return parseComposerLock(lockfilePath);
+        case 'poetry.lock':
+            return parsePoetryLock(lockfilePath);
+        case 'uv.lock':
+            return parseUvLock(lockfilePath);
+        case 'packages.lock.json':
+            return parsePackagesLockJson(lockfilePath);
+        case 'pubspec.lock':
+            return parsePubspecLock(lockfilePath);
         default:
             return null;
     }
@@ -109,8 +148,19 @@ export function parseLockfile(lockfilePath: string): ParsedLockfile | null {
  * Returns the flat list of resolved packages ready for OSV batching.
  */
 export function resolveAll(parsed: ParsedLockfile[]): ResolvedPackage[] {
-    const familyOf = (e: Ecosystem): 'npm' | 'pypi' =>
-        e === 'pip' || e === 'pipenv' ? 'pypi' : 'npm';
+    const familyOf = (e: Ecosystem): string => {
+        switch (e) {
+            case 'npm': case 'yarn': case 'pnpm': return 'npm';
+            case 'pip': case 'pipenv': return 'pypi';
+            case 'go': return 'go';
+            case 'cargo': return 'cargo';
+            case 'rubygems': return 'rubygems';
+            case 'composer': return 'composer';
+            case 'nuget': return 'nuget';
+            case 'pub': return 'pub';
+            default: return e;
+        }
+    };
     const seen = new Set<string>();
     const out: ResolvedPackage[] = [];
 

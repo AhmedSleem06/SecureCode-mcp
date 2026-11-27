@@ -11,13 +11,9 @@ import {
 } from './licensePolicy';
 
 export interface DependencyScanOptions {
-    /** Workspace root to scan recursively for lockfiles. */
     workspaceRoot: string;
-    /** VS Code memento (workspaceState) for NVD CVSS caching. */
-    state: CacheStore;
-    /** License policy mode (off | warn | error). Default 'warn'. */
+    state?: CacheStore;
     licensePolicy?: LicensePolicyMode;
-    /** Whether to also query GitHub Advisory via `gh` CLI. Default true (skips gracefully if gh absent). */
     useGhsa?: boolean;
 }
 
@@ -36,6 +32,8 @@ export interface DependencyScanResult {
     packages: ResolvedPackage[];
     /** True when GHSA enrichment was skipped because `gh` is not installed. */
     ghsaSkipped?: boolean;
+    /** Manifest/lockfile files found but not supported. */
+    unsupportedFiles?: string[];
 }
 
 /**
@@ -59,16 +57,30 @@ export interface DependencyScanResult {
 export async function scanDependencies(opts: DependencyScanOptions): Promise<DependencyScanResult> {
     const policy: LicensePolicyMode = opts.licensePolicy ?? 'warn';
     const useGhsa = opts.useGhsa !== false;
+    const state: CacheStore = opts.state ?? { get: () => undefined, update: () => {} };
 
     // Map an Ecosystem to its OSV family name. npm-family collapses to 'npm',
     // pip-family collapses to 'PyPI'.
-    const ecosystemFamilyOf = (e: Ecosystem): 'npm' | 'PyPI' =>
-        e === 'pip' || e === 'pipenv' ? 'PyPI' : 'npm';
+    const ecosystemFamilyOf = (e: Ecosystem): string => {
+        switch (e) {
+            case 'npm': case 'yarn': case 'pnpm': return 'npm';
+            case 'pip': case 'pipenv': return 'PyPI';
+            case 'go': return 'Go';
+            case 'cargo': return 'crates.io';
+            case 'rubygems': return 'RubyGems';
+            case 'composer': return 'Packagist';
+            case 'nuget': return 'NuGet';
+            case 'pub': return 'Pub';
+            default: return 'npm';
+        }
+    };
 
     // 1. Find lockfiles.
     const found: WorkspaceLockfiles = findLockfiles(opts.workspaceRoot);
     const lockfilePaths = [
         ...found.npm, ...found.yarn, ...found.pnpm, ...found.pipenv, ...found.pip,
+        ...found.go, ...found.cargo, ...found.rubygems, ...found.composer,
+        ...found.nuget, ...found.pub,
     ];
 
     // 2. Parse.
@@ -82,7 +94,7 @@ export async function scanDependencies(opts: DependencyScanOptions): Promise<Dep
     const queryable = packages.filter(p => !p.unresolved);
 
     // 4. OSV batch.
-    const osvMap = await queryOsvBatch(queryable);
+    const osvMap = await queryOsvBatch(queryable, state);
 
     // 5. GHSA via REST API (best-effort enrichment).
     // Only query packages that OSV flagged as vulnerable — GHSA is an
@@ -133,7 +145,7 @@ export async function scanDependencies(opts: DependencyScanOptions): Promise<Dep
             const srcs = seenIds.get(v.id);
             if (srcs) v.sources = Array.from(srcs) as any;
         }
-        await enrichWithNvd(merged, opts.state);
+        await enrichWithNvd(merged, state);
         for (const v of merged) {
             if (!v.sources || v.sources.length === 0) v.sources = [v.source];
         }
@@ -236,6 +248,8 @@ export async function scanDependencies(opts: DependencyScanOptions): Promise<Dep
         findings.push(licenseFindingToScanFinding(lf));
     }
 
+    const unsupportedFiles = findUnsupportedManifests(opts.workspaceRoot);
+
     return {
         findings,
         matches,
@@ -244,6 +258,7 @@ export async function scanDependencies(opts: DependencyScanOptions): Promise<Dep
         lockfiles: lockfilePaths,
         packages,
         ...(ghsaSkipped ? { ghsaSkipped: true } : {}),
+        ...(unsupportedFiles.length > 0 ? { unsupportedFiles } : {}),
     };
 }
 
@@ -264,4 +279,32 @@ function licenseFindingToScanFinding(lf: LicenseFinding): ScanFinding {
             unresolved: lf.package.unresolved,
         },
     };
+}
+
+import * as fs from 'fs';
+import * as path from 'path';
+
+const UNSUPPORTED_MANIFESTS = new Set([
+    'pom.xml', 'build.gradle', 'build.gradle.kts', 'gradle.lockfile',
+    'mix.lock', 'Package.resolved', 'Package.swift',
+    'Podfile.lock', 'Cartfile.resolved', 'conanfile.txt', 'conanfile.py',
+    'vcpkg.json', 'WORKSPACE', 'MODULE.bazel',
+]);
+
+function findUnsupportedManifests(workspaceRoot: string): string[] {
+    const results: string[] = [];
+    const skip = new Set(['node_modules', '.git', '.venv', 'venv', 'env', 'dist', 'build', '.next', '.turbo']);
+    const walk = (dir: string, depth: number) => {
+        if (depth > 5) return;
+        let entries: fs.Dirent[];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+            if (e.isDirectory() && !skip.has(e.name)) walk(path.join(dir, e.name), depth + 1);
+            else if (e.isFile() && UNSUPPORTED_MANIFESTS.has(e.name)) {
+                results.push(path.relative(workspaceRoot, path.join(dir, e.name)).replace(/\\/g, '/'));
+            }
+        }
+    };
+    walk(workspaceRoot, 0);
+    return results;
 }

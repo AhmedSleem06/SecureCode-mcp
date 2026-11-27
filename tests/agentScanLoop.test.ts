@@ -60,7 +60,7 @@ function completeChecklistSteps(findings: any[] = [], summary: string = 'done') 
         { next: { type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 38 },
         { next: { type: 'check_policy', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 37 },
         { next: { type: 'read_config', configKind: 'all', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 36 },
-        { next: { type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 35 },
+        { next: { type: 'search_code', pattern: 'authMiddleware|isAuthenticated', rationale: 'find auth' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 35 },
         { next: { type: 'finish', findings, summary, selfCritique: 'done' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 34 },
     ];
 }
@@ -244,7 +244,7 @@ describe('runAgentScan — termination', () => {
             step({ type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, 37),
             step({ type: 'check_policy', filePath: 'test.ts', rationale: 'r' }, 36),
             step({ type: 'read_config', configKind: 'all', rationale: 'r' }, 35),
-            step({ type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, 34),
+            step({ type: 'search_code', pattern: '*.test.*', rationale: 'r' }, 34),
             // Later finish — accepted by the gate
             step({ type: 'finish', findings: [], summary: 'done', selfCritique: 'done' }, 33),
         ]);
@@ -295,7 +295,7 @@ describe('runAgentScan — termination', () => {
             step({ type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, 38),
             step({ type: 'check_policy', filePath: 'test.ts', rationale: 'r' }, 37),
             step({ type: 'read_config', configKind: 'all', rationale: 'r' }, 36),
-            step({ type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, 35),
+            step({ type: 'search_code', pattern: '*.test.*', rationale: 'r' }, 35),
             // Four finishes, each rejected with the same reason codes.
             fin(34),
             fin(33),
@@ -397,8 +397,8 @@ describe('runAgentScan — termination', () => {
             { next: { type: 'read_file', path: 'test.ts', startLine: 1, endLine: 50, rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 39 },
             // Step 2: trace_flow_cross_file (checklist: cross-file-flow)
             { next: { type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 38 },
-            // Step 3: find_tests (checklist: tests-found)
-            { next: { type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 37 },
+            // Step 3: search_code (checklist: tests-found)
+            { next: { type: 'search_code', pattern: '*.test.*', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 37 },
             // Step 4: agent calls finish with a finding, API runs critique and
             // rejects it. Returns next: null + systemEvent (critique).
             {
@@ -497,7 +497,7 @@ describe('runAgentScan — adaptive budget fields', () => {
             { next: { type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 47 },
             { next: { type: 'read_config', configKind: 'all', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 46 },
             { next: { type: 'search_code', pattern: 'auth', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 45 },
-            { next: { type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 44 },
+            { next: { type: 'search_code', pattern: '*.test.*', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 44 },
             { next: { type: 'finish', findings: [], summary: 'done', selfCritique: 'done' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 43 },
         ]);
         (executeReadFileAction as any).mockResolvedValue({
@@ -558,11 +558,11 @@ describe('runAgentScan — blocked-read recovery', () => {
             { next: { type: 'read_file', path: 'test.ts', startLine: 1, endLine: 50, rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 37 },
             // Step 4: duplicate → blocked (3) → deterministic recovery fires, counter resets
             { next: { type: 'read_file', path: 'test.ts', startLine: 1, endLine: 50, rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 36 },
-            // Steps 5-9: complete the checklist (trace_flow, read_config, find_tests, search_code, finish)
+            // Steps 5-9: complete the checklist (trace_flow, read_config, search_code, search_code, finish)
             { next: { type: 'trace_flow_cross_file', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 35 },
             { next: { type: 'read_config', configKind: 'all', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 34 },
             { next: { type: 'search_code', pattern: 'auth', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 33 },
-            { next: { type: 'find_tests', filePath: 'test.ts', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 32 },
+            { next: { type: 'search_code', pattern: '*.test.*', rationale: 'r' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 32 },
             { next: { type: 'finish', findings: [], summary: 'done', selfCritique: 'done' }, costUsd: 0.01, tokens: 100, degraded: false, costCapped: false, stepsRemaining: 31 },
         ]);
         (executeReadFileAction as any).mockResolvedValue({

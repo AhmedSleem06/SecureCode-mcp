@@ -1,35 +1,6 @@
 import type { ToolDef } from './types';
 
-export const ATTACK_ENABLED = process.env.SECURECODE_ATTACK_ENABLED === '1';
-
 const ALL_TOOLS: ToolDef[] = [
-    {
-        name: 'securecode.scan',
-        description:
-            'Scan a source file or code string for vulnerabilities. Read-only: no approval needed. Returns findings (type, severity, location, message, evidence). Uses the SecureCode AI multi-phase pipeline (Scout discovery, Juror verification, Reconcile). depth=deep is LONG-RUNNING (1-5+ minutes on large files) and may exceed your AI client\'s tool-call timeout — prefer securecode.agent-scan (designed for long runs) or the CLI (`securecode-mcp scan --depth deep`) for large files.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                code: {
-                    type: 'string',
-                    description: 'Source code to scan (if filePath is omitted).',
-                },
-                filePath: {
-                    type: 'string',
-                    description: 'Workspace-relative path to the file to scan (reads from disk within the workspace root).',
-                },
-                language: {
-                    type: 'string',
-                    description: 'Language id (javascript, typescript, python). Inferred from filePath if omitted.',
-                },
-                scanDepth: {
-                    type: 'string',
-                    enum: ['fast', 'deep', 'auto'],
-                    description: 'Scan depth: "fast" = deterministic-only (sink floor + secret scan, <5s, no AI), "deep" = full AI pipeline (Scout + Juror + consensus), "auto" = deep with standard reasoning effort. Default: auto.',
-                },
-            },
-        },
-    },
     {
         name: 'securecode.architecture',
         description:
@@ -117,77 +88,12 @@ const ALL_TOOLS: ToolDef[] = [
         },
     },
     {
-        name: 'securecode.attack',
-        description:
-            'Request an endpoint red-team attack against a localhost dev server. REQUIRES human approval. The target must be a real endpoint from the user\'s codebase (read the routes/source to find it) and the dev server must already be running on localhost. Beta: localhost targets only. May pause up to 120 seconds waiting for human approval.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                filePath: {
-                    type: 'string',
-                    description: 'Workspace-relative path to the source file containing the endpoint.',
-                },
-                code: {
-                    type: 'string',
-                    description: 'Source code to analyze (if filePath is omitted).',
-                },
-                language: {
-                    type: 'string',
-                    description: 'Language id.',
-                },
-                vulnerabilityType: {
-                    type: 'string',
-                    description: 'Optional — skip auto-scan and attack this vulnerability type.',
-                },
-                lineStart: {
-                    type: 'number',
-                    description: 'Optional — 1-indexed start line of the finding to attack.',
-                },
-                lineEnd: {
-                    type: 'number',
-                    description: 'Optional — 1-indexed end line of the finding.',
-                },
-                evidenceSnippet: {
-                    type: 'string',
-                    description: 'Optional — vulnerable code snippet for the finding.',
-                },
-            },
-        },
-    },
-    {
         name: 'securecode.scan-dependencies',
         description:
             'Scan local lockfiles for known vulnerabilities using OSV.dev + GitHub Advisory + NVD. Read-only: no approval needed. Runs entirely locally — only package name+version leave the machine. Supports package-lock.json, yarn.lock, pnpm-lock.yaml, Pipfile.lock, requirements.txt. Returns findings with severity, installed version, fix version, and license info.',
         inputSchema: {
             type: 'object',
             properties: {},
-        },
-    },
-    {
-        name: 'securecode.scan-batch',
-        description:
-            'Scan multiple files for vulnerabilities in one call. Discovers scannable files from a directory or explicit file list. Each file runs the full scan pipeline (Scout → Juror → Phase3). Read-only: no approval needed. Stops early on credit exhaustion or maxFiles cap. Use for scanning a folder or a set of files at once.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                directory: {
-                    type: 'string',
-                    description: 'Workspace-relative folder to scan recursively (mutually exclusive with filePaths).',
-                },
-                filePaths: {
-                    type: 'array',
-                    items: { type: 'string' },
-                    description: 'Explicit workspace-relative paths to scan (mutually exclusive with directory).',
-                },
-                maxFiles: {
-                    type: 'number',
-                    description: 'Cap on files scanned (default 200).',
-                },
-                includeTests: {
-                    type: 'boolean',
-                    description: 'Include test files (.test.ts, .spec.js, __tests__/). Default: false — test files are skipped to save credits.',
-                },
-            },
         },
     },
     {
@@ -216,7 +122,7 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.agent-scan',
         description:
-            'Agent-mode scan: an AI investigator that reads files, traces data flows, checks guards, and compares endpoint policies to find vulnerabilities. Slower but deeper than a deep scan. The agent replaces the Scout phase and its findings are verified by the Juror. An agent scan uses 5 credits; large files can use up to 15 (extended 2 credits at a time). Unused extension credits are refunded. Files over 2,000 lines are scanned in parts; each part uses 5–15 credits. Best for complex access-control and cross-file vulnerabilities. Supports diff-aware scoping: pass baseRef to focus the scan on changed files and their blast radius (files that import or call the changed files). LONG-RUNNING: typically 2-8 minutes per file. Tell the user it is running and roughly how long it takes BEFORE calling. If the scan is not finished within ~50 seconds, this call returns { status: \'running\', jobId } while the scan keeps running in the background — call securecode.job-status with that jobId in ~60 seconds to get the result (or use securecode.agent-scan-start to get a jobId right away). A \'busy\' response names the scan already running in this workspace.',
+            'Agent-mode scan: an AI investigator that reads files, traces data flows, checks guards, and compares endpoint policies to find vulnerabilities. Three modes: quick (~2-3 min, proofs only for high/critical, no fix generation — use while coding), standard (full investigation + proofs + fixes — run before a commit, default), deep (beta — adds threat checklist + attack tests). The agent replaces the Scout phase and its findings are verified by the Juror. An agent scan uses 5 credits; large files can use up to 15 (extended 2 credits at a time). Unused extension credits are refunded. Files over 2,000 lines are scanned in parts; each part uses 5–15 credits. Best for complex access-control and cross-file vulnerabilities. Supports diff-aware scoping: pass baseRef to focus the scan on changed files and their blast radius (files that import or call the changed files). LONG-RUNNING: typically 2-8 minutes per file. Tell the user it is running and roughly how long it takes BEFORE calling. If the scan is not finished within ~50 seconds, this call returns { status: \'running\', jobId } while the scan keeps running in the background — call securecode.job-status with that jobId in ~60 seconds to get the result (or use securecode.agent-scan-start to get a jobId right away). A \'busy\' response names the scan already running in this workspace.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -231,6 +137,11 @@ const ALL_TOOLS: ToolDef[] = [
                 language: {
                     type: 'string',
                     description: 'Language id (javascript, typescript, python). Inferred from filePath if omitted.',
+                },
+                mode: {
+                    type: 'string',
+                    enum: ['quick', 'standard', 'deep'],
+                    description: 'Scan mode: "quick" (~2-3 min, proofs only for high/critical, no fix generation), "standard" (full investigation + proofs + fixes, default), "deep" (beta — threat checklist + attack tests).',
                 },
                 baseRef: {
                     type: 'string',
@@ -248,84 +159,59 @@ const ALL_TOOLS: ToolDef[] = [
         },
     },
     {
-        name: 'securecode.record-false-positive',
+        name: 'securecode.memory',
         description:
-            'Dismiss a vulnerability finding as a false positive. The agent learns from this and will not report similar patterns in future scans of this workspace. Stored per-workspace in .securecode/agent-memory.json. Use when the user marks a finding as "not a vulnerability".',
+            'Manage the agent\'s learned memory for this workspace — false positives and known facts. Stored per-workspace in .securecode/agent-memory.json.',
         inputSchema: {
             type: 'object',
             properties: {
+                action: {
+                    type: 'string',
+                    enum: ['list', 'add-fact', 'record-false-positive', 'clear'],
+                    description: 'Action to perform: "list" = view all false positives and known facts; "add-fact" = add a project fact; "record-false-positive" = dismiss a finding; "clear" = remove one or all entries.',
+                },
+                id: {
+                    type: 'string',
+                    description: 'clear action: optional ID of a specific false positive to remove. If omitted, clears ALL memory.',
+                },
                 filePath: {
                     type: 'string',
-                    description: 'Workspace-relative path to the file where the finding was reported.',
+                    description: 'record-false-positive: workspace-relative path to the file where the finding was reported.',
                 },
                 findingType: {
                     type: 'string',
-                    description: 'The vulnerability type of the finding (e.g. sql_injection, broken_access_control, missing_rate_limiting, information_disclosure, user_enumeration).',
+                    description: 'record-false-positive: the vulnerability type of the finding.',
                 },
                 line: {
                     type: 'number',
-                    description: 'Line number of the finding.',
+                    description: 'record-false-positive: line number of the finding.',
                 },
                 evidence: {
                     type: 'string',
-                    description: 'The evidence string from the finding (code snippet or description).',
+                    description: 'record-false-positive: the evidence string from the finding.',
                 },
                 reason: {
                     type: 'string',
-                    description: 'Why this is a false positive (user\'s explanation).',
+                    description: 'record-false-positive: why this is a false positive.',
                 },
                 pattern: {
                     type: 'string',
-                    description: 'Optional short pattern description. If omitted, derived from evidence.',
+                    description: 'record-false-positive: optional short pattern description.',
                 },
                 codeSnippet: {
                     type: 'string',
-                    description: 'Optional code snippet for context.',
+                    description: 'record-false-positive: optional code snippet for context.',
                 },
-            },
-            required: ['filePath', 'findingType', 'line', 'evidence', 'reason'],
-        },
-    },
-    {
-        name: 'securecode.get-agent-memory',
-        description:
-            'View the agent\'s learned memory for this workspace — false positives and known facts. Read-only. Use to review what the agent has learned before running a scan.',
-        inputSchema: {
-            type: 'object',
-            properties: {},
-        },
-    },
-    {
-        name: 'securecode.clear-agent-memory',
-        description:
-            'Clear the agent\'s learned memory for this workspace. If "id" is provided, removes only that false positive. Otherwise clears all memory (false positives + known facts). Stored in .securecode/agent-memory.json.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                id: {
-                    type: 'string',
-                    description: 'Optional: ID of a specific false positive to remove. If omitted, clears ALL memory.',
-                },
-            },
-        },
-    },
-    {
-        name: 'securecode.add-known-fact',
-        description:
-            'Add a fact about the project the agent should know in future scans (e.g. "Project uses requireMembership for auth"). Helps the agent investigate faster by not re-discovering known structural facts.',
-        inputSchema: {
-            type: 'object',
-            properties: {
                 fact: {
                     type: 'string',
-                    description: 'The fact to store (e.g. "Project uses requireMembership for membership auth, isProjectOwner for ownership").',
+                    description: 'add-fact: the fact to store.',
                 },
                 source: {
                     type: 'string',
-                    description: 'Where this fact was discovered (e.g. "src/lib/authz.ts:12").',
+                    description: 'add-fact: where this fact was discovered.',
                 },
             },
-            required: ['fact', 'source'],
+            required: ['action'],
         },
     },
     {
@@ -350,49 +236,35 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.decide-finding',
         description:
-            'Mark an uncertain finding from the review queue as confirmed, rejected, or deferred. Rejecting a finding also records it as a false positive in agent memory so future scans skip similar patterns. No approval needed — this only changes local review metadata.',
+            'Mark an uncertain finding from the review queue as confirmed, rejected, deferred, or clear it. Rejecting a finding also records it as a false positive in agent memory so future scans skip similar patterns. No approval needed — this only changes local review metadata.',
         inputSchema: {
             type: 'object',
             properties: {
                 id: {
                     type: 'string',
-                    description: 'The review item ID (e.g. "review-abc123").',
+                    description: 'The review item ID (e.g. "review-abc123"). For "clear": optional — if omitted, clears items based on resolvedOnly.',
                 },
                 decision: {
                     type: 'string',
-                    enum: ['confirmed', 'rejected', 'deferred'],
-                    description: 'The adjudication: "confirmed" = real vulnerability, "rejected" = false positive (added to agent memory), "deferred" = leave for later.',
+                    enum: ['confirmed', 'rejected', 'deferred', 'clear'],
+                    description: 'The adjudication: "confirmed" = real vulnerability, "rejected" = false positive (added to agent memory), "deferred" = leave for later, "clear" = delete review items.',
                 },
                 reason: {
                     type: 'string',
                     description: 'Optional explanation for the decision.',
                 },
-            },
-            required: ['id', 'decision'],
-        },
-    },
-    {
-        name: 'securecode.clear-finding-reviews',
-        description:
-            'Delete review items from the finding review queue. If "id" is provided, removes only that item. If "resolvedOnly" is true, removes only items with a decision. Otherwise clears ALL items. No approval needed — this only changes local review metadata.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                id: {
-                    type: 'string',
-                    description: 'Optional: ID of a specific review item to remove. If omitted, clears items based on resolvedOnly.',
-                },
                 resolvedOnly: {
                     type: 'boolean',
-                    description: 'If true, removes only resolved items (confirmed/rejected/deferred). Default: false (clears all when id is omitted).',
+                    description: 'clear action only: if true, removes only resolved items (confirmed/rejected/deferred). Default: false (clears all when id is omitted).',
                 },
             },
+            required: ['decision'],
         },
     },
     {
         name: 'securecode.run-tests',
         description:
-            'Run tests in a sandbox with human approval. Two modes: "existing" runs the workspace test suite (npm/pnpm/yarn/bun test, pytest) with a strict command allowlist — no shell operators, no install/build/publish, only the test lifecycle. "generated" runs an inline test script (node/tsx/bun/deno/python) through the verification sandbox with safety checks. Every execution requires human approval; tests run inside a Docker/Deno sandbox with network disabled, read-only workspace, and resource limits. Does NOT install dependencies. Use securecode.find-tests or the find_tests agent action to discover test files first. Runner notes: bun works out of the box (default image oven/bun:1, override via SECURECODE_SANDBOX_BUN_IMAGE); for pure-JS scripts prefer runner \'node\' (.mjs) or \'bun\' — \'tsx\' is not preinstalled in the default node image. Approval note: this call may pause up to 120 seconds waiting for your approval — if your client times out during that wait, the approval request may still be live: approve via the URL shown, then retry the same call.',
+            'Run tests in a sandbox with human approval. Two modes: "existing" runs the workspace test suite (npm/pnpm/yarn/bun test, pytest) with a strict command allowlist — no shell operators, no install/build/publish, only the test lifecycle. "generated" runs an inline test script (node/tsx/bun/deno/python) through the verification sandbox with safety checks. Every execution requires human approval; tests run inside a Docker/Deno sandbox with network disabled, read-only workspace, and resource limits. Does NOT install dependencies. Use search_code or list_files to discover test files first. Runner notes: bun works out of the box (default image oven/bun:1, override via SECURECODE_SANDBOX_BUN_IMAGE); for pure-JS scripts prefer runner \'node\' (.mjs) or \'bun\' — \'tsx\' is not preinstalled in the default node image. Approval note: this call may pause up to 120 seconds waiting for your approval — if your client times out during that wait, the approval request may still be live: approve via the URL shown, then retry the same call.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -439,13 +311,18 @@ const ALL_TOOLS: ToolDef[] = [
     {
         name: 'securecode.agent-scan-batch',
         description:
-            'Maps the project and scans the selected top files sequentially. Do not call securecode.agent-scan separately in parallel for the same batch. Stops after the first incomplete or failed file and reports remaining files as not-started. Uses architecture scout to identify the most security-relevant files, then runs agent-scan on each one in order. Performs a credit preflight check before starting: if insufficient credits for the full batch (architecture + 5 credits per file part), returns preflight-failed without starting any paid operation. An agent scan uses 5 credits; large files can use up to 15 (extended 2 credits at a time). Unused extension credits are refunded. Files over 2,000 lines are scanned in parts; each part uses 5–15 credits. Exploit verification is included in each scan budget. The architecture scout costs 5/10/20 credits (quick/standard/deep). Result categories: completed (clean finish), incomplete (cut short with coverage gaps), failed (operational error), not-started (selected but never attempted), preflight-failed (insufficient credits). LONG-RUNNING: typically 10-30 minutes for topN=5 (scout 2-5 min + 2-6 min per file, sequential). Tell the user it is running and roughly how long BEFORE calling. If the batch is not finished within ~50 seconds, this call returns { status: \'running\', jobId } while the batch keeps running in the background — call securecode.job-status with that jobId about every 60 seconds to get the result (or use securecode.agent-scan-batch-start to get a jobId right away). A \'busy\' response names the scan already running in this workspace. Architecture scouts share the agent-scan daily budget (10 runs/day). On daily-limit-reached, completed files remain retrievable from cache via individual agent-scan calls without noCache.',
+            'Maps the project and scans the selected top files sequentially. Do not call securecode.agent-scan separately in parallel for the same batch. Stops after the first incomplete or failed file and reports remaining files as not-started. Uses architecture scout to identify the most security-relevant files, then runs agent-scan on each one in order. Three modes: quick (~2-3 min per file, proofs only for high/critical), standard (full investigation + proofs, default), deep (beta — threat checklist + attack tests). Performs a credit preflight check before starting: if insufficient credits for the full batch (architecture + 5 credits per file part), returns preflight-failed without starting any paid operation. An agent scan uses 5 credits; large files can use up to 15 (extended 2 credits at a time). Unused extension credits are refunded. Files over 2,000 lines are scanned in parts; each part uses 5–15 credits. Exploit verification is included in each scan budget. The architecture scout costs 5/10/20 credits (quick/standard/deep). Result categories: completed (clean finish), incomplete (cut short with coverage gaps), failed (operational error), not-started (selected but never attempted), preflight-failed (insufficient credits). LONG-RUNNING: typically 10-30 minutes for topN=5 (scout 2-5 min + 2-6 min per file, sequential). Tell the user it is running and roughly how long BEFORE calling. If the batch is not finished within ~50 seconds, this call returns { status: \'running\', jobId } while the batch keeps running in the background — call securecode.job-status with that jobId about every 60 seconds to get the result (or use securecode.agent-scan-batch-start to get a jobId right away). A \'busy\' response names the scan already running in this workspace. Architecture scouts share the agent-scan daily budget (10 runs/day). On daily-limit-reached, completed files remain retrievable from cache via individual agent-scan calls without noCache.',
         inputSchema: {
             type: 'object',
             properties: {
                 topN: {
                     type: 'number',
                     description: 'Number of files to scan (default 3, clamped to 1..20).',
+                },
+                mode: {
+                    type: 'string',
+                    enum: ['quick', 'standard', 'deep'],
+                    description: 'Scan mode: "quick" (~2-3 min per file, proofs only for high/critical), "standard" (full investigation + proofs, default), "deep" (beta — threat checklist + attack tests).',
                 },
                 architectureDepth: {
                     type: 'string',
@@ -533,6 +410,15 @@ ALL_TOOLS.push(
     },
 );
 
-export const TOOLS: ToolDef[] = ATTACK_ENABLED
-    ? ALL_TOOLS
-    : ALL_TOOLS.filter(t => t.name !== 'securecode.attack');
+export const TOOLS: ToolDef[] = ALL_TOOLS;
+
+export const RENAMED_TOOLS: Record<string, string> = {
+    'securecode.scan': 'removed — use securecode.agent-scan',
+    'securecode.scan-batch': 'removed — use securecode.agent-scan-batch',
+    'securecode.attack': 'removed — use securecode.agent-scan',
+    'securecode.record-false-positive': 'renamed to securecode.memory (action: "record-false-positive")',
+    'securecode.get-agent-memory': 'renamed to securecode.memory (action: "list")',
+    'securecode.clear-agent-memory': 'renamed to securecode.memory (action: "clear")',
+    'securecode.add-known-fact': 'renamed to securecode.memory (action: "add-fact")',
+    'securecode.clear-finding-reviews': 'merged into securecode.decide-finding (decision: "clear")',
+};

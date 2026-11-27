@@ -218,7 +218,7 @@ describe('runAgentScan — segment (part of a split file)', () => {
             step({ type: 'trace_flow_cross_file', filePath: 'big.ts', rationale: 'r' }, 37),
             step({ type: 'check_policy', filePath: 'big.ts', rationale: 'r' }, 36),
             step({ type: 'read_config', configKind: 'all', rationale: 'r' }, 35),
-            step({ type: 'find_tests', filePath: 'big.ts', rationale: 'r' }, 34),
+            step({ type: 'list_files', path: 'tests', rationale: 'r' }, 34),
             step({ type: 'finish', findings, summary: 'part done', selfCritique: 'done' }, 33),
         ]);
 

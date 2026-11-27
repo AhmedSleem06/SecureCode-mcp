@@ -9,38 +9,16 @@ import { toolScanDependencies } from '../src/tools/scanDependencies';
 function mockFetch(url: string | URL, init?: any): Promise<Response> {
     const u = typeof url === 'string' ? url : url.toString();
 
-    // OSV.dev batch query
-    if (u.includes('api.osv.dev')) {
+    // OSV.dev batch query — returns only IDs (like the real API)
+    if (u === 'https://api.osv.dev/v1/querybatch') {
         const body = init?.body ? JSON.parse(init.body) : { queries: [] };
         const queries = body.queries || [];
         const results = queries.map((q: any) => {
             if (q?.package?.name === 'lodash' && q?.version === '4.17.4') {
-                return {
-                    vulns: [{
-                        id: 'GHSA-35jh-r3h4-6jhm',
-                        summary: 'Command Injection in lodash',
-                        affected: [{
-                            package: { ecosystem: 'npm', name: 'lodash' },
-                            ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '4.17.21' }] }],
-                        }],
-                        severity: [{ type: 'CVSS_V3', score: '7.2' }],
-                        references: [{ url: 'https://github.com/advisories/GHSA-35jh-r3h4-6jhm' }],
-                    }],
-                };
+                return { vulns: [{ id: 'GHSA-35jh-r3h4-6jhm' }] };
             }
             if (q?.package?.name === 'axios' && q?.version === '0.21.0') {
-                return {
-                    vulns: [{
-                        id: 'GHSA-wf5e-gw64-5v3h',
-                        summary: 'SSRF in axios',
-                        affected: [{
-                            package: { ecosystem: 'npm', name: 'axios' },
-                            ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '0.21.1' }] }],
-                        }],
-                        severity: [{ type: 'CVSS_V3', score: '6.1' }],
-                        references: [{ url: 'https://github.com/advisories/GHSA-wf5e-gw64-5v3h' }],
-                    }],
-                };
+                return { vulns: [{ id: 'GHSA-wf5e-gw64-5v3h' }] };
             }
             return { vulns: [] };
         });
@@ -48,6 +26,44 @@ function mockFetch(url: string | URL, init?: any): Promise<Response> {
             ok: true,
             json: () => Promise.resolve({ results }),
         } as Response);
+    }
+
+    // OSV.dev individual vuln hydration
+    if (u.startsWith('https://api.osv.dev/v1/vulns/')) {
+        const id = decodeURIComponent(u.split('/').pop()!);
+        if (id === 'GHSA-35jh-r3h4-6jhm') {
+            return Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    id: 'GHSA-35jh-r3h4-6jhm',
+                    summary: 'Command Injection in lodash',
+                    aliases: ['CVE-2021-23337'],
+                    affected: [{
+                        package: { ecosystem: 'npm', name: 'lodash' },
+                        ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '4.17.21' }] }],
+                    }],
+                    severity: [{ type: 'CVSS_V3', score: '7.2' }],
+                    references: [{ url: 'https://github.com/advisories/GHSA-35jh-r3h4-6jhm' }],
+                }),
+            } as Response);
+        }
+        if (id === 'GHSA-wf5e-gw64-5v3h') {
+            return Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    id: 'GHSA-wf5e-gw64-5v3h',
+                    summary: 'SSRF in axios',
+                    aliases: ['CVE-2021-3749'],
+                    affected: [{
+                        package: { ecosystem: 'npm', name: 'axios' },
+                        ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '0.21.1' }] }],
+                    }],
+                    severity: [{ type: 'CVSS_V3', score: '6.1' }],
+                    references: [{ url: 'https://github.com/advisories/GHSA-wf5e-gw64-5v3h' }],
+                }),
+            } as Response);
+        }
+        return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve(null) } as unknown as Response);
     }
 
     // GitHub Advisory REST API
@@ -217,8 +233,8 @@ describe('securecode.scan-dependencies — full pipeline', () => {
             // CVSS 7.2 with no exploit evidence → priority ~29 → WARNING
             expect(lodashFinding.severity).toBe('WARNING');
             expect(lodashFinding.dependency?.exploitPriority).toBeDefined();
-            expect(lodashFinding.dependency?.exploitPriority).toBeGreaterThanOrEqual(20);
-            expect(lodashFinding.dependency?.exploitPriority).toBeLessThan(50);
+            expect(lodashFinding.dependency?.exploitPriority).toBeGreaterThanOrEqual(30);
+            expect(lodashFinding.dependency?.exploitPriority).toBeLessThan(55);
         }
     });
 

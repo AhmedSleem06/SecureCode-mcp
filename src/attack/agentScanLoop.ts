@@ -24,7 +24,6 @@ import { AgentTraceLogger } from './agentTrace';
 import { InvestigationState, promptShownRange, uncoveredWithin, coverageReReadCheck, formatCoverageReReadObservation, type DeliveredRead, type LineRange } from './investigationState';
 import { selectInvestigationProfile, extractRoleFromArchitectureContext, suggestedChecks } from './investigationProfiles';
 import { createInvestigationTasksFromRisks } from '../project-map/architectureContext';
-import { discoverEndpoints } from '../project-map/endpointDiscovery';
 import { looksLikeContractOnly, resolveImplementation, formatImplementationResolution } from '../project-map/implementationResolver';
 import { isEquivalentSearchIntent, normalizeSearchPattern } from './searchIntent';
 import {
@@ -87,6 +86,7 @@ export interface AgentScanOptions {
     deferClose?: boolean;
     segment?: AgentScanSegment;
     role?: string;
+    requestedMode?: 'quick' | 'standard' | 'assurance';
 }
 
 const SEGMENT_EDGE_TOLERANCE_LINES = 5;
@@ -198,8 +198,10 @@ export async function runAgentScan(
     // minutes for the janitor. The janitor remains the fallback
     // (refund happens there, not here). With deferClose the caller owns
     // the close (it keeps the run open for verification).
+    let resolvedScanMode: import('./agentScanProtocol').AgentScanMode | undefined;
     const closeRun = async (result: AgentScanResult): Promise<AgentScanResult> => {
         attachCredits(result);
+        if (resolvedScanMode) result.scanMode = resolvedScanMode;
         if (activeRunId && !options.deferClose) {
             const settlement = await closeAgentScanRun(client, activeRunId, result.status, result.terminationReason, options.signal);
             if (settlement) {
@@ -211,9 +213,10 @@ export async function runAgentScan(
     };
 
     try {
-        const startBody = segment
-            ? { segment: { groupId: segment.groupId, index: segment.index, total: segment.total } }
-            : {};
+        const startBody = {
+            ...(segment ? { segment: { groupId: segment.groupId, index: segment.index, total: segment.total } } : {}),
+            ...(options.requestedMode ? { requestedMode: options.requestedMode } : {}),
+        };
         const startRespRaw = await client.postJson<AgentScanStartResponse>('/agent/scan/start', startBody, options.signal);
         const startValidation = validateStartResponse(startRespRaw);
         if (!startValidation.ok) {
@@ -234,6 +237,7 @@ export async function runAgentScan(
         const startResp = startValidation.value;
         activeRunId = startResp.runId;
         const harness: AgentHarnessSettings = clampHarnessSettings(startResp.harness);
+        resolvedScanMode = harness.scanMode;
 
         const trace = new AgentTraceLogger(ctx.workspaceRoot, startResp.runId);
         trace.logRunStarted();
@@ -292,7 +296,7 @@ export async function runAgentScan(
         const functionMap = segment ? buildFunctionMap(functionBoundaries) : undefined;
         // Select a target-specific investigation profile to set the required
         // checklist steps. This prevents the agent from wasting steps on
-        // irrelevant tools (e.g., get_endpoints on a utility file) and ensures
+        // irrelevant tools and ensures
         // required steps for the target type are not skipped.
         const profile = selectInvestigationProfile({
             filePath: target.filePath,
@@ -396,7 +400,7 @@ export async function runAgentScan(
                     description: 'Verify the vulnerability with a test or exploit proof',
                     acceptedKinds: ['test-location', 'test-result', 'proof-result'] as any,
                     targetFiles: task.targetFiles,
-                    requiredTools: ['find_tests', 'run_tests'] as any,
+                    requiredTools: ['run_tests'] as any,
                     minimumCount: 1,
                     acceptsNegative: true,
                 });
@@ -542,11 +546,6 @@ export async function runAgentScan(
                 trace_flow_cross_file: 'cross-file-flow',
                 check_guard: 'guard-result',
                 check_policy: 'policy-result',
-                get_endpoints: 'handler-inventory',
-                list_imports: 'symbol-reference',
-                find_definition: 'symbol-definition',
-                find_references: 'symbol-reference',
-                find_tests: 'test-location',
                 run_tests: 'test-result',
                 read_config: 'config-result',
                 call_graph: 'cross-file-flow',
@@ -632,7 +631,6 @@ export async function runAgentScan(
                 suggestedNextAction: step === 'config-inspection' ? 'read_config'
                     : step === 'policy-check' ? 'check_policy'
                     : step === 'cross-file-flow' ? 'trace_flow_cross_file'
-                    : step === 'route-discovery' ? 'get_endpoints'
                     : step === 'auth-symbol-search' ? 'search_code'
                     : 'continue investigation',
                 priority: 'high' as const,
@@ -1763,12 +1761,6 @@ export async function runAgentScan(
                     toolKey = `check_dependencies`;
                 } else if (action.type === 'read_config') {
                     toolKey = `read_config:${(action as any).configKind || 'all'}`;
-                } else if (action.type === 'find_definition') {
-                    toolKey = `find_definition:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
-                } else if (action.type === 'find_references') {
-                    toolKey = `find_references:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
-                } else if (action.type === 'find_tests') {
-                    toolKey = `find_tests:${(action as any).filePath || ''}:${(action as any).symbol || ''}`;
                 } else if (action.type === 'run_tests') {
                     const a = action as any;
                     if (a.mode === 'existing') {
@@ -1796,7 +1788,7 @@ export async function runAgentScan(
                         if (isEquivalent) {
                             equivalentSearchCount++;
                             if (equivalentSearchCount >= 2) {
-                                observation = `BLOCKED: This search is equivalent to a previous search (same terms, different order). The results are in the transcript above. Use find_definition, find_references, call_graph, a targeted read_file with specific line numbers, or trace_flow_cross_file instead.`;
+                                observation = `BLOCKED: This search is equivalent to a previous search (same terms, different order). The results are in the transcript above. Use call_graph, a targeted read_file with specific line numbers, or trace_flow_cross_file instead.`;
                                 wasBlocked = true;
                                 observation = withChecklist(observation);
                                 // Skip execution — jump to the blocked handling
@@ -2024,51 +2016,11 @@ export async function runAgentScan(
                     investigationState.markCandidatesVerified();
                 }
             }
-            // handlers and populate the handler inventory. Create handler
-            // review work items for security-sensitive handlers.
-            if (!wasBlocked && action.type === 'get_endpoints') {
-                try {
-                    const endpoints = await discoverEndpoints(
-                        ctx.workspaceRoot,
-                        (action as any).glob,
-                    );
-                    if (endpoints.length > 0) {
-                        handlerInventory.addFromEndpoints(endpoints, target.filePath);
-                        // Reads delivered before discovery (e.g. an opening
-                        // whole-file read) already covered these handlers.
-                        const coverageFiles = new Set([target.filePath, ...handlerInventory.getAll().map(h => h.filePath)]);
-                        for (const file of coverageFiles) {
-                            for (const r of investigationState.getCoverage(file)?.ranges ?? []) {
-                                markHandlersCoveredBy(file, r.start, r.end);
-                            }
-                        }
-                        // Create work items for newly discovered handlers
-                        for (const handler of handlersInScope()) {
-                            if (handler.reviewed) continue;
-                            if (!workItemQueue.all().some(w => w.title === `Review handler: ${handler.symbol || 'unknown'}`)) {
-                                workItemQueue.add(createHandlerReviewWorkItem(
-                                    handler.filePath,
-                                    handler.symbol || 'unknown',
-                                ));
-                            }
-                        }
-                    } else {
-                        // No handlers found — auto-complete all-handlers-reviewed
-                        investigationState.markAllHandlersReviewed();
-                    }
-                } catch { /* best-effort */ }
-            }
-
-            // Auto-complete all-handlers-reviewed if handler inventory is
-            // empty (no handlers to review for this file type, or none in
-            // this part of a split file)
             const scopedHandlerCount = handlersInScope().length;
             if (scopedHandlerCount === 0 && !investigationState.getCompletedSteps().includes('all-handlers-reviewed' as any)) {
                 investigationState.markAllHandlersReviewed();
             }
-            // Handler-inventory requirements cannot apply when discovery ran
-            // and found nothing to review.
-            if (!wasBlocked && scopedHandlerCount === 0 && (action.type === 'get_endpoints' || action.type === 'search_code')) {
+            if (!wasBlocked && scopedHandlerCount === 0 && action.type === 'search_code') {
                 evidenceLedger.markInventoryEmpty();
             }
 
@@ -2444,8 +2396,6 @@ function describeAction(action: AgentScanAction): string {
         case 'trace_flow_cross_file': return `trace_flow_cross_file(${action.filePath})`;
         case 'check_guard': return `check_guard(${action.guardName})`;
         case 'check_policy': return `check_policy(${action.filePath})`;
-        case 'get_endpoints': return `get_endpoints(${(action as any).glob || 'all'})`;
-        case 'list_imports': return `list_imports(${action.filePath})`;
         case 'list_files': return `list_files(${(action as any).path || 'root'})`;
         case 'call_graph': return `call_graph(${(action as any).filePath})`;
         case 'git_blame': return `git_blame(${(action as any).filePath})`;
@@ -2453,9 +2403,6 @@ function describeAction(action: AgentScanAction): string {
         case 'git_diff': return `git_diff(${(action as any).baseRef}..${(action as any).headRef || 'HEAD'})`;
         case 'check_dependencies': return 'check_dependencies';
         case 'read_config': return `read_config(${(action as any).configKind || 'all'})`;
-        case 'find_definition': return `find_definition(${(action as any).symbol})`;
-        case 'find_references': return `find_references(${(action as any).symbol})`;
-        case 'find_tests': return `find_tests(${(action as any).filePath}${(action as any).symbol ? ':' + (action as any).symbol : ''})`;
         case 'run_tests': return `run_tests(${(action as any).mode}${(action as any).testFiles?.length ? ':' + (action as any).testFiles.length + ' files' : ''})`;
         case 'finish': return 'finish';
         case 'system_event': return `system_event(${(action as any).eventType})`;

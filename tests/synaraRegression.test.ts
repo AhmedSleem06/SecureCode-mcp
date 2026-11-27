@@ -118,7 +118,6 @@ describe('Synara Regression: investigation state prevents brute-reading', () => 
         const state = new InvestigationState();
         state.recordRead('apps/server/src/http.ts', 1, 100, 1275);
         state.recordToolUse('check_policy');
-        state.recordToolUse('get_endpoints');
         state.recordToolUse('search_code');
         state.recordToolUse('read_config');
         state.recordToolUse('trace_flow_cross_file');
@@ -127,7 +126,6 @@ describe('Synara Regression: investigation state prevents brute-reading', () => 
         const completed = state.getCompletedSteps();
         expect(completed).toContain('initial-read');
         expect(completed).toContain('policy-check');
-        expect(completed).toContain('route-discovery');
         expect(completed).toContain('auth-symbol-search');
         expect(completed).toContain('config-inspection');
         expect(completed).toContain('cross-file-flow');
@@ -140,7 +138,6 @@ describe('Synara Regression: investigation state prevents brute-reading', () => 
 
         const incomplete = state.getIncompleteSteps();
         expect(incomplete).toContain('config-inspection');
-        expect(incomplete).toContain('route-discovery');
         expect(incomplete).toContain('cross-file-flow');
     });
 

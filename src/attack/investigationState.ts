@@ -302,7 +302,6 @@ export class InvestigationState {
             completed: new Set(),
             required: new Set([
                 'initial-read',
-                'route-discovery',
                 'policy-check',
                 'auth-symbol-search',
                 'cross-file-flow',
@@ -942,12 +941,6 @@ export class InvestigationState {
             case 'read_config':
                 this.markStepComplete('config-inspection');
                 break;
-            case 'get_endpoints':
-                this.markStepComplete('route-discovery');
-                break;
-            case 'find_tests':
-                this.markStepComplete('tests-found');
-                break;
         }
     }
 
@@ -1171,13 +1164,13 @@ export class InvestigationState {
         if (incomplete.length === 0) return null;
         const step = incomplete[0];
         switch (step) {
-            case 'route-discovery': return 'get_endpoints';
+            case 'route-discovery': return 'search_code';
             case 'policy-check': return 'check_policy';
             case 'auth-symbol-search': return 'search_code';
             case 'cross-file-flow': return 'trace_flow_cross_file';
             case 'config-inspection': return 'read_config';
             case 'ownership-analysis': return 'trace_flow_cross_file';
-            case 'tests-found': return 'find_tests';
+            case 'tests-found': return 'search_code';
             default: return null;
         }
     }
@@ -1208,7 +1201,7 @@ export class InvestigationState {
     private stepDescription(step: InvestigationStep): string {
         switch (step) {
             case 'initial-read': return 'Read the target file to understand the code';
-            case 'route-discovery': return 'Call get_endpoints to discover sibling routes';
+            case 'route-discovery': return 'Use search_code to discover sibling routes';
             case 'policy-check': return 'Call check_policy on route handler files';
             case 'auth-symbol-search': return 'Search for auth functions used in the target';
             case 'cross-file-flow': return 'Trace data flow with trace_flow or trace_flow_cross_file';

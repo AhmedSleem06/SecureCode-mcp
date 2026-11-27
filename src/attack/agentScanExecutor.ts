@@ -19,16 +19,12 @@ import { evaluateGuard } from '../project-map/guardEvaluator';
 import type { SinkLanguage } from '../project-map/sinkRegistry';
 import { redactText } from './report';
 import { testOnlyLabel, isTestPath } from './testCodeLabel';
-import { discoverEndpoints, formatEndpoints } from '../project-map/endpointDiscovery';
-import { listImports, formatImports } from '../utils/listImports';
 import { listFiles, formatFileList } from '../utils/listFiles';
 import { getCallGraph } from '../project-map/callGraphExtractor';
 import { getGitBlame, getGitHistory, formatGitChangedFiles } from '../utils/gitContext';
 import { scanDependencies } from '../dependency/dependencyChecker';
 import { FileCacheStore } from '../dependency/depCache';
 import { readSecurityConfig } from '../utils/securityConfig';
-import { findDefinition, findReferences } from '../project-map/symbolIndex';
-import { findTests } from '../project-map/findTests';
 import { runTests, type RunTestsRequest } from '../utils/testRunner';
 import { validateToolResponse } from './protocolValidator';
 import type {
@@ -424,24 +420,6 @@ export async function executeAction(
             }
         }
 
-        case 'get_endpoints': {
-            try {
-                const endpoints = await discoverEndpoints(ctx.workspaceRoot, (action as any).glob);
-                return truncate(formatEndpoints(endpoints));
-            } catch (e: any) {
-                return `Error discovering endpoints: ${e.message || e}`;
-            }
-        }
-
-        case 'list_imports': {
-            try {
-                const imports = await listImports(ctx.workspaceRoot, action.filePath);
-                return truncate(formatImports(imports, action.filePath));
-            } catch (e: any) {
-                return `Error listing imports for "${action.filePath}": ${e.message || e}`;
-            }
-        }
-
         case 'list_files': {
             try {
                 const files = listFiles(ctx.workspaceRoot, {
@@ -560,47 +538,6 @@ export async function executeAction(
                 return truncate(result);
             } catch (e: any) {
                 return `Error reading security config: ${e.message || e}`;
-            }
-        }
-
-        case 'find_definition': {
-            try {
-                const result = await findDefinition(
-                    ctx.workspaceRoot,
-                    (action as any).filePath,
-                    (action as any).symbol,
-                    (action as any).line,
-                );
-                return redact(result);
-            } catch (e: any) {
-                return `Error finding definition for "${(action as any).symbol}": ${e.message || e}`;
-            }
-        }
-
-        case 'find_references': {
-            try {
-                const result = await findReferences(
-                    ctx.workspaceRoot,
-                    (action as any).filePath,
-                    (action as any).symbol,
-                    (action as any).line,
-                );
-                return redact(result);
-            } catch (e: any) {
-                return `Error finding references for "${(action as any).symbol}": ${e.message || e}`;
-            }
-        }
-
-        case 'find_tests': {
-            try {
-                const result = await findTests(
-                    ctx.workspaceRoot,
-                    (action as any).filePath,
-                    (action as any).symbol,
-                );
-                return redact(result);
-            } catch (e: any) {
-                return `Error finding tests for "${(action as any).filePath}": ${e.message || e}`;
             }
         }
 

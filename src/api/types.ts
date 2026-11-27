@@ -264,10 +264,3 @@ export interface VerifyProbePlanRequest {
     devServerPort?: number;
 }
 
-export interface VerifyProbePlanResponse {
-    canProbe: boolean;
-    skipReason?: string;
-    plan: import('../attack/runtimeProbe').ProbePlan | null;
-    costUsd: number;
-    scanCredits: number;
-}

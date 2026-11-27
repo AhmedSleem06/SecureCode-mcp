@@ -11,16 +11,15 @@ describe('Tool Policy', () => {
     });
 
     it('read-only tools do not require approval', () => {
-        expect(TOOL_POLICIES['securecode.scan'].requiresApproval).toBe(false);
         expect(TOOL_POLICIES['securecode.architecture'].requiresApproval).toBe(false);
         expect(TOOL_POLICIES['securecode.agent-scan'].requiresApproval).toBe(false);
         expect(TOOL_POLICIES['securecode.agent-scan-batch'].requiresApproval).toBe(false);
+        expect(TOOL_POLICIES['securecode.memory'].requiresApproval).toBe(false);
     });
 
     it('paid-generation tools require approval', () => {
         expect(TOOL_POLICIES['securecode.fix'].requiresApproval).toBe(true);
         expect(TOOL_POLICIES['securecode.run-tests'].requiresApproval).toBe(true);
-        expect(TOOL_POLICIES['securecode.attack'].requiresApproval).toBe(true);
     });
 
     it('getToolPolicy returns undefined for unknown tools', () => {
@@ -28,15 +27,15 @@ describe('Tool Policy', () => {
     });
 
     it('validateAllToolsHavePolicies returns empty for known tools', () => {
-        const known = ['securecode.scan', 'securecode.fix', 'securecode.run-tests'];
+        const known = ['securecode.memory', 'securecode.fix', 'securecode.run-tests'];
         expect(validateAllToolsHavePolicies(known)).toEqual([]);
     });
 
     it('validateAllToolsHavePolicies returns missing tools', () => {
-        const withUnknown = ['securecode.scan', 'securecode.unknown-tool'];
+        const withUnknown = ['securecode.memory', 'securecode.unknown-tool'];
         const missing = validateAllToolsHavePolicies(withUnknown);
         expect(missing).toContain('securecode.unknown-tool');
-        expect(missing).not.toContain('securecode.scan');
+        expect(missing).not.toContain('securecode.memory');
     });
 
     it('agent-scan notes that fix generation within it needs approval', () => {

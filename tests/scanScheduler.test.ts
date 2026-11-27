@@ -122,7 +122,7 @@ describe('Scan Scheduler', () => {
         expect(decision.action?.type).toBe('trace_flow_cross_file');
     });
 
-    it('schedules find_tests for test-location requirement', () => {
+    it('returns finish-ready for removed find_tests tool (no deterministic replacement)', () => {
         const evidence = new EvidenceLedger();
         evidence.addRequirement({
             id: 'req-tests',
@@ -134,8 +134,7 @@ describe('Scan Scheduler', () => {
         });
         const input = makeInput({ evidence });
         const decision = schedule(input);
-        expect(decision.kind).toBe('deterministic-action');
-        expect(decision.action?.type).toBe('find_tests');
+        expect(decision.kind).toBe('finish-ready');
     });
 
     it('returns model when no deterministic action can be derived', () => {
