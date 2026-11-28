@@ -278,6 +278,7 @@ export function validateToolResponse(raw: unknown): ValidationResult<AgentScanTo
 const VALID_VERIFY_RUNNERS = new Set([
     'node', 'tsx', 'bun', 'deno', 'python', 'python3',
     'pnpm-tsx', 'yarn-tsx',
+    'go', 'ruby', 'php', 'java-maven', 'java-gradle', 'dotnet',
 ]);
 
 const MAX_TEST_SCRIPT_BYTES = 64 * 1024;

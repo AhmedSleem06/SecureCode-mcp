@@ -74,7 +74,7 @@ describe('runVerifyLoop — orchestration (Suite 2)', () => {
 
     it('returns INCONCLUSIVE when generate response has unsupported runner', async () => {
         const client = makeClient();
-        queueResponses(client, { canTest: true, testScript: 'x', runner: 'ruby' });
+        queueResponses(client, { canTest: true, testScript: 'x', runner: 'cobol' });
 
         const result = await runVerifyLoop({
             ...BASE_OPTS,

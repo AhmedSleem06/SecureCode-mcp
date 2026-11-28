@@ -135,10 +135,16 @@ describe('validateVerifyGenerateResponse', () => {
         const r = validateVerifyGenerateResponse({
             canTest: true,
             testScript: 'console.log("PASS")',
-            runner: 'ruby',
+            runner: 'cobol',
         });
         expect(r.ok).toBe(false);
         if (!r.ok) expect(r.error).toContain('runner');
+    });
+
+    it('accepts the compiled-language runners', () => {
+        for (const runner of ['go', 'ruby', 'php', 'java-maven', 'java-gradle', 'dotnet']) {
+            expect(validateVerifyGenerateResponse({ canTest: true, testScript: 'x', runner }).ok).toBe(true);
+        }
     });
 
     it('rejects canTest=false with missing skipReason', () => {
