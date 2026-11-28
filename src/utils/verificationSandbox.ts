@@ -40,6 +40,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { LocalSandbox } from './localSandbox';
+import { COMPILED_LANG_RUNNERS, COMPILED_LANG_TIMEOUT_MS, isCompiledLangRunner } from './runnerKinds';
 
 // â”€â”€ Ancestor node_modules discovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -450,12 +451,7 @@ function isPythonRunner(runner: string): boolean {
  * image is configured â€” the caller returns sandbox-unavailable so the user
  * gets a clear "install X / set ENV to enable" message rather than a crash.
  */
-const COMPILED_LANG_RUNNERS = new Set(['go', 'ruby', 'php', 'java-maven', 'java-gradle', 'dotnet']);
-const COMPILED_LANG_TIMEOUT_MS = 180_000;
-
-export function isCompiledLangRunner(runner: string): boolean {
-    return COMPILED_LANG_RUNNERS.has(runner);
-}
+export { isCompiledLangRunner };
 
 export function pickImageForRunner(runner: string): { image: string | null; reason?: string } {
     if (isPythonRunner(runner)) {

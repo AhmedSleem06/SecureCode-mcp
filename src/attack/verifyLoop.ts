@@ -13,7 +13,8 @@ import { parseProofMarker, type ProofRunResult } from './proofTypes';
 import { evaluateProofGate, buildProofEvidence } from './proofGate';
 import { testValidity, engineValidity } from './testValidity';
 import { runMutationTest } from './mutationTest';
-import { detectSandbox, isCompiledLangRunner } from '../utils/verificationSandbox';
+import { detectSandbox } from '../utils/verificationSandbox';
+import { COMPILED_LANG_TIMEOUT_MS, isCompiledLangRunner } from '../utils/runnerKinds';
 import { isAgentScanBudgetExhausted, VERIFY_BUDGET_EXHAUSTED_REASON } from './agentScanCredits';
 import { saveProofArtifact, type ProofArtifact, type ProofArtifactRound } from './proofArtifacts';
 
@@ -297,7 +298,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
         onProgress?.(round, maxRounds, `Round ${round}: running test...`);
 
         // Cap the local test timeout at the remaining verify-budget wall-clock.
-        const baseTimeoutMs = isCompiledLangRunner(runner) ? 180_000 : 30_000;
+        const baseTimeoutMs = isCompiledLangRunner(runner) ? COMPILED_LANG_TIMEOUT_MS : 30_000;
         const testTimeoutMs = tracker
             ? Math.min(baseTimeoutMs, tracker.remainingWallClockMs())
             : baseTimeoutMs;
