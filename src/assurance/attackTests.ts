@@ -28,7 +28,7 @@ export interface AssuranceAttackTestInput {
 export interface AssuranceAttackTestOutcome {
     scenarioUpdates: { scenarioId: string; test: 'blocked' | 'exploited' | 'untestable' | 'skipped'; testNote: string; artifactPath?: string; backend?: string; isolation?: string; repeatable?: boolean }[];
     cellUpdates: CellUpdate[];
-    exploitedFindings: { cellId: string; scenarioId: string; type: string; line: number; title: string; why: string; artifactPath?: string; observedType?: string; severity?: 'critical' | 'high' | 'medium' | 'low'; confidence?: number; repeatable?: boolean }[];
+    exploitedFindings: { cellId: string; scenarioId: string; type: string; line: number; title: string; why: string; artifactPath?: string; observedType?: string; severity?: 'critical' | 'high' | 'medium' | 'low'; confidence?: number; repeatable?: boolean; actor?: string }[];
     approval: { granted: boolean; reason: string };
     costUsd: number;
     scenarioSummary?: { ran: number; repeatable: number; downgraded: number };
@@ -683,6 +683,7 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
                     line,
                     title: cell.title,
                     why: `Attack scenario ${scenario.id} (${scenario.actor}): ${scenario.steps.join(' → ')}. Expected: ${scenario.expectSecure}. ${r.note}`.slice(0, 1500),
+                    actor: scenario.actor,
                     ...(artifactPath ? { artifactPath } : {}),
                     ...(ow ? { observedType: ow.type, severity: ow.severity, confidence: 85 } : {}),
                     ...(typeof r.repeatable === 'boolean' ? { repeatable: r.repeatable } : {}),
