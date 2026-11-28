@@ -77,7 +77,7 @@ const DEEP_SCAN_APPROVAL_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
 const NOT_TESTED_NO_APPROVAL = 'not tested (no approval)';
 const NOT_TESTED_SUMMARY = 'Attack tests were not run (approval not given); checklist items are reviewed, not tested.';
 
-export interface ProvenFinding extends AgentScanFinding {
+interface ProvenFinding extends AgentScanFinding {
     proven: 'PROVEN' | 'UNPROVEN' | 'INCONCLUSIVE' | 'NOT_REPRODUCIBLE' | 'SKIPPED';
     provenReason?: string;
     evidenceLevel?: string;
@@ -1239,8 +1239,61 @@ async function scanTarget(
                 ...(deepScanApprovalRunId ? { deepScanRunId: deepScanApprovalRunId } : {}),
             });
             grid.applyAttackOutcome(attackOutcome);
-            const mergeResults = mergeExploitedIntoFindings(attackOutcome.exploitedFindings ?? [], provenFindings);
-            for (const { target, scenarioEvidence } of mergeResults) {
+            const SEV_RANK: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2 };
+            const RANK_SEV: Record<number, string> = { 5: 'critical', 4: 'high', 3: 'medium', 2: 'low' };
+            const normalizeType = (t: string) => t.toLowerCase().replace(/[-\s]+/g, '_');
+            const TYPE_FAMILIES: [string, RegExp][] = [
+                ['secret-config', /secret|credential_exposure|insecure_default|config_default|misconfig|default_config|weak_key|hardcoded/],
+                ['access', /access_control|authori[sz]ation|privilege|mass_assignment|idor|auth_bypass|ownership|permission/],
+                ['authn', /authentication|session|password|token|credential|login|jwt/],
+                ['dos', /denial_of_service|redos|rate_limit|resource_exhaustion|unbounded|backtracking/],
+                ['enumeration', /enumeration|information_disclosure|info_leak|disclosure/],
+            ];
+            const familyOf = (t: string) => {
+                const n = normalizeType(t);
+                return TYPE_FAMILIES.find(([, re]) => re.test(n))?.[0] ?? n;
+            };
+            for (const ef of attackOutcome.exploitedFindings ?? []) {
+                const efType = ef.observedType ?? ef.type;
+                const cellRisk = grid.getCell(ef.cellId)?.risk ?? 3;
+                const riskRank = Math.max(2, Math.min(5, cellRisk));
+                const observedRank = ef.severity ? (SEV_RANK[ef.severity] ?? riskRank) : riskRank;
+                const efSeverity = RANK_SEV[Math.min(observedRank, riskRank)];
+                const efConfidence = ef.confidence ?? 85;
+                const repeatableLabel = typeof (ef as any).repeatable === 'boolean' ? String((ef as any).repeatable) : 'unknown';
+                const efReason = `Scenario test reported the weakness (repeatable: ${repeatableLabel}); independent proof pending`;
+                const scenarioEvidence = `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId}${efType !== ef.type ? `, observed ${efType}` : ''})`;
+
+                const sameFamily = (f: { line: number; type: string }) =>
+                    Math.abs(f.line - ef.line) <= 3 && familyOf(f.type) === familyOf(efType);
+                const sameSpot = (f: { line: number }) => Math.abs(f.line - ef.line) <= 1;
+                const existing = provenFindings.find(sameFamily) ?? provenFindings.find(sameSpot);
+
+                let target: ProvenFinding;
+                if (existing) {
+                    if (existing.proven === 'PROVEN') {
+                        existing.provenReason = [existing.provenReason, scenarioEvidence].filter(Boolean).join('; ');
+                        if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
+                        continue;
+                    }
+                    existing.proven = 'INCONCLUSIVE';
+                    existing.provenReason = [existing.provenReason, efReason].filter(Boolean).join('; ');
+                    if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
+                    target = existing;
+                } else {
+                    target = {
+                        line: ef.line,
+                        type: efType,
+                        severity: efSeverity as any,
+                        confidence: efConfidence,
+                        evidence: ef.title,
+                        why: ef.why,
+                        proven: 'INCONCLUSIVE' as any,
+                        provenReason: efReason,
+                        ...(ef.artifactPath ? { proofArtifact: ef.artifactPath } : {}),
+                    } as any;
+                    provenFindings.push(target);
+                }
 
                 if (verifyTracker.canAttemptFinding() && !abortSignal?.aborted) {
                     try {
@@ -1548,76 +1601,6 @@ function isStronger(a: ProvenFinding, b: ProvenFinding): boolean {
     const rb = PROVEN_RANK[b.proven] ?? 0;
     if (ra !== rb) return ra > rb;
     return (a.confidence ?? 0) > (b.confidence ?? 0);
-}
-
-export type ExploitedFindingEntry = {
-    cellId: string;
-    scenarioId: string;
-    type: string;
-    line: number;
-    title: string;
-    why: string;
-    artifactPath?: string;
-    observedType?: string;
-    severity?: 'critical' | 'high' | 'medium' | 'low';
-    confidence?: number;
-    repeatable?: boolean;
-    actor?: string;
-};
-
-export interface MergeExploitedResult {
-    target: ProvenFinding;
-    scenarioEvidence: string;
-    isNew: boolean;
-}
-
-export function mergeExploitedIntoFindings(
-    exploitedFindings: ExploitedFindingEntry[],
-    provenFindings: ProvenFinding[],
-): MergeExploitedResult[] {
-    const normalizeType = (t: string) => t.toLowerCase().replace(/[-\s]+/g, '_');
-    const results: MergeExploitedResult[] = [];
-
-    for (const ef of exploitedFindings) {
-        const efType = ef.observedType ?? ef.type;
-        const efSeverity = ef.severity ?? 'medium';
-        const efConfidence = ef.confidence ?? 85;
-        const repeatableLabel = typeof ef.repeatable === 'boolean' ? String(ef.repeatable) : 'unknown';
-        const efReason = `Scenario test reported the weakness (repeatable: ${repeatableLabel}); independent proof pending`;
-        const scenarioEvidence = `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId}${efType !== ef.type ? `, observed ${efType}` : ''})`;
-
-        const sameType = (f: { line: number; type: string }) =>
-            Math.abs(f.line - ef.line) <= 3 && normalizeType(f.type) === normalizeType(efType);
-        const sameSpot = (f: { line: number }) => Math.abs(f.line - ef.line) <= 1;
-        const existing = provenFindings.find(sameType) ?? (ef.observedType ? undefined : provenFindings.find(sameSpot));
-
-        if (existing) {
-            if (existing.proven === 'PROVEN') {
-                existing.provenReason = [existing.provenReason, scenarioEvidence].filter(Boolean).join('; ');
-                if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
-                continue;
-            }
-            existing.proven = 'INCONCLUSIVE';
-            existing.provenReason = [existing.provenReason, efReason].filter(Boolean).join('; ');
-            if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
-            results.push({ target: existing, scenarioEvidence, isNew: false });
-        } else {
-            const target: ProvenFinding = {
-                line: ef.line,
-                type: efType,
-                severity: efSeverity as any,
-                confidence: efConfidence,
-                evidence: ef.title,
-                why: ef.why,
-                proven: 'INCONCLUSIVE' as any,
-                provenReason: efReason,
-                ...(ef.artifactPath ? { proofArtifact: ef.artifactPath } : {}),
-            } as any;
-            provenFindings.push(target);
-            results.push({ target, scenarioEvidence, isNew: true });
-        }
-    }
-    return results;
 }
 
 export function mergeSegmentFindings(findings: ProvenFinding[]): ProvenFinding[] {
