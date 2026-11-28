@@ -40,7 +40,7 @@ import { HandlerInventory } from '../project-map/handlerInventory';
 import { CandidateStore } from './candidateStore';
 import { schedule as schedulerDecision, actionFingerprint } from './scanScheduler';
 import { createLlmHealthMonitor } from './llmHealth';
-import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, isLandingBudget, rangeHasHighPriorityCode, unresolvedOpenLeads, leadCoverageGap } from './finishGate';
+import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, isLandingBudget, rangeHasHighPriorityCode, unresolvedOpenLeads, leadCoverageGap, candidateLinesDelivered } from './finishGate';
 import { redactText } from './report';
 import { QualityMetricsTracker } from './qualityMetrics';
 import { extractFunctionBoundaries } from './agentScanExecutor';
@@ -1356,10 +1356,12 @@ export async function runAgentScan(
                                 }
                             }
                             if (step.action.type === 'read_file') {
-                                const stepFile = (step.action as any).path || target.filePath;
-                                const stepFileNorm = String(stepFile).replace(/\\/g, '/').toLowerCase();
-                                if (stepFileNorm === targetFileNorm) {
-                                    candidateStore.addEvidence(candidateId, `backfill:source:${stepFileNorm}`, 'source', 'source');
+                                const cand = candidateStore.get(candidateId);
+                                if (cand) {
+                                    const { vulnDelivered } = candidateLinesDelivered(cand, investigationState, target.filePath, targetDeliveredRanges());
+                                    if (vulnDelivered) {
+                                        candidateStore.addEvidence(candidateId, `backfill:source:${cand.locations[0]?.filePath ?? target.filePath}:${cand.locations[0]?.line}`, 'source', 'source');
+                                    }
                                 }
                             }
                             if (step.action.type === 'read_config') {
@@ -1990,13 +1992,12 @@ export async function runAgentScan(
                     }
                 }
                 if (action.type === 'read_file' && candidateStore.size() > 0) {
-                    const actionFileNorm = String((action as any).path || target.filePath).replace(/\\/g, '/').toLowerCase();
                     for (const candidate of candidateStore.getAll()) {
-                        const matchesLocation = candidate.locations.some(
-                            loc => loc.filePath.replace(/\\/g, '/').toLowerCase() === actionFileNorm,
-                        );
-                        if (matchesLocation && candidate.evidenceCategories?.includes('source') !== true) {
-                            candidateStore.addEvidence(candidate.id, `source:${actionFileNorm}:${stepsTaken}`, 'source');
+                        if (candidate.evidenceCategories?.includes('source') === true) continue;
+                        const { vulnDelivered } = candidateLinesDelivered(candidate, investigationState, target.filePath, targetDeliveredRanges());
+                        if (vulnDelivered) {
+                            const loc = candidate.locations[0];
+                            candidateStore.addEvidence(candidate.id, `source:${loc?.filePath}:${stepsTaken}`, 'source', 'source');
                         }
                     }
                 }

@@ -58,7 +58,7 @@ function isLogicClass(candidateType: string): boolean {
     return !/injection|traversal|xss|ssrf|redirect|deserializ/.test(normalized);
 }
 
-function candidateLinesDelivered(
+export function candidateLinesDelivered(
     candidate: Candidate,
     investigation: InvestigationState,
     targetFile?: string,
@@ -689,6 +689,14 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                 }
             }
 
+            if (missingGateDimensions(candidate).includes('source')) {
+                const { vulnDelivered } = candidateLinesDelivered(candidate, investigation, target.filePath, input.evidenceGate?.deliveredRanges);
+                if (vulnDelivered) {
+                    const loc = candidate.locations[0];
+                    candidates.addEvidence(candidate.id, `delivered-source:${loc?.filePath}:${loc?.line}`, 'source', 'source');
+                }
+            }
+
             if (candidates.isReadyForJuror(candidate.id)) continue;
 
             const missingDims = missingGateDimensions(candidate);
@@ -716,6 +724,9 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                 blocker = `an effective guard was found (${candidate.guardReason}) — show why it does not apply or drop the finding`;
             } else if (treatAsReadOnly) {
                 const hints: string[] = [];
+                if (missingDims.includes('source')) {
+                    hints.push(`read_file the vulnerable lines (${location}) so the source dimension is satisfied`);
+                }
                 if (missingDims.includes('reachability')) {
                     hints.push(`read the entry-point and vulnerable lines (${location}) so the read coverage proves reachability`);
                 }
@@ -729,7 +740,9 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                     ? hints.join('; ')
                     : `missing dimensions ${missingDims.join(', ')} — provide evidence for each`;
             } else {
-                blocker = `no traced source-to-sink flow reaches ${location} — run trace_flow or trace_flow_cross_file on that file`;
+                blocker = missingDims.includes('source') && !candidate.flowTraced
+                    ? `read_file the vulnerable lines (${location}) — they were not delivered yet — then trace the flow (trace_flow or trace_flow_cross_file)`
+                    : `no traced source-to-sink flow reaches ${location} — run trace_flow or trace_flow_cross_file on that file`;
             }
 
             const dimInfo = missingDims.length > 0

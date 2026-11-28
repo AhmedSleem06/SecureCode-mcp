@@ -235,4 +235,55 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
         expect(candidateReasons).toHaveLength(0);
     });
+
+    it('vulnerable lines delivered in the prompt satisfy the source dimension without a read_file call', () => {
+        const candidates = new CandidateStore();
+        const id = candidates.register({
+            rootCauseId: 'tenant-idor',
+            type: 'broken_access_control',
+            severity: 'high',
+            locations: [{ filePath: 'src/users.ts', line: 50 }],
+            claim: 'Any authenticated user of tenant A can read tenant B invoices by id',
+        });
+        candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
+
+        const result = evaluateFinishGate(makeInput({ candidates }));
+        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toHaveLength(0);
+        expect(candidates.get(id)!.satisfiedDimensions).toContain('source');
+    });
+
+    it('source stays missing when the vulnerable lines were never delivered, and the hint says to read them', () => {
+        const candidates = new CandidateStore();
+        const id = candidates.register({
+            rootCauseId: 'tenant-idor',
+            type: 'broken_access_control',
+            severity: 'high',
+            locations: [{ filePath: 'src/users.ts', line: 50 }],
+            claim: 'Any authenticated user of tenant A can read tenant B invoices by id',
+        });
+        candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
+
+        const input = makeInput({ candidates });
+        input.evidenceGate = { ...input.evidenceGate, deliveredRanges: [{ start: 1, end: 10 }] };
+        const result = evaluateFinishGate(input);
+        const reasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        expect(reasons).toHaveLength(1);
+        expect(reasons[0].description).toContain('source');
+        expect(reasons[0].description).toContain('read_file the vulnerable lines');
+    });
+
+    it('a non-logic, non-injection candidate (information disclosure) gets source from delivered lines', () => {
+        const candidates = new CandidateStore();
+        const id = candidates.register({
+            rootCauseId: 'stack-trace',
+            type: 'information_disclosure',
+            severity: 'low',
+            locations: [{ filePath: 'src/users.ts', line: 5 }],
+            claim: 'An anonymous client sends malformed JSON and the default error handler discloses the stack trace',
+        });
+        candidates.addEvidence(id, 'guard-control:x', 'guard', 'control');
+
+        const result = evaluateFinishGate(makeInput({ candidates }));
+        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toHaveLength(0);
+    });
 });

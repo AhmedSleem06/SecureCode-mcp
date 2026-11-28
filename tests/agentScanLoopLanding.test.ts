@@ -215,7 +215,7 @@ describe('runAgentScan — segment (part of a split file)', () => {
         const mockFn = mockPostJson([
             startResp,
             step({ type: 'read_file', path: 'big.ts', startLine: 1001, endLine: 1500, rationale: 'r' }, 39),
-            step({ type: 'read_file', path: 'big.ts', startLine: 1501, endLine: 2000, rationale: 'r' }, 38),
+            step({ type: 'read_file', path: 'big.ts', startLine: 1501, endLine: 2005, rationale: 'r' }, 38),
             step({ type: 'trace_flow_cross_file', filePath: 'big.ts', rationale: 'r' }, 37),
             step({ type: 'check_policy', filePath: 'big.ts', rationale: 'r' }, 36),
             step({ type: 'read_config', configKind: 'all', rationale: 'r' }, 35),
