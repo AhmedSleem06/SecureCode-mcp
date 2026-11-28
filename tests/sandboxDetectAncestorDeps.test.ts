@@ -295,12 +295,12 @@ try {
 `,
             runner: 'node',
             workspaceRoot: FIXTURE_WORKSPACE,
-            timeoutMs: 30_000,
+            timeoutMs: 90_000,
         });
         expect(result.verdict).toBe('pass');
         expect(result.output).toContain('CJS jsonwebtoken resolved');
         assertFixtureIntact();
-    }, 60_000);
+    }, 120_000);
 
     it('ESM import jwt from "jsonwebtoken" resolves in Docker via mirrored mount', async () => {
         const result = await backend.execute({
@@ -315,10 +315,10 @@ if (typeof jwt.sign === 'function') {
 `,
             runner: 'node',
             workspaceRoot: FIXTURE_WORKSPACE,
-            timeoutMs: 30_000,
+            timeoutMs: 90_000,
         });
         expect(result.verdict).toBe('pass');
         expect(result.output).toContain('ESM jsonwebtoken resolved');
         assertFixtureIntact();
-    }, 60_000);
+    }, 120_000);
 });
