@@ -105,6 +105,7 @@ interface ProvenFinding extends AgentScanFinding {
     proofGateResult?: import('../attack/proofTypes').ProofGateResult;
     /** Whether human review is required before acting on this finding. */
     humanReviewRequired?: boolean;
+    scenarioArtifacts?: string[];
 }
 
 export interface FixVerificationResult {
@@ -402,6 +403,7 @@ async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: Agent
                 if (cached.memoryHash !== memoryFingerprint) {
                     filteredFindings = filterCachedFindingsAgainstMemory(cached.findings, falsePositives);
                 }
+                filteredFindings = withKnownReviewStatus(filteredFindings as any[]) as typeof filteredFindings;
                 if (progress) progress(1, 1, 'Cached result — file unchanged since last scan.');
                 try {
                     const fileHash = require('crypto').createHash('sha256').update(code).digest('hex').substring(0, 16);
@@ -435,6 +437,7 @@ async function toolAgentScanBody(ctx: ServerContext, args: any, runCloser: Agent
                     transcript: [],
                     cached: true,
                     provenCount: (filteredFindings as any[]).filter((f: any) => f.proven === 'PROVEN').length,
+                    reviewCounts: countReviews(filteredFindings as any[]),
                     reviewQueue: {
                         added: [],
                         pendingCount: (filteredFindings as any[]).filter((f: any) => f.reviewStatus === 'pending').length,
@@ -1228,6 +1231,12 @@ async function scanTarget(
         } else {
         try {
             if (progress) progress(0, 1, 'Running assurance attack tests...');
+            const efList: { id: string; line: number; type: string; summary: string }[] = provenFindings.slice(0, EXISTING_FINDINGS_LISTED).map((pf, i) => ({
+                id: `f${i}`,
+                line: pf.line,
+                type: pf.type,
+                summary: (pf.why || '').slice(0, 200),
+            }));
             const attackOutcome = await runAssuranceAttackTests({
                 ctx,
                 runId: scanRunId || '',
@@ -1237,63 +1246,15 @@ async function scanTarget(
                 signal: abortSignal,
                 progress: (msg) => { if (progress) progress(0, 1, msg); },
                 ...(deepScanApprovalRunId ? { deepScanRunId: deepScanApprovalRunId } : {}),
+                ...(efList.length > 0 ? { existingFindings: efList } : {}),
             });
             grid.applyAttackOutcome(attackOutcome);
-            const SEV_RANK: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2 };
-            const RANK_SEV: Record<number, string> = { 5: 'critical', 4: 'high', 3: 'medium', 2: 'low' };
-            const normalizeType = (t: string) => t.toLowerCase().replace(/[-\s]+/g, '_');
-            const TYPE_FAMILIES: [string, RegExp][] = [
-                ['secret-config', /secret|credential_exposure|insecure_default|config_default|misconfig|default_config|weak_key|hardcoded/],
-                ['access', /access_control|authori[sz]ation|privilege|mass_assignment|idor|auth_bypass|ownership|permission/],
-                ['authn', /authentication|session|password|token|credential|login|jwt/],
-                ['dos', /denial_of_service|redos|rate_limit|resource_exhaustion|unbounded|backtracking/],
-                ['enumeration', /enumeration|information_disclosure|info_leak|disclosure/],
-            ];
-            const familyOf = (t: string) => {
-                const n = normalizeType(t);
-                return TYPE_FAMILIES.find(([, re]) => re.test(n))?.[0] ?? n;
-            };
-            for (const ef of attackOutcome.exploitedFindings ?? []) {
-                const efType = ef.observedType ?? ef.type;
-                const cellRisk = grid.getCell(ef.cellId)?.risk ?? 3;
-                const riskRank = Math.max(2, Math.min(5, cellRisk));
-                const observedRank = ef.severity ? (SEV_RANK[ef.severity] ?? riskRank) : riskRank;
-                const efSeverity = RANK_SEV[Math.min(observedRank, riskRank)];
-                const efConfidence = ef.confidence ?? 85;
-                const repeatableLabel = typeof (ef as any).repeatable === 'boolean' ? String((ef as any).repeatable) : 'unknown';
-                const efReason = `Scenario test reported the weakness (repeatable: ${repeatableLabel}); independent proof pending`;
-                const scenarioEvidence = `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId}${efType !== ef.type ? `, observed ${efType}` : ''})`;
-
-                const sameFamily = (f: { line: number; type: string }) =>
-                    Math.abs(f.line - ef.line) <= 3 && familyOf(f.type) === familyOf(efType);
-                const sameSpot = (f: { line: number }) => Math.abs(f.line - ef.line) <= 1;
-                const existing = provenFindings.find(sameFamily) ?? provenFindings.find(sameSpot);
-
-                let target: ProvenFinding;
-                if (existing) {
-                    if (existing.proven === 'PROVEN') {
-                        existing.provenReason = [existing.provenReason, scenarioEvidence].filter(Boolean).join('; ');
-                        if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
-                        continue;
-                    }
-                    existing.proven = 'INCONCLUSIVE';
-                    existing.provenReason = [existing.provenReason, efReason].filter(Boolean).join('; ');
-                    if (ef.artifactPath) (existing as any).proofArtifact = ef.artifactPath;
-                    target = existing;
-                } else {
-                    target = {
-                        line: ef.line,
-                        type: efType,
-                        severity: efSeverity as any,
-                        confidence: efConfidence,
-                        evidence: ef.title,
-                        why: ef.why,
-                        proven: 'INCONCLUSIVE' as any,
-                        provenReason: efReason,
-                        ...(ef.artifactPath ? { proofArtifact: ef.artifactPath } : {}),
-                    } as any;
-                    provenFindings.push(target);
-                }
+            const merged = mergeExploitedIntoFindings(
+                attackOutcome.exploitedFindings ?? [],
+                provenFindings,
+                (cellId) => grid.getCell(cellId)?.risk,
+            );
+            for (const { target, scenarioEvidence } of merged) {
 
                 if (verifyTracker.canAttemptFinding() && !abortSignal?.aborted) {
                     try {
@@ -1412,6 +1373,7 @@ async function scanTarget(
             ...creditFields,
             transcript: agentResult.transcript,
             provenCount: provenFindings.filter(f => f.proven === 'PROVEN').length,
+            reviewCounts: countReviews(provenFindings),
             unprovenCount: provenFindings.filter(f => f.proven === 'UNPROVEN').length,
             inconclusiveCount: provenFindings.filter(f => f.proven === 'INCONCLUSIVE').length,
             notReproducibleCount: provenFindings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,
@@ -1443,6 +1405,107 @@ const PROOF_SKIPPED_DENIED_REASON = 'Proof skipped: approval was denied.';
 
 function formatApprovalSkipped(count: number): string {
     return `${count} finding(s) unproven because approval wasn't given.`;
+}
+
+type ExploitedFinding = {
+    cellId: string; scenarioId: string; type: string; line: number;
+    title: string; why: string; artifactPath?: string;
+    observedType?: string; severity?: 'critical' | 'high' | 'medium' | 'low';
+    confidence?: number; repeatable?: boolean; sameAsFinding?: string | null; actor?: string;
+};
+
+const MERGE_SEV_RANK: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2 };
+const MERGE_RANK_SEV: Record<number, string> = { 5: 'critical', 4: 'high', 3: 'medium', 2: 'low' };
+const EXISTING_FINDINGS_LISTED = 10;
+
+const UNKNOWN_REVIEW = { status: 'unknown' as const, reason: 'saved before the scanner recorded whether the AI reviewer ran' };
+
+export function withKnownReviewStatus<T extends { aiReview?: unknown }>(findings: T[]): T[] {
+    return findings.map(f => (f.aiReview && typeof f.aiReview === 'object' ? f : { ...f, aiReview: { ...UNKNOWN_REVIEW } }));
+}
+
+export function countReviews(findings: { aiReview?: { status?: string } }[]): { reviewed: number; notReviewed: number; unknown: number } {
+    const counts = { reviewed: 0, notReviewed: 0, unknown: 0 };
+    for (const f of findings) {
+        const s = f.aiReview?.status;
+        if (s === 'reviewed') counts.reviewed++;
+        else if (s === 'not-reviewed') counts.notReviewed++;
+        else counts.unknown++;
+    }
+    return counts;
+}
+
+export function mergeExploitedIntoFindings(
+    exploited: ExploitedFinding[],
+    provenFindings: ProvenFinding[],
+    getCellRisk: (cellId: string) => number | undefined,
+): { target: ProvenFinding; scenarioEvidence: string; isNew: boolean }[] {
+    const normalizeType = (t: string) => t.toLowerCase().replace(/[-\s]+/g, '_');
+    const results: { target: ProvenFinding; scenarioEvidence: string; isNew: boolean }[] = [];
+    const listedCount = Math.min(provenFindings.length, EXISTING_FINDINGS_LISTED);
+
+    for (const ef of exploited) {
+        const efType = ef.observedType ?? ef.type;
+        const cellRisk = getCellRisk(ef.cellId) ?? 3;
+        const riskRank = Math.max(2, Math.min(5, cellRisk));
+        const observedRank = ef.severity ? (MERGE_SEV_RANK[ef.severity] ?? riskRank) : riskRank;
+        const efSeverity = MERGE_RANK_SEV[Math.min(observedRank, riskRank)];
+        const efConfidence = ef.confidence ?? 85;
+        const repeatableLabel = typeof ef.repeatable === 'boolean' ? String(ef.repeatable) : 'unknown';
+        const efReason = `Scenario test reported the weakness (repeatable: ${repeatableLabel}); independent proof pending`;
+        const scenarioEvidence = `Attack test exploited (cell ${ef.cellId}, scenario ${ef.scenarioId}${efType !== ef.type ? `, observed ${efType}` : ''})`;
+
+        let existing: ProvenFinding | undefined;
+        const sameIssueNearby = (pool: ProvenFinding[]) => pool.find(f =>
+            Math.abs(f.line - ef.line) <= 3 && normalizeType(f.type) === normalizeType(efType),
+        );
+        if (typeof ef.sameAsFinding === 'string') {
+            const m = ef.sameAsFinding.match(/^f(\d{1,3})$/);
+            if (m) {
+                const idx = Number(m[1]);
+                if (idx < listedCount) existing = provenFindings[idx];
+            }
+        } else if (ef.sameAsFinding === null) {
+            existing = sameIssueNearby(provenFindings.slice(listedCount));
+        } else {
+            existing = sameIssueNearby(provenFindings);
+        }
+
+        let target: ProvenFinding;
+        if (existing) {
+            if (existing.proven === 'PROVEN') {
+                existing.provenReason = [existing.provenReason, scenarioEvidence].filter(Boolean).join('; ');
+                if (ef.artifactPath) {
+                    if (!existing.scenarioArtifacts) existing.scenarioArtifacts = [];
+                    if (!existing.scenarioArtifacts.includes(ef.artifactPath)) existing.scenarioArtifacts.push(ef.artifactPath);
+                }
+                continue;
+            }
+            existing.proven = 'INCONCLUSIVE';
+            existing.provenReason = [existing.provenReason, efReason].filter(Boolean).join('; ');
+            if (ef.artifactPath) {
+                if (!existing.scenarioArtifacts) existing.scenarioArtifacts = [];
+                if (!existing.scenarioArtifacts.includes(ef.artifactPath)) existing.scenarioArtifacts.push(ef.artifactPath);
+            }
+            target = existing;
+        } else {
+            target = {
+                line: ef.line,
+                type: efType,
+                severity: efSeverity as any,
+                confidence: efConfidence,
+                evidence: ef.title,
+                why: ef.why,
+                proven: 'INCONCLUSIVE' as any,
+                provenReason: efReason,
+                aiReview: { status: 'not-reviewed', reason: 'found by an attack test after the AI review' },
+                ...(ef.artifactPath ? { proofArtifact: ef.artifactPath } : {}),
+            } as any;
+            provenFindings.push(target);
+        }
+        results.push({ target, scenarioEvidence, isNew: !existing });
+    }
+    return results;
 }
 
 function isApprovalSkipped(finding: ProvenFinding): boolean {
@@ -1887,6 +1950,7 @@ function mergeSegmentResults(
             : {}),
         transcript,
         provenCount: findings.filter(f => f.proven === 'PROVEN').length,
+        reviewCounts: countReviews(findings),
         unprovenCount: findings.filter(f => f.proven === 'UNPROVEN').length,
         inconclusiveCount: findings.filter(f => f.proven === 'INCONCLUSIVE').length,
         notReproducibleCount: findings.filter(f => f.proven === 'NOT_REPRODUCIBLE').length,

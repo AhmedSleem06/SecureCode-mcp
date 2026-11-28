@@ -435,7 +435,7 @@ describe('toolAgentScan — exploited-finding mapping', () => {
         vi.restoreAllMocks();
     });
 
-    it('merges related types (mass_assignment ~ broken_access_control)', async () => {
+    it('new finding when types differ (mass_assignment vs broken_access_control, no sameAsFinding)', async () => {
         const attackMod = await import('../src/assurance/attackTests');
         vi.spyOn(attackMod, 'runAssuranceAttackTests').mockResolvedValue({
             scenarioUpdates: [],
@@ -468,12 +468,11 @@ describe('toolAgentScan — exploited-finding mapping', () => {
         const ctx: any = { workspaceRoot, apiUrl: 'https://api.usesecurecode.tech', apiToken: 'test-token' };
         const result: any = await toolAgentScan(ctx, { filePath: 'routes.ts', language: 'typescript' });
 
-        const bacFindings = result.agentFindings.filter((f: any) =>
-            f.type === 'broken_access_control' || f.type === 'mass_assignment'
-        );
-        expect(bacFindings).toHaveLength(1);
-        expect(bacFindings[0].proven).toBe('PROVEN');
-        expect(bacFindings[0].provenReason).toContain('Attack test exploited');
+        expect(result.agentFindings).toHaveLength(2);
+        const bac = result.agentFindings.find((f: any) => f.type === 'broken_access_control');
+        const ma = result.agentFindings.find((f: any) => f.type === 'mass_assignment');
+        expect(bac).toBeDefined();
+        expect(ma).toBeDefined();
 
         vi.restoreAllMocks();
     });
@@ -481,7 +480,7 @@ describe('toolAgentScan — exploited-finding mapping', () => {
     it.each([
         ['hardcoded_secret', 7, 'insecure_default_configuration', 7, 'critical'],
         ['broken_authentication', 105, 'missing_authorization', 106, 'high'],
-    ])('merges %s L%i with attack-test %s L%i and does not raise severity above the cell risk', async (agentType, agentLine, observedType, testLine, observedSeverity) => {
+    ])('does NOT merge %s L%i with attack-test %s L%i when types differ (no sameAsFinding)', async (agentType, agentLine, observedType, testLine, observedSeverity) => {
         const attackMod = await import('../src/assurance/attackTests');
         vi.spyOn(attackMod, 'runAssuranceAttackTests').mockResolvedValue({
             scenarioUpdates: [],
@@ -513,11 +512,12 @@ describe('toolAgentScan — exploited-finding mapping', () => {
         const ctx: any = { workspaceRoot, apiUrl: 'https://api.usesecurecode.tech', apiToken: 'test-token' };
         const result: any = await toolAgentScan(ctx, { filePath: 'routes.ts', language: 'typescript' });
 
-        expect(result.agentFindings).toHaveLength(1);
-        expect(result.agentFindings[0].type).toBe(agentType);
-        expect(result.agentFindings[0].severity).toBe('medium');
-        expect(result.agentFindings[0].proven).toBe('PROVEN');
-        expect(result.agentFindings[0].provenReason).toContain(`Attack test exploited`);
+        expect(result.agentFindings).toHaveLength(2);
+        const original = result.agentFindings.find((f: any) => f.type === agentType);
+        expect(original).toBeDefined();
+        expect(original.severity).toBe('medium');
+        const newFinding = result.agentFindings.find((f: any) => f.type === observedType);
+        expect(newFinding).toBeDefined();
 
         vi.restoreAllMocks();
     });

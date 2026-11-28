@@ -240,6 +240,7 @@ export interface VerifyAnalyzeResponse {
         severity: 'critical' | 'high' | 'medium' | 'low';
         matchesCell: boolean;
         summary: string;
+        sameAsFinding?: string | null;
     } | null;
 }
 

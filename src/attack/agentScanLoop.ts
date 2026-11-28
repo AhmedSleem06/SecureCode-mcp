@@ -56,6 +56,7 @@ import {
     AGENT_SCAN_DEFAULTS,
     clampHarnessSettings,
     defaultClientCapabilities,
+    findingReviewFromStep,
     type AgentActionConstraint,
     type AgentHarnessSettings,
     type AgentLead,
@@ -74,6 +75,7 @@ import {
     type AgentScanStepResponse,
     type AgentScanTarget,
     type AgentScanTranscriptStep,
+    type FindingAiReview,
     type InvestigationNote,
     type TerminationReason,
 } from './agentScanProtocol';
@@ -635,6 +637,8 @@ export async function runAgentScan(
         let meaningfulProgressSinceRecovery = true;
         let aggressiveCompaction = false;
         let lastFinishAction: AgentScanFinishAction | null = null;
+        let lastFinishReview: FindingAiReview = { status: 'unknown', reason: 'the server did not report whether the reviewer ran' };
+        const withReview = (findings: any[]): any[] => findings.map(f => ({ ...f, aiReview: { ...lastFinishReview } }));
         let finalFinishRequested = false;
         let lastFinishRejectionReasons: string[] = [];
         const finishLoop = newFinishLoopTracker();
@@ -772,7 +776,7 @@ export async function runAgentScan(
             }
 
             const finish = lastFinishAction;
-            const scoped = partitionSegmentFindings(finish ? sanitizeFindings(finish.findings) : [], segment, target.filePath);
+            const scoped = partitionSegmentFindings(finish ? withReview(sanitizeFindings(finish.findings)) : [], segment, target.filePath);
             const findings = scoped.inRange;
             const investigationNotes = [...(finish?.investigationNotes ?? []), ...scoped.notes];
             for (const candidate of activeCandidates) {
@@ -1002,7 +1006,7 @@ export async function runAgentScan(
                         console.warn('[Agent Scan Loop] Agent run already terminated after a delivered finish — surfacing the finish findings.');
                         const finish = lastFinishAction;
                         const coverageGaps = [...(finish.coverageGaps ?? [])];
-                        const scopedFinish = partitionSegmentFindings(sanitizeFindings(finish.findings), segment, target.filePath);
+                        const scopedFinish = partitionSegmentFindings(withReview(sanitizeFindings(finish.findings)), segment, target.filePath);
                         if (lastFinishRejectionReasons.length > 0) {
                             coverageGaps.push({
                                 title: 'Finish accepted by the server despite local gate concerns',
@@ -1288,6 +1292,7 @@ export async function runAgentScan(
                 scanState.finishAttempts++;
                 qualityTracker.recordFinishAttempt();
                 lastFinishAction = action;
+                lastFinishReview = findingReviewFromStep(stepResp.review);
                 lastFinishRejectionReasons = [];
                 if (assuranceGrid && Array.isArray((action as any).cellUpdates)) {
                     assuranceGrid.applyCellUpdates((action as any).cellUpdates, targetDeliveredRanges(), assuranceScope);
@@ -1559,7 +1564,7 @@ export async function runAgentScan(
 
                     return closeRun({
                         status: 'completed',
-                        findings: sanitizeFindings(scopedFinish.inRange),
+                        findings: withReview(sanitizeFindings(scopedFinish.inRange)),
                         investigationNotes,
                         coverageGaps,
                         transcript,

@@ -213,6 +213,8 @@ describe('toolAgentScan — large files scanned in parts', () => {
         expect(cached.cached).toBe(true);
         expect(cached.segments).toHaveLength(4);
         expect(cached.agentFindings).toHaveLength(2);
+        expect(cached.agentFindings.every((f: any) => f.aiReview?.status === 'unknown')).toBe(true);
+        expect(cached.reviewCounts).toEqual({ reviewed: 0, notReviewed: 0, unknown: 2 });
     });
 
     it('keeps scanning after a failed part and reports the result as incomplete', async () => {

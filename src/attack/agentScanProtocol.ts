@@ -69,6 +69,7 @@ export interface AgentScanClientCapabilities {
     supportedActions: AgentScanActionType[];
     /** The MCP runs its own finish gate; the API skips its duplicate server-side gate. */
     clientFinishGate?: boolean;
+    reviewStatus?: boolean;
 }
 
 /**
@@ -276,7 +277,36 @@ export function defaultClientCapabilities(): AgentScanClientCapabilities {
         protocolVersion: AGENT_SCAN_PROTOCOL_VERSION,
         supportedActions: AGENT_SCAN_SUPPORTED_ACTIONS,
         clientFinishGate: true,
+        reviewStatus: true,
     };
+}
+
+export type AgentScanReviewSkipReason = 'final-step' | 'over-cap' | 'already-reviewed' | 'no-findings' | 'critique-error';
+
+export interface AgentScanReviewStatus {
+    ran: boolean;
+    verdict?: 'accept' | 'reject';
+    skippedReason?: AgentScanReviewSkipReason;
+}
+
+export interface FindingAiReview {
+    status: 'reviewed' | 'not-reviewed' | 'unknown';
+    reason?: string;
+}
+
+const REVIEW_SKIP_TEXT: Record<AgentScanReviewSkipReason, string> = {
+    'final-step': 'not reviewed: the scan reached its last step',
+    'over-cap': 'not reviewed: the scan budget was used up',
+    'already-reviewed': 'not reviewed: an earlier finish was reviewed and sent back, and the reviewer does not run again after that',
+    'no-findings': 'nothing to review',
+    'critique-error': 'not reviewed: the reviewer failed',
+};
+
+export function findingReviewFromStep(review: AgentScanReviewStatus | undefined): FindingAiReview {
+    if (!review || typeof review.ran !== 'boolean') return { status: 'unknown', reason: 'the server did not report whether the reviewer ran' };
+    if (review.ran) return { status: 'reviewed' };
+    const reason = review.skippedReason && REVIEW_SKIP_TEXT[review.skippedReason];
+    return { status: 'not-reviewed', reason: reason || 'not reviewed' };
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
@@ -588,6 +618,7 @@ export interface AgentScanFinding {
     rootCause?: RootCauseReference;
     verificationLevel?: VerificationLevel;
     capabilityBaseline?: CapabilityBaseline | null;
+    aiReview?: FindingAiReview;
 }
 
 export interface AgentScanFinishAction extends AgentScanNotebookFields {
@@ -823,6 +854,7 @@ export interface AgentScanStepResponse {
         retry: number;
         critique: number;
     };
+    review?: AgentScanReviewStatus;
     /** Model telemetry — the actual serving model for this step. */
     model?: string;
     provider?: string;

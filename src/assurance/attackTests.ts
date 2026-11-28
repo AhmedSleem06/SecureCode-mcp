@@ -23,12 +23,13 @@ export interface AssuranceAttackTestInput {
     signal?: AbortSignal;
     progress?: (message: string) => void;
     deepScanRunId?: string;
+    existingFindings?: { id: string; line: number; type: string; summary: string }[];
 }
 
 export interface AssuranceAttackTestOutcome {
     scenarioUpdates: { scenarioId: string; test: 'blocked' | 'exploited' | 'untestable' | 'skipped'; testNote: string; artifactPath?: string; backend?: string; isolation?: string; repeatable?: boolean }[];
     cellUpdates: CellUpdate[];
-    exploitedFindings: { cellId: string; scenarioId: string; type: string; line: number; title: string; why: string; artifactPath?: string; observedType?: string; severity?: 'critical' | 'high' | 'medium' | 'low'; confidence?: number; repeatable?: boolean }[];
+    exploitedFindings: { cellId: string; scenarioId: string; type: string; line: number; title: string; why: string; artifactPath?: string; observedType?: string; severity?: 'critical' | 'high' | 'medium' | 'low'; confidence?: number; repeatable?: boolean; sameAsFinding?: string | null; actor?: string }[];
     approval: { granted: boolean; reason: string };
     costUsd: number;
     scenarioSummary?: { ran: number; repeatable: number; downgraded: number };
@@ -218,7 +219,7 @@ interface ScenarioRunResult {
     test: ScenarioTestResult;
     note: string;
     failureLine: number | null;
-    observedWeakness?: { type: string; severity: 'critical' | 'high' | 'medium' | 'low'; matchesCell: boolean; summary: string } | null;
+    observedWeakness?: { type: string; severity: 'critical' | 'high' | 'medium' | 'low'; matchesCell: boolean; summary: string; sameAsFinding?: string | null } | null;
     rounds: ProofArtifactRound[];
     stop?: 'budget' | 'sandbox' | 'cancelled';
     repeatable?: boolean;
@@ -372,6 +373,7 @@ async function runScenarioTest(env: RunEnv, cell: GridCell, scenario: Scenario):
                 targetCode: input.target.fileContent,
                 filePath: input.target.filePath,
                 runId: input.runId,
+                ...(input.existingFindings?.length ? { existingFindings: input.existingFindings } : {}),
             }, input.signal);
         } catch (err) {
             return apiFailure(err, rounds, input.signal);
@@ -684,8 +686,9 @@ export async function runAssuranceAttackTests(input: AssuranceAttackTestInput): 
                     title: cell.title,
                     why: `Attack scenario ${scenario.id} (${scenario.actor}): ${scenario.steps.join(' → ')}. Expected: ${scenario.expectSecure}. ${r.note}`.slice(0, 1500),
                     ...(artifactPath ? { artifactPath } : {}),
-                    ...(ow ? { observedType: ow.type, severity: ow.severity, confidence: 85 } : {}),
+                    ...(ow ? { observedType: ow.type, severity: ow.severity, confidence: 85, ...(ow.sameAsFinding !== undefined ? { sameAsFinding: ow.sameAsFinding } : {}) } : {}),
                     ...(typeof r.repeatable === 'boolean' ? { repeatable: r.repeatable } : {}),
+                    actor: scenario.actor,
                 });
             } else if (r.test === 'blocked') {
                 consecutiveUntestable = 0;
