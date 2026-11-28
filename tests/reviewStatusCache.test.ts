@@ -119,6 +119,37 @@ describe('review status survives the cache', () => {
         expect(vi.mocked(runAgentScan)).toHaveBeenCalledTimes(2);
     });
 
+    it('a proof answers the open questions: a PROVEN finding drops them, fresh and cached', async () => {
+        vi.mocked(runAgentScan).mockResolvedValue(agentResult({
+            findings: [finding({ aiReview: { status: 'reviewed' }, openQuestions: ['No guard or policy check was run for this location.'] })],
+        }));
+        vi.mocked(runVerifyLoop).mockResolvedValue({ verdict: 'PROVEN', reason: 'exploit reproduced', roundsUsed: 1 } as any);
+
+        const fresh = await runScan();
+        const cached = await runScan();
+
+        expect(cached.cached).toBe(true);
+        for (const r of [fresh, cached]) {
+            expect(r.agentFindings[0].proven).toBe('PROVEN');
+            expect(r.agentFindings[0]).not.toHaveProperty('openQuestions');
+        }
+    });
+
+    it('an unproven finding keeps its open questions, fresh and cached', async () => {
+        vi.mocked(runAgentScan).mockResolvedValue(agentResult({
+            findings: [finding({ aiReview: { status: 'reviewed' }, openQuestions: ['No traced flow or runtime test showed attacker input reaching this line.'] })],
+        }));
+        vi.mocked(runVerifyLoop).mockResolvedValue({ verdict: 'INCONCLUSIVE', reason: 'test could not reach the handler', roundsUsed: 2 } as any);
+
+        const fresh = await runScan();
+        const cached = await runScan();
+
+        for (const r of [fresh, cached]) {
+            expect(r.agentFindings[0].proven).toBe('INCONCLUSIVE');
+            expect(r.agentFindings[0].openQuestions).toEqual(['No traced flow or runtime test showed attacker input reaching this line.']);
+        }
+    });
+
     it('an older cache entry without review status reads as unknown, never as reviewed', async () => {
         writeCachedScan(workspaceRoot, 'app.ts', CODE, {
             findings: [{ ...finding(), proven: 'PROVEN' }] as any,

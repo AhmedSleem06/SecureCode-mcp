@@ -1095,6 +1095,7 @@ async function scanTarget(
     // degraded, or incomplete runs (llm_degraded, blocked reads, budget
     // stops, crashes) reflect a bad model-server or environment window,
     // not the file's true state, and must not be served for 7 days.
+    dropQuestionsAnsweredByProof(provenFindings);
     if (!part && useCache && agentResult.status === 'completed' && agentResult.terminationReason === 'agent_finish') {
         try {
             writeCachedScan(ctx.workspaceRoot, filePath!, code, {
@@ -1318,6 +1319,7 @@ async function scanTarget(
         revokeSessionApproval(deepScanApprovalRunId);
     }
 
+    dropQuestionsAnsweredByProof(provenFindings);
     const settlement = await runCloser.close();
     const baseCredits = agentResult.baseCredits ?? AGENT_SCAN_DEFAULTS.creditsPerRun;
     const creditsUsed = settlement?.creditsUsed ?? agentResult.creditsUsed;
@@ -1422,6 +1424,12 @@ const UNKNOWN_REVIEW = { status: 'unknown' as const, reason: 'saved before the s
 
 export function withKnownReviewStatus<T extends { aiReview?: unknown }>(findings: T[]): T[] {
     return findings.map(f => (f.aiReview && typeof f.aiReview === 'object' ? f : { ...f, aiReview: { ...UNKNOWN_REVIEW } }));
+}
+
+export function dropQuestionsAnsweredByProof(findings: { proven?: string; openQuestions?: string[] }[]): void {
+    for (const f of findings) {
+        if (f.proven === 'PROVEN' && f.openQuestions) delete f.openQuestions;
+    }
 }
 
 export function countReviews(findings: { aiReview?: { status?: string } }[]): { reviewed: number; notReviewed: number; unknown: number } {
