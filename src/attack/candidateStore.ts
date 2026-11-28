@@ -100,6 +100,8 @@ export const FLOW_LINE_TOLERANCE = 3;
 
 const POST_FINISH_DIMENSIONS: ReadonlySet<ProofDimension> = new Set(['verification']);
 
+const AI_JUDGED_DIMENSIONS: ReadonlySet<ProofDimension> = new Set(['threat-model', 'impact']);
+
 export interface TracedFlowPath {
     tool: string;
     points: Array<{ filePath: string; line?: number }>;
@@ -147,9 +149,9 @@ function guardAppliesTo(guard: GuardObservation, candidate: Candidate): boolean 
     return (ATTACK_TYPE_KEYWORDS[attack] || [attack]).some(k => type.includes(k));
 }
 
-/** Proof dimensions the finish gate checks: everything except those only the post-finish verifier can satisfy. */
+/** Proof dimensions the finish gate checks: the objective ones, not verification (post-finish) or threat-model / impact (judged by the AI reviewer). */
 export function gateDimensions(candidate: Candidate): ProofDimension[] {
-    return (candidate.requiredProofDimensions || []).filter(d => !POST_FINISH_DIMENSIONS.has(d));
+    return (candidate.requiredProofDimensions || []).filter(d => !POST_FINISH_DIMENSIONS.has(d) && !AI_JUDGED_DIMENSIONS.has(d));
 }
 
 export function missingGateDimensions(candidate: Candidate): ProofDimension[] {

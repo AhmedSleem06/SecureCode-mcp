@@ -117,7 +117,7 @@ describe('Finish gate — unsupported language (Go)', () => {
 
         const input = makeGateInput({ candidates, investigation });
         const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(candidateReasons).toHaveLength(0);
         expect(result.mode).not.toBe('continue');
     });
@@ -159,7 +159,7 @@ describe('Finish gate — unsupported language (Go)', () => {
         const input = makeGateInput({ candidates, investigation });
         input.evidenceGate = { ...input.evidenceGate, deliveredRanges: [] };
         const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(candidateReasons.length).toBeGreaterThan(0);
         expect(candidateReasons[0].description).toContain('read the entry-point');
         expect(candidateReasons[0].description).not.toContain('trace_flow');
@@ -201,7 +201,7 @@ describe('Finish gate — unsupported language (Go)', () => {
             },
         };
         const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(candidateReasons.length).toBeGreaterThan(0);
     });
 
@@ -232,7 +232,7 @@ describe('Finish gate — unsupported language (Go)', () => {
             },
         });
         const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(candidateReasons).toHaveLength(0);
     });
 });

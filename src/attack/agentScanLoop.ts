@@ -780,6 +780,7 @@ export async function runAgentScan(
             const findings = scoped.inRange;
             const investigationNotes = [...(finish?.investigationNotes ?? []), ...scoped.notes];
             for (const candidate of activeCandidates) {
+                if (candidateIsReported(candidate, findings)) continue;
                 const missingDims = candidate.requiredProofDimensions?.filter(d =>
                     !candidate.satisfiedDimensions?.includes(d),
                 ) || [];
@@ -1543,14 +1544,16 @@ export async function runAgentScan(
                     qualityTracker.recordBudget(stepsTaken, stepsGranted, extensionsGranted, costSpentUsd, budget.costCapUsd, wallClockMs, Date.now() - startTime);
 
                     const investigationNotes = [...(action.investigationNotes ?? []), ...scopedFinish.notes];
+                    const acceptedFindings = withOpenQuestions(withReview(sanitizeFindings(scopedFinish.inRange)), gateResult.advice ?? []);
                     for (const candidate of candidateStore.getActive()) {
                         if (candidate.status === 'discovered' || candidate.status === 'investigating' || candidate.status === 'supported') {
+                            if (candidateIsReported(candidate, acceptedFindings)) continue;
                             const missingDims = candidate.requiredProofDimensions?.filter(d =>
                                 !candidate.satisfiedDimensions?.includes(d),
                             ) || [];
                             investigationNotes.push({
                                 title: candidate.claim,
-                                detail: `Candidate was not fully verified. Status: ${candidate.status}. Missing proof dimensions: ${missingDims.join(', ') || 'none'}. Evidence refs: ${candidate.evidenceRefs.length}.`,
+                                detail: `Reported in an earlier finish but not in the final report. Status: ${candidate.status}. Missing proof dimensions: ${missingDims.join(', ') || 'none'}. Evidence refs: ${candidate.evidenceRefs.length}.`,
                                 file: candidate.locations[0]?.filePath || target.filePath,
                                 line: candidate.locations[0]?.line,
                                 verificationLevel: 'logic-confirmed' as any,
@@ -1564,7 +1567,7 @@ export async function runAgentScan(
 
                     return closeRun({
                         status: 'completed',
-                        findings: withReview(sanitizeFindings(scopedFinish.inRange)),
+                        findings: acceptedFindings,
                         investigationNotes,
                         coverageGaps,
                         transcript,
@@ -2425,6 +2428,24 @@ function validateFinding(f: any, index: number): { finding: any; issues: string[
     sanitized.evidence = sanitizeFindingText(sanitized.evidence || '');
 
     return { finding: sanitized, issues };
+}
+
+function findingRootCauseId(f: any): string {
+    return f?.rootCause?.rootCauseId || `${f?.type}:${f?.line}`;
+}
+
+export function candidateIsReported(candidate: { rootCauseId: string; type: string; locations: { line: number }[] }, findings: any[]): boolean {
+    return findings.some(f => findingRootCauseId(f) === candidate.rootCauseId
+        || (f?.type === candidate.type && candidate.locations.some(l => Math.abs((f?.line ?? -999) - l.line) <= 2)));
+}
+
+export function withOpenQuestions(findings: any[], advice: { rootCauseId: string; line?: number; openQuestions: string[] }[]): any[] {
+    if (advice.length === 0) return findings;
+    return findings.map(f => {
+        const id = findingRootCauseId(f);
+        const match = advice.find(a => a.rootCauseId === id) ?? advice.find(a => a.line !== undefined && a.line === f?.line && a.rootCauseId.startsWith(`${f?.type}:`));
+        return match && match.openQuestions.length > 0 ? { ...f, openQuestions: [...match.openQuestions] } : f;
+    });
 }
 
 export function sanitizeFindings(findings: any[]): any[] {

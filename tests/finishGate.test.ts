@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, FINISH_LOOP_ESCAPE_THRESHOLD, FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD, FINISH_LOOP_CANDIDATE_ESCAPE_THRESHOLD, finishLoopEscapeThreshold, isLandingBudget, textHasActorAndEffect, transcriptHasRuntimeEvidence } from '../src/attack/finishGate';
+import { evaluateFinishGate, newFinishLoopTracker, trackFinishRejection, finishLoopEscaped, FINISH_LOOP_ESCAPE_THRESHOLD, FINISH_LOOP_CHECKLIST_ESCAPE_THRESHOLD, FINISH_LOOP_CANDIDATE_ESCAPE_THRESHOLD, finishLoopEscapeThreshold, isLandingBudget, transcriptHasRuntimeEvidence } from '../src/attack/finishGate';
 import { AGENT_SCAN_DEFAULTS } from '../src/attack/agentScanProtocol';
 import { createScanRunState } from '../src/attack/scanState';
 import { EvidenceLedger } from '../src/attack/evidenceLedger';
@@ -141,7 +141,7 @@ describe('Finish Gate', () => {
         const input = makeInput({ candidates });
         const result = evaluateFinishGate(input);
         expect(result.accepted).toBe(false);
-        expect(result.reasons.some(r => r.code === 'non-terminal-candidate')).toBe(true);
+        expect((result.advice ?? []).some(r => r.code === 'candidate-open-questions')).toBe(true);
     });
 
     it('rejects finish when unreviewed security-sensitive handlers exist', () => {
@@ -375,11 +375,11 @@ describe('Finish Gate — traced flow readiness (verification is post-finish)', 
         }
         expect(candidates.get(id)!.satisfiedDimensions).not.toContain('verification');
         const result = evaluateFinishGate(makeInput({ investigation, candidates }));
-        expect(result.reasons.some(r => r.code === 'non-terminal-candidate')).toBe(false);
+        expect((result.advice ?? []).some(r => r.code === 'candidate-open-questions')).toBe(false);
         expect(result.accepted).toBe(true);
     });
 
-    it('a candidate without a traced flow still blocks, and the reason names the missing flow (not verification)', () => {
+    it('a candidate without a traced flow does not block; the advice names the missing flow (not verification)', () => {
         const investigation = completedInvestigation();
         const candidates = new CandidateStore();
         candidates.register({
@@ -387,13 +387,15 @@ describe('Finish Gate — traced flow readiness (verification is post-finish)', 
             locations: [{ filePath: 'test.ts', line: 12 }], claim: 'SQLi',
         });
         const result = evaluateFinishGate(makeInput({ investigation, candidates }));
-        expect(result.accepted).toBe(false);
-        const reason = result.reasons.find(r => r.code === 'non-terminal-candidate')!;
-        expect(reason.description).toContain('no traced source-to-sink flow');
-        expect(reason.description).not.toContain('verification');
+        expect(result.accepted).toBe(true);
+        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toEqual([]);
+        const advice = (result.advice ?? []).find(r => r.code === 'candidate-open-questions')!;
+        expect(advice.description).toContain('no traced source-to-sink flow');
+        expect(advice.description).not.toContain('verification');
+        expect(advice.openQuestions).toContain('No traced flow or runtime test showed attacker input reaching this line.');
     });
 
-    it('a traced candidate with an effective guard still blocks', () => {
+    it('a traced candidate with an effective guard does not block; the advice says a guard was found', () => {
         const investigation = completedInvestigation();
         investigation.recordFlowVerification('test.ts', 'trace_flow', 'confirmed', 1, '1 hop(s)', {
             source: { filePath: 'test.ts', line: 10 }, sink: { filePath: 'test.ts', line: 12 }, hops: [],
@@ -406,8 +408,10 @@ describe('Finish Gate — traced flow readiness (verification is post-finish)', 
         });
         candidates.applyFlowEvidence(investigation.getTracedFlowPaths(), investigation.getGuardResults());
         const result = evaluateFinishGate(makeInput({ investigation, candidates }));
-        expect(result.accepted).toBe(false);
-        expect(result.reasons.find(r => r.code === 'non-terminal-candidate')!.description).toContain('effective guard');
+        expect(result.accepted).toBe(true);
+        const advice = (result.advice ?? []).find(r => r.code === 'candidate-open-questions')!;
+        expect(advice.description).toContain('effective guard');
+        expect(advice.openQuestions[0]).toContain('effective guard');
     });
 });
 
@@ -483,7 +487,7 @@ describe('Finish Gate — Fix D: actor+effect from finding text', () => {
             transcript,
             proposal: { type: 'finish', findings: [finding], summary: 'done', selfCritique: 'checked' },
         }));
-        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toEqual([]);
+        expect((result.advice ?? []).filter(r => r.code === 'candidate-open-questions')).toEqual([]);
     });
 
     it('(a) the claim itself without "customer" still fails without a matching finding', () => {
@@ -503,7 +507,7 @@ describe('Finish Gate — Fix D: actor+effect from finding text', () => {
             candidates,
             proposal: { type: 'finish', findings: [], summary: 'done', selfCritique: 'checked' },
         }));
-        expect(result.reasons.some(r => r.code === 'non-terminal-candidate')).toBe(true);
+        expect((result.advice ?? []).some(r => r.code === 'candidate-open-questions')).toBe(true);
     });
 
     it('(a) widened actor terms: "customer", "owner", "buyer", "seller" are accepted in the claim', () => {
@@ -524,7 +528,7 @@ describe('Finish Gate — Fix D: actor+effect from finding text', () => {
                 candidates,
                 proposal: { type: 'finish', findings: [], summary: 'done', selfCritique: 'checked' },
             }));
-            expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toEqual([]);
+            expect((result.advice ?? []).filter(r => r.code === 'candidate-open-questions')).toEqual([]);
         }
     });
 
@@ -553,10 +557,10 @@ describe('Finish Gate — Fix D: actor+effect from finding text', () => {
             transcript,
             proposal: { type: 'finish', findings: [{ line: 113, type: 'sql_injection', severity: 'critical', confidence: 90, evidence: 'x', why: 'SQL injection' }], summary: 'done', selfCritique: 'checked' },
         }));
-        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toEqual([]);
+        expect((result.advice ?? []).filter(r => r.code === 'candidate-open-questions')).toEqual([]);
     });
 
-    it('(b) injection candidate without flow or run_tests: becomes a coverage gap, not a repeated blocker', () => {
+    it('(b) injection candidate without flow or run_tests: never a blocker; the open question travels as advice', () => {
         const investigation = completedInvestigation();
         const candidates = new CandidateStore();
         candidates.register({
@@ -573,8 +577,11 @@ describe('Finish Gate — Fix D: actor+effect from finding text', () => {
             transcript: [],
             proposal: { type: 'finish', findings: [], summary: 'done', selfCritique: 'checked' },
         }));
-        expect(result1.coverageGaps?.some(g => g.title.includes('No traced flow'))).toBe(true);
-        expect(result1.reasons.some(r => r.code === 'non-terminal-candidate')).toBe(false);
+        expect(result1.accepted).toBe(true);
+        expect(result1.reasons.filter(r => r.code === 'non-terminal-candidate')).toEqual([]);
+        const advice = (result1.advice ?? []).find(r => r.code === 'candidate-open-questions')!;
+        expect(advice.rootCauseId).toBe('sql_injection:113');
+        expect(advice.openQuestions).toContain('No traced flow or runtime test showed attacker input reaching this line.');
 
         const result2 = evaluateFinishGate(makeInput({
             investigation,
@@ -582,7 +589,7 @@ describe('Finish Gate — Fix D: actor+effect from finding text', () => {
             transcript: [],
             proposal: { type: 'finish', findings: [], summary: 'done', selfCritique: 'checked' },
         }));
-        expect(result2.reasons.some(r => r.code === 'non-terminal-candidate')).toBe(false);
+        expect(result2.accepted).toBe(true);
     });
 
     it('(c) logic candidate with missing control: filled by check_guard observation', () => {
@@ -608,7 +615,7 @@ describe('Finish Gate — Fix D: actor+effect from finding text', () => {
             transcript,
             proposal: { type: 'finish', findings: [{ line: 31, type: 'broken_access_control', severity: 'critical', confidence: 90, evidence: 'x', why: 'Any attacker can bypass the admin guard.' }], summary: 'done', selfCritique: 'checked' },
         }));
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         const controlMissing = candidateReasons.some(r => r.description.includes('control'));
         expect(controlMissing).toBe(false);
     });
@@ -651,16 +658,3 @@ describe('Finish Gate — Fix D: actor+effect from finding text', () => {
     });
 });
 
-describe('Finish Gate — textHasActorAndEffect export', () => {
-    it('recognizes classic actor+effect in finding why text', () => {
-        expect(textHasActorAndEffect('Actor: any authenticated customer. Effect: goods ship at a price the customer chose.')).toBe(true);
-    });
-
-    it('rejects text without an actor', () => {
-        expect(textHasActorAndEffect('The price field is not validated.')).toBe(false);
-    });
-
-    it('rejects text without an effect', () => {
-        expect(textHasActorAndEffect('The attacker has a token.')).toBe(false);
-    });
-});

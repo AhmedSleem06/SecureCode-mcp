@@ -54,8 +54,7 @@ describe('Source crediting — line-level accounting', () => {
         const input = makeInput({ candidates });
         const result = evaluateFinishGate(input);
         expect(candidates.get(id)!.satisfiedDimensions).toContain('source');
-        const sourceReasons = result.reasons.filter(r =>
-            r.code === 'non-terminal-candidate' && r.description.includes('source'));
+        const sourceReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions' && r.description.includes('source'));
         expect(sourceReasons).toHaveLength(0);
     });
 
@@ -71,7 +70,7 @@ describe('Source crediting — line-level accounting', () => {
         };
         const result = evaluateFinishGate(input);
         expect(candidates.get(id)!.satisfiedDimensions).not.toContain('source');
-        const reasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const reasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(reasons.length).toBeGreaterThan(0);
         expect(reasons[0].description).toContain('source');
     });
@@ -96,7 +95,7 @@ describe('Source crediting — line-level accounting', () => {
         });
         const result = evaluateFinishGate(input);
         expect(candidates.get(id)!.satisfiedDimensions).not.toContain('source');
-        const reasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const reasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(reasons.length).toBeGreaterThan(0);
         expect(reasons[0].description).toContain('source');
     });
@@ -121,7 +120,7 @@ describe('Source crediting — line-level accounting', () => {
         });
         const result = evaluateFinishGate(input);
         expect(candidates.get(id)!.satisfiedDimensions).not.toContain('source');
-        const reasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const reasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(reasons.length).toBeGreaterThan(0);
     });
 
@@ -146,8 +145,7 @@ describe('Source crediting — line-level accounting', () => {
         });
         const result = evaluateFinishGate(input);
         expect(candidates.get(id)!.satisfiedDimensions).toContain('source');
-        const sourceReasons = result.reasons.filter(r =>
-            r.code === 'non-terminal-candidate' && r.description.includes('source'));
+        const sourceReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions' && r.description.includes('source'));
         expect(sourceReasons).toHaveLength(0);
     });
 
@@ -172,7 +170,7 @@ describe('Source crediting — line-level accounting', () => {
         });
         const result = evaluateFinishGate(input);
         expect(candidates.get(id)!.satisfiedDimensions).not.toContain('source');
-        const reasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const reasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(reasons.length).toBeGreaterThan(0);
     });
 
@@ -197,8 +195,7 @@ describe('Source crediting — line-level accounting', () => {
         });
         const result = evaluateFinishGate(input);
         expect(candidates.get(id)!.satisfiedDimensions).toContain('source');
-        const sourceReasons = result.reasons.filter(r =>
-            r.code === 'non-terminal-candidate' && r.description.includes('source'));
+        const sourceReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions' && r.description.includes('source'));
         expect(sourceReasons).toHaveLength(0);
     });
 
@@ -223,7 +220,7 @@ describe('Source crediting — line-level accounting', () => {
         });
         const result = evaluateFinishGate(input);
         expect(candidates.get(id)!.satisfiedDimensions).not.toContain('source');
-        const reasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const reasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(reasons.length).toBeGreaterThan(0);
     });
 });

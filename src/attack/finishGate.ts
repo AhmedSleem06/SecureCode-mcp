@@ -26,7 +26,7 @@ import type { EvidenceLedger } from './evidenceLedger';
 import type { WorkItemQueue } from './workItem';
 import type { HandlerInventory } from '../project-map/handlerInventory';
 import type { Candidate, CandidateStore } from './candidateStore';
-import { missingGateDimensions, FLOW_LINE_TOLERANCE } from './candidateStore';
+import { missingGateDimensions } from './candidateStore';
 import { uncoveredWithin, type InvestigationState, type LineRange } from './investigationState';
 import type { ScheduleDecision } from './scanScheduler';
 import { hasStructureSupport } from '../project-map/capabilityRegistry';
@@ -78,40 +78,20 @@ export function candidateLinesDelivered(
     return { entryDelivered, vulnDelivered };
 }
 
-const ACTOR_TERMS = ['attacker', 'user', 'member', 'caller', 'client', 'unauthenticated', 'authenticated', 'any user', 'actor', 'adversary', 'requester', 'anyone', 'anonymous', 'someone', 'visitor', 'tenant', 'account', 'request', 'public', 'customer', 'owner', 'buyer', 'seller', 'admin', 'employee', 'guest', 'holder', 'sender', 'recipient', 'operator', 'staff', 'merchant', 'partner', 'reviewer'];
-const EFFECT_TERMS = ['escalat', 'elevat', 'overwrit', 'bypass', 'impersonat', 'admin', 'role', 'permission', 'privilege', 'unauthoriz', 'access', 'modify', 'manipulat', 'tamper', 'inject', 'assign', 'set', 'update', 'change', 'forge', 'leak', 'expos', 'disclos', 'enumerat', 'reveal', 'find out', 'learn', 'crash', 'denial', 'exhaust', 'hang', 'block', 'delete', 'duplicate', 'take over', 'takeover', 'steal', 'read', 'sign', 'gain', 'grant', 'give', 'upgrade', 'obtain', 'without pay', 'for free', 'unlock', 'backtrack', 'freez', 'stall', 'slow', 'cpu', 'memory', 'event loop', 'timeout', 'capabilit', 'cancel', 'refund', 'shipped', 'shipping', 'transfer', 'withdraw', 'send', 'mark', 'paid', 'pay', 'price', 'cost', 'amount'];
-
-export function textHasActorAndEffect(text: string): boolean {
-    const lower = text.toLowerCase();
-    const hasActor = ACTOR_TERMS.some(t => {
-        const idx = lower.indexOf(t);
-        if (idx === -1) return false;
-        const rest = lower.slice(idx + t.length);
-        if (rest.length > 0 && /^[a-z]/.test(rest) && !/^(s\b|es\b|'s\b)/.test(rest)) return false;
-        return true;
-    });
-    const hasEffect = EFFECT_TERMS.some(t => lower.includes(t));
-    return hasActor && hasEffect;
-}
-
-function candidateClaimHasActorAndEffect(candidate: Candidate): boolean {
-    return textHasActorAndEffect(candidate.claim || '');
-}
-
-function findMatchingFinding(candidate: Candidate, findings: AgentScanFinding[]): AgentScanFinding | undefined {
-    for (const finding of findings) {
-        if (candidate.rootCauseId === `${finding.type}:${finding.line}`) return finding;
-        if (finding.rootCause?.rootCauseId && candidate.rootCauseId === finding.rootCause.rootCauseId) return finding;
-        for (const loc of candidate.locations) {
-            if (finding.type === candidate.type && Math.abs(finding.line - loc.line) <= FLOW_LINE_TOLERANCE) return finding;
-        }
+function openQuestionsFor(candidate: Candidate, missingDims: string[], flowRequired: boolean): string[] {
+    const questions: string[] = [];
+    if (candidate.guardFound) questions.push(`A guard check reported an effective guard (${candidate.guardReason || 'no reason given'}); the finding does not show why it does not apply.`);
+    if (missingDims.includes('source')) questions.push('The cited line was not shown to the scanner\'s AI during the scan.');
+    if (missingDims.includes('reachability')) {
+        questions.push(flowRequired
+            ? 'No traced flow or runtime test showed attacker input reaching this line.'
+            : 'The entry point and the vulnerable line were not both read.');
     }
-    return undefined;
-}
-
-function findingTextHasActorAndEffect(finding: AgentScanFinding): boolean {
-    const texts = [finding.why || '', finding.evidence || ''];
-    return texts.some(t => textHasActorAndEffect(t));
+    if (missingDims.includes('control')) questions.push('No guard or policy check was run for this location.');
+    for (const d of missingDims) {
+        if (d !== 'source' && d !== 'reachability' && d !== 'control') questions.push(`Missing evidence: ${d}.`);
+    }
+    return questions;
 }
 
 function sinkKeywordsForType(candidateType: string): string[] {
@@ -276,6 +256,14 @@ export interface FinishGateReason {
     description: string;
 }
 
+export interface FinishGateAdvice {
+    code: 'candidate-open-questions';
+    description: string;
+    rootCauseId: string;
+    line?: number;
+    openQuestions: string[];
+}
+
 export interface FinishGateCoverageGap {
     title: string;
     detail: string;
@@ -291,6 +279,7 @@ export interface FinishGateResult {
     accepted: boolean;
     mode: FinishGateMode;
     reasons: FinishGateReason[];
+    advice?: FinishGateAdvice[];
     recoveryAction?: AgentScanAction;
     normalizedFinish?: AgentScanFinishAction;
     coverageGaps?: FinishGateCoverageGap[];
@@ -559,6 +548,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
     const evidenceGate = input.gateMode === 'evidence' ? input.evidenceGate : undefined;
 
     const reasons: FinishGateReason[] = [];
+    const advice: FinishGateAdvice[] = [];
     const coverageGaps: FinishGateCoverageGap[] = [];
     const hasBudget = state.budget.stepsRemaining > 0 &&
                       state.budget.costSpentUsd < state.budget.costCapUsd;
@@ -620,20 +610,17 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
         }
     }
 
-    // Check 3: Candidates not ready for the Juror block finish when budget
-    // remains; when budget is exhausted they become coverage gaps. A
-    // candidate is ready when its gate dimensions are satisfied, or when a
-    // traced source-to-sink flow touches its location and no effective guard
-    // was found. `verification` is never a pre-finish requirement: the
-    // verifier runs after finish.
+    // Check 3: Candidates with open objective evidence (source, reachability,
+    // control) do not block the finish. They become advice: the open
+    // questions travel with the finding to the reviewer, the proof step and
+    // the report. `verification` is never a pre-finish requirement, and the
+    // threat model and impact are judged by the AI reviewer, not here.
     //
     // Logic-class candidates (access control, mass assignment, privilege
     // escalation, etc.) do not require a traced taint flow: delivered read
     // coverage of the entry-point and vulnerable lines satisfies
-    // `reachability`, and a claim stating actor+effect satisfies
-    // `threat-model` and `impact`.
+    // `reachability`.
     if (!candidates.allReadyForJuror()) {
-        const proposedFindings = proposal.findings ?? [];
         const steps = input.transcript ?? [];
         const hasTranscript = input.transcript !== undefined;
         const targetLang = target.language ?? target.filePath;
@@ -646,25 +633,11 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
 
             if (treatAsReadOnly) {
                 const { entryDelivered, vulnDelivered } = candidateLinesDelivered(candidate, investigation, target.filePath, input.evidenceGate?.deliveredRanges);
-                const matchedFinding = findMatchingFinding(candidate, proposedFindings);
-                const claimSufficient = candidateClaimHasActorAndEffect(candidate)
-                    || (matchedFinding !== undefined && findingTextHasActorAndEffect(matchedFinding));
 
                 if (entryDelivered && vulnDelivered) {
                     const missingBefore = missingGateDimensions(candidate);
                     if (missingBefore.includes('reachability')) {
                         candidates.addEvidence(candidate.id, `logic-read-coverage:${candidate.locations[0]?.filePath}`, 'source', 'reachability');
-                    }
-                }
-                if (claimSufficient) {
-                    const missingBefore = missingGateDimensions(candidate);
-                    if (missingBefore.includes('threat-model')) {
-                        const src = matchedFinding ? `finding:${matchedFinding.line}` : candidate.id;
-                        candidates.addEvidence(candidate.id, `logic-claim-threat:${src}`, 'policy', 'threat-model');
-                    }
-                    if (missingBefore.includes('impact')) {
-                        const src = matchedFinding ? `finding:${matchedFinding.line}` : candidate.id;
-                        candidates.addEvidence(candidate.id, `logic-claim-impact:${src}`, 'impact', 'impact');
                     }
                 }
 
@@ -702,23 +675,6 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
             const missingDims = missingGateDimensions(candidate);
             const location = candidate.locations.map(l => `${l.filePath}:${l.line}`).join(', ') || target.filePath;
 
-            if (flowRequired && !noStructure && !candidate.flowTraced && missingDims.includes('reachability') && hasTranscript) {
-                if (!candidate.evidenceRefs.some(r => r.startsWith('coverage-gap:no-flow:'))) {
-                    candidates.addEvidence(candidate.id, `coverage-gap:no-flow:${candidate.id}`, 'negative');
-                    coverageGaps.push({
-                        title: `No traced flow or runtime evidence for injection candidate`,
-                        detail: `The taint tracker found no request-input sources for ${candidate.type} at ${location}. No run_tests observation confirmed the payload either. Recorded as a coverage gap.`,
-                        file: candidate.locations[0]?.filePath || target.filePath,
-                        line: candidate.locations[0]?.line,
-                        requiredEvidence: [`Trace a source-to-sink flow or run a test that shows the payload reaching the sink`],
-                        suggestedNextAction: 'trace_flow',
-                        priority: 'medium',
-                    });
-                    continue;
-                }
-                continue;
-            }
-
             let blocker: string;
             if (candidate.guardFound) {
                 blocker = `an effective guard was found (${candidate.guardReason}) — show why it does not apply or drop the finding`;
@@ -729,9 +685,6 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                 }
                 if (missingDims.includes('reachability')) {
                     hints.push(`read the entry-point and vulnerable lines (${location}) so the read coverage proves reachability`);
-                }
-                if (missingDims.includes('threat-model') || missingDims.includes('impact')) {
-                    hints.push('state which actor exploits the flaw and what effect it has (e.g. "unauthenticated user sets role to admin") in the candidate claim');
                 }
                 if (missingDims.includes('control') && !noStructure) {
                     hints.push(`run check_guard on the vulnerable location to satisfy the control dimension`);
@@ -748,17 +701,12 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
             const dimInfo = missingDims.length > 0
                 ? ` (missing proof dimensions: ${missingDims.join(', ')}; ${blocker})`
                 : ` (${candidate.evidenceRefs.length} evidence ref(s); ${blocker})`;
-            reasons.push({
-                code: 'non-terminal-candidate',
+            advice.push({
+                code: 'candidate-open-questions',
                 description: `Candidate needs more evidence: ${candidate.claim} (status: ${candidate.status}${dimInfo})`,
-            });
-            coverageGaps.push({
-                title: `Candidate needs more evidence: ${candidate.claim}`,
-                detail: `This vulnerability candidate at ${location} has status "${candidate.status}" with ${candidate.evidenceRefs.length} evidence reference(s). Missing proof dimensions: ${missingDims.join(', ') || 'none'}. ${blocker[0].toUpperCase()}${blocker.slice(1)}.`,
-                file: candidate.locations[0]?.filePath || target.filePath,
-                requiredEvidence: candidate.requiredEvidence.map(e => `${e.description} (tools: ${(e.requiredTools || []).join(', ')})`),
-                suggestedNextAction: treatAsReadOnly ? 'read_file' : (candidate.requiredEvidence[0]?.requiredTools || ['trace_flow_cross_file'])[0],
-                priority: candidate.severity === 'high' || candidate.severity === 'critical' ? 'high' : 'medium',
+                rootCauseId: candidate.rootCauseId,
+                ...(candidate.locations[0]?.line !== undefined ? { line: candidate.locations[0].line } : {}),
+                openQuestions: openQuestionsFor(candidate, missingDims, flowRequired),
             });
         }
     }
@@ -875,6 +823,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
             accepted: true,
             mode: 'complete',
             reasons: [],
+            ...(advice.length > 0 ? { advice } : {}),
             normalizedFinish: proposal,
             ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
         };
@@ -889,6 +838,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
             accepted: true,
             mode: 'forced-incomplete',
             reasons,
+            ...(advice.length > 0 ? { advice } : {}),
             coverageGaps,
             normalizedFinish: proposal,
         };
@@ -903,6 +853,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
         accepted: false,
         mode: 'continue',
         reasons,
+        ...(advice.length > 0 ? { advice } : {}),
         recoveryAction,
         coverageGaps,
     };

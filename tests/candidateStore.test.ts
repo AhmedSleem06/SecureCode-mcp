@@ -162,7 +162,7 @@ describe('Candidate Store', () => {
         expect(rc2Candidates).toHaveLength(1);
     });
 
-    it('high-severity candidate requires all gate dimensions (not verification) before supported', () => {
+    it('high-severity candidate is supported once the objective gate dimensions are met; threat model, impact and verification stay open for the reviewer and verifier', () => {
         const id = store.register({
             rootCauseId: 'rc-shell', type: 'command_injection', severity: 'high',
             locations: [{ filePath: 'wsRpc.ts', line: 42 }], claim: 'Shell exec',
@@ -172,14 +172,10 @@ describe('Candidate Store', () => {
         store.addEvidence(id, 'ev2', 'flow', 'reachability');
         expect(store.get(id)!.status).toBe('investigating');
         store.addEvidence(id, 'ev3', 'guard', 'control');
-        expect(store.get(id)!.status).toBe('investigating');
-        store.addEvidence(id, 'ev4', 'policy', 'threat-model');
-        expect(store.get(id)!.status).toBe('investigating');
-        store.addEvidence(id, 'ev5', 'impact', 'impact');
         expect(store.get(id)!.status).toBe('supported');
         expect(store.get(id)!.requiredProofDimensions).toContain('verification');
         expect(missingGateDimensions(store.get(id)!)).toEqual([]);
-        expect(missingProofDimensions(store.get(id)!)).toEqual(['verification']);
+        expect(missingProofDimensions(store.get(id)!)).toEqual(['threat-model', 'impact', 'verification']);
     });
 
     it('a traced flow at the candidate line (±3) with no guard makes it ready even with open dimensions', () => {
@@ -223,16 +219,15 @@ describe('Candidate Store', () => {
         expect(store.get(id)!.status).toBe('investigating');
     });
 
-    it('medium candidate requires source, reachability, control, and threat-model', () => {
+    it('medium candidate is supported once source, reachability and control are met (threat model is for the reviewer)', () => {
         const id = store.register({
             rootCauseId: 'rc1', type: 'xss', severity: 'medium',
             locations: [], claim: 'XSS',
         });
         store.addEvidence(id, 'ev1', undefined, 'source');
         store.addEvidence(id, 'ev2', undefined, 'reachability');
-        store.addEvidence(id, 'ev3', undefined, 'control');
         expect(store.get(id)!.status).toBe('investigating');
-        store.addEvidence(id, 'ev4', undefined, 'threat-model');
+        store.addEvidence(id, 'ev3', undefined, 'control');
         expect(store.get(id)!.status).toBe('supported');
     });
 

@@ -54,7 +54,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
 
         const input = makeInput({ candidates, investigation });
         const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(candidateReasons).toHaveLength(0);
     });
 
@@ -75,7 +75,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         const input = makeInput({ candidates, investigation });
         input.evidenceGate = { ...input.evidenceGate, deliveredRanges: [] };
         const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(candidateReasons.length).toBeGreaterThan(0);
         expect(candidateReasons[0].description).toContain('read the entry-point');
     });
@@ -98,12 +98,12 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
 
         const input = makeInput({ candidates, investigation });
         const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(candidateReasons.length).toBeGreaterThan(0);
         expect(candidateReasons[0].description).toContain('trace_flow');
     });
 
-    it('logic-class message is specific: tells agent what to read or how to describe the attack', () => {
+    it('who the attacker is and what they gain is left to the AI reviewer: a read, guard-checked logic finding is accepted with no advice', () => {
         const candidates = new CandidateStore();
         const investigation = new InvestigationState();
         investigation.recordRead('src/users.ts', 1, 120, 120);
@@ -119,12 +119,10 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         candidates.addEvidence(id, 'backfill:source:src/users.ts', 'source', 'source');
         candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
 
-        const input = makeInput({ candidates, investigation });
-        const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
-        expect(candidateReasons.length).toBeGreaterThan(0);
-        expect(candidateReasons[0].description).toContain('state which actor');
-        expect(candidateReasons[0].description).not.toContain('trace_flow');
+        const result = evaluateFinishGate(makeInput({ candidates, investigation }));
+        expect(result.accepted).toBe(true);
+        expect(result.mode).toBe('complete');
+        expect((result.advice ?? []).filter(r => r.code === 'candidate-open-questions')).toEqual([]);
     });
 
     it('claim with actor and effect auto-satisfies threat-model and impact', () => {
@@ -145,7 +143,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
 
         const input = makeInput({ candidates, investigation });
         const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(candidateReasons).toHaveLength(0);
     });
 
@@ -162,7 +160,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         candidates.addEvidence(id, 'backfill:source:src/users.ts', 'source', 'source');
         candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
         const result = evaluateFinishGate(makeInput({ candidates, investigation }));
-        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toHaveLength(0);
+        expect((result.advice ?? []).filter(r => r.code === 'candidate-open-questions')).toHaveLength(0);
     });
 
     it('lines shown to the model in the prompt count as read for the target file', () => {
@@ -178,7 +176,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         candidates.addEvidence(id, 'backfill:source:src/users.ts', 'source', 'source');
         candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
         const shown = evaluateFinishGate(makeInput({ candidates, investigation }));
-        expect(shown.reasons.filter(r => r.code === 'non-terminal-candidate')).toHaveLength(0);
+        expect((shown.advice ?? []).filter(r => r.code === 'candidate-open-questions')).toHaveLength(0);
     });
 
     it('a prompt range that does not include the cited line does not count', () => {
@@ -196,7 +194,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         const input = makeInput({ candidates, investigation });
         input.evidenceGate = { ...input.evidenceGate, deliveredRanges: [{ start: 1, end: 60 }] };
         const result = evaluateFinishGate(input);
-        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate').length).toBeGreaterThan(0);
+        expect((result.advice ?? []).filter(r => r.code === 'candidate-open-questions').length).toBeGreaterThan(0);
     });
 
     it('LOGIC_BUG_TYPES covers the documented set', () => {
@@ -232,7 +230,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
 
         const input = makeInput({ candidates, investigation });
         const result = evaluateFinishGate(input);
-        const candidateReasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const candidateReasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(candidateReasons).toHaveLength(0);
     });
 
@@ -248,7 +246,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         candidates.addEvidence(id, 'backfill:check_guard:src/users.ts', 'guard', 'control');
 
         const result = evaluateFinishGate(makeInput({ candidates }));
-        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toHaveLength(0);
+        expect((result.advice ?? []).filter(r => r.code === 'candidate-open-questions')).toHaveLength(0);
         expect(candidates.get(id)!.satisfiedDimensions).toContain('source');
     });
 
@@ -266,7 +264,7 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         const input = makeInput({ candidates });
         input.evidenceGate = { ...input.evidenceGate, deliveredRanges: [{ start: 1, end: 10 }] };
         const result = evaluateFinishGate(input);
-        const reasons = result.reasons.filter(r => r.code === 'non-terminal-candidate');
+        const reasons = (result.advice ?? []).filter(r => r.code === 'candidate-open-questions');
         expect(reasons).toHaveLength(1);
         expect(reasons[0].description).toContain('source');
         expect(reasons[0].description).toContain('read_file the vulnerable lines');
@@ -284,6 +282,6 @@ describe('Finish Gate — logic-class candidate evidence rules', () => {
         candidates.addEvidence(id, 'guard-control:x', 'guard', 'control');
 
         const result = evaluateFinishGate(makeInput({ candidates }));
-        expect(result.reasons.filter(r => r.code === 'non-terminal-candidate')).toHaveLength(0);
+        expect((result.advice ?? []).filter(r => r.code === 'candidate-open-questions')).toHaveLength(0);
     });
 });

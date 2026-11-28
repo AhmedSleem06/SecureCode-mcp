@@ -619,6 +619,7 @@ export interface AgentScanFinding {
     verificationLevel?: VerificationLevel;
     capabilityBaseline?: CapabilityBaseline | null;
     aiReview?: FindingAiReview;
+    openQuestions?: string[];
 }
 
 export interface AgentScanFinishAction extends AgentScanNotebookFields {
