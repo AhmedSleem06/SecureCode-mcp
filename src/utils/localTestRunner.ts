@@ -24,6 +24,8 @@ import { checkTestSafety } from './testSafety';
 import { createEffectMock } from './effectMock';
 import {
     detectSandbox,
+    isCompiledLangRunner,
+    isOfflineDepsFailure,
     type SandboxBackend,
     type SandboxExecuteOptions,
     type SandboxExecuteResult,
@@ -66,8 +68,8 @@ export async function runLocalTest(
         setupScript?: string | null;
         timeoutMs?: number;
         signal?: AbortSignal;
-        /** Test-only: inject a sandbox backend. Production code leaves this unset. */
         sandboxBackend?: SandboxBackend;
+        targetFilePath?: string;
     },
 ): Promise<LocalTestResult> {
     // 1. Defense-in-depth static check.
@@ -93,6 +95,14 @@ export async function runLocalTest(
         };
     }
 
+    if (isCompiledLangRunner(runner) && backend.name !== 'docker') {
+        return {
+            verdict: 'sandbox-unavailable',
+            output: `couldn't test: Docker is required for ${runner} tests`,
+            exitCode: -1,
+        };
+    }
+
     // 2b. Auto-create effect mock for JS/TS projects (harmless if unused).
     //     Must happen before the sandbox mounts the workspace.
     if (runner !== 'python' && runner !== 'python3') {
@@ -107,12 +117,24 @@ export async function runLocalTest(
         setupScript: options?.setupScript,
         timeoutMs: options?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         signal: options?.signal,
+        targetFilePath: options?.targetFilePath,
     };
 
     const result: SandboxExecuteResult = await backend.execute(execOpts);
 
-    // Preserve the "exited 0 but no PASS/FAIL marker" message — it's a
-    // useful signal that the test ran but didn't follow the protocol.
+    if (isCompiledLangRunner(runner) && (result.verdict === 'fail' || result.verdict === 'error')) {
+        const offlineDeps = isOfflineDepsFailure(result.output);
+        if (offlineDeps.match) {
+            const hintSuffix = offlineDeps.hint ? ` — ${offlineDeps.hint}` : '';
+            return {
+                verdict: 'error',
+                output: `couldn't test: dependencies not available offline (${offlineDeps.detail})${hintSuffix}`,
+                exitCode: result.exitCode,
+                backend: result.backend,
+            };
+        }
+    }
+
     if (result.verdict === 'error' && result.exitCode === 0) {
         return {
             verdict: 'error',

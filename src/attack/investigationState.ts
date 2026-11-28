@@ -18,6 +18,7 @@
 
 import { MAX_OBSERVATION_CHARS } from './observationLimits';
 import { FULL_READ_WINDOW } from './agentScanProtocol';
+import { hasStructureSupport as _hasStructureSupport } from '../project-map/capabilityRegistry';
 
 export interface LineRange {
     start: number;
@@ -1167,17 +1168,20 @@ export class InvestigationState {
         return new Map(this.rootCauses);
     }
 
-    getRecommendedRecoveryAction(): string | null {
+    getRecommendedRecoveryAction(language?: string): string | null {
         const incomplete = this.getIncompleteSteps();
         if (incomplete.length === 0) return null;
         const step = incomplete[0];
+        const noStructure = language !== undefined
+            ? !_hasStructureSupport(language)
+            : false;
         switch (step) {
             case 'route-discovery': return 'search_code';
-            case 'policy-check': return 'check_policy';
+            case 'policy-check': return noStructure ? 'search_code' : 'check_policy';
             case 'auth-symbol-search': return 'search_code';
-            case 'cross-file-flow': return 'trace_flow_cross_file';
+            case 'cross-file-flow': return noStructure ? 'search_code' : 'trace_flow_cross_file';
             case 'config-inspection': return 'read_config';
-            case 'ownership-analysis': return 'trace_flow_cross_file';
+            case 'ownership-analysis': return noStructure ? 'search_code' : 'trace_flow_cross_file';
             case 'tests-found': return 'search_code';
             default: return null;
         }
@@ -1210,9 +1214,9 @@ export class InvestigationState {
         switch (step) {
             case 'initial-read': return 'Read the target file to understand the code';
             case 'route-discovery': return 'Use search_code to discover sibling routes';
-            case 'policy-check': return 'Call check_policy on route handler files';
+            case 'policy-check': return 'Check endpoint policies (search_code for auth patterns)';
             case 'auth-symbol-search': return 'Search for auth functions used in the target';
-            case 'cross-file-flow': return 'Trace data flow with trace_flow or trace_flow_cross_file';
+            case 'cross-file-flow': return 'Trace data flow across files (search_code for callers/callees)';
             case 'config-inspection': return 'Inspect security configuration with read_config';
             case 'ownership-analysis': return 'Trace ownership through repository/service layer';
             case 'tests-found': return 'Find tests for the target code';

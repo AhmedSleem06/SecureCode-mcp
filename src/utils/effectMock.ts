@@ -121,7 +121,15 @@ const EFFECT_PKG_JSON = JSON.stringify({
 });
 
 export function createEffectMock(workspaceRoot: string): void {
-    const mockDir = path.join(workspaceRoot, 'node_modules', 'effect');
+    const resolved = path.resolve(workspaceRoot);
+    const tmpDir = require('os').tmpdir();
+    if (resolved === path.resolve(tmpDir) || resolved === path.parse(resolved).root) {
+        return;
+    }
+    if (!fs.existsSync(path.join(resolved, 'package.json'))) {
+        return;
+    }
+    const mockDir = path.join(resolved, 'node_modules', 'effect');
     fs.mkdirSync(mockDir, { recursive: true });
     fs.writeFileSync(path.join(mockDir, 'package.json'), EFFECT_PKG_JSON, 'utf8');
     fs.writeFileSync(path.join(mockDir, 'index.js'), EFFECT_MOCK_JS, 'utf8');

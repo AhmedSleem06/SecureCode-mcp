@@ -367,7 +367,13 @@ function checkProcessEnvAccess(script: string): TestSafetyResult | null {
 
 // ── Main entry ──────────────────────────────────────────────────────────────
 
-export function checkTestSafety(rawScript: string, _workspaceRoot: string): TestSafetyResult {
+export function checkTestSafety(rawScript: string, _workspaceRoot: string, language?: string): TestSafetyResult {
+    if (language === 'go') return checkGoTestSafety(rawScript);
+    if (language === 'ruby') return checkRubyTestSafety(rawScript);
+    if (language === 'php') return checkPhpTestSafety(rawScript);
+    if (language === 'java') return checkJavaTestSafety(rawScript);
+    if (language === 'csharp' || language === 'dotnet') return checkCsharpTestSafety(rawScript);
+
     const masked = maskLiterals(rawScript);
     const script = masked.reliable ? masked.text : rawScript;
 
@@ -471,5 +477,147 @@ export function checkTestSafety(rawScript: string, _workspaceRoot: string): Test
         return { allowed: false, reason: 'process.exit() masks test results — use console.error + throw instead' };
     }
 
+    return { allowed: true, reason: '' };
+}
+
+const PROOF_OUT_VAR = 'SECURECODE_PROOF_OUT';
+
+function stripProofOutAccess(script: string, allowedPatterns: RegExp[]): string {
+    let s = script;
+    for (const p of allowedPatterns) {
+        s = s.replace(p, '___SC_PROOF_ALLOWED___');
+    }
+    return s;
+}
+
+const GO_PROOF_ALLOWED = [
+    /os\.Getenv\s*\(\s*"SECURECODE_PROOF_OUT"\s*\)/g,
+    /os\.OpenFile\s*\([^,]*SECURECODE_PROOF_OUT[^)]*os\.O_APPEND[^)]*\)/g,
+    /os\.OpenFile\s*\([^,]*os\.Getenv\s*\(\s*"SECURECODE_PROOF_OUT"\s*\)[^)]*\)/g,
+];
+
+const GO_DANGEROUS: Array<{ pattern: RegExp; reason: string }> = [
+    { pattern: /\bos\/exec\b/, reason: 'os/exec can spawn arbitrary processes' },
+    { pattern: /\bexec\.Command\b/, reason: 'exec.Command can spawn arbitrary processes' },
+    { pattern: /\bhttp\.Get\s*\(/, reason: 'http.Get makes outbound network calls' },
+    { pattern: /\bhttp\.Post\s*\(/, reason: 'http.Post makes outbound network calls' },
+    { pattern: /\bhttp\.Client\b/, reason: 'http.Client makes outbound network calls' },
+    { pattern: /\.Do\s*\(/, reason: 'Client.Do makes outbound network calls' },
+    { pattern: /\bos\.Getenv\s*\(/, reason: 'os.Getenv can leak host environment' },
+    { pattern: /\bos\.Environ\s*\(/, reason: 'os.Environ leaks the entire host environment' },
+    { pattern: /\bos\.WriteFile\s*\(/, reason: 'os.WriteFile can write outside the temp dir' },
+    { pattern: /\bsyscall\b/, reason: 'syscall package can bypass sandbox restrictions' },
+    { pattern: /\bunsafe\b/, reason: 'unsafe package can bypass memory safety' },
+];
+
+function checkGoTestSafety(script: string): TestSafetyResult {
+    const stripped = stripProofOutAccess(script, GO_PROOF_ALLOWED);
+    for (const { pattern, reason } of GO_DANGEROUS) {
+        if (pattern.test(stripped)) {
+            return { allowed: false, reason };
+        }
+    }
+    return { allowed: true, reason: '' };
+}
+
+const RUBY_PROOF_ALLOWED = [
+    /ENV\s*\[\s*['"]SECURECODE_PROOF_OUT['"]\s*\]/g,
+    /ENV\.fetch\s*\(\s*['"]SECURECODE_PROOF_OUT['"]\s*[,)]/g,
+    /File\.open\s*\(\s*ENV\s*\[\s*['"]SECURECODE_PROOF_OUT['"]\s*\]\s*,\s*['"]a['"]\s*\)/g,
+];
+
+const RUBY_DANGEROUS: Array<{ pattern: RegExp; reason: string }> = [
+    { pattern: /\bsystem\s*\(/, reason: 'system() can spawn arbitrary processes' },
+    { pattern: /\bexec\s*\(/, reason: 'exec() replaces the current process' },
+    { pattern: /\bspawn\s*\(/, reason: 'spawn() can spawn arbitrary processes' },
+    { pattern: /`[^`]*`/, reason: 'backtick execution can spawn arbitrary processes' },
+    { pattern: /\bNet::HTTP\b/, reason: 'Net::HTTP makes outbound network calls' },
+    { pattern: /\bopen-uri\b/, reason: 'open-uri makes outbound network calls' },
+    { pattern: /\bENV\s*\[/, reason: 'ENV access can leak host environment' },
+    { pattern: /\bENV\.to_h\b/, reason: 'ENV.to_h leaks the entire host environment' },
+    { pattern: /\bFile\.write\b/, reason: 'File.write can write outside the temp dir' },
+];
+
+function checkRubyTestSafety(script: string): TestSafetyResult {
+    const stripped = stripProofOutAccess(script, RUBY_PROOF_ALLOWED);
+    for (const { pattern, reason } of RUBY_DANGEROUS) {
+        if (pattern.test(stripped)) {
+            return { allowed: false, reason };
+        }
+    }
+    return { allowed: true, reason: '' };
+}
+
+const PHP_PROOF_ALLOWED = [
+    /getenv\s*\(\s*['"]SECURECODE_PROOF_OUT['"]\s*\)/g,
+    /file_put_contents\s*\(\s*getenv\s*\(\s*['"]SECURECODE_PROOF_OUT['"]\s*\)\s*,\s*[^,]*,\s*FILE_APPEND\s*\)/g,
+    /@file_put_contents\s*\(\s*\$\w+\s*,\s*[^,]*,\s*FILE_APPEND\s*\)/g,
+];
+
+const PHP_DANGEROUS: Array<{ pattern: RegExp; reason: string }> = [
+    { pattern: /\bexec\s*\(/, reason: 'exec() can spawn arbitrary processes' },
+    { pattern: /\bshell_exec\s*\(/, reason: 'shell_exec() can spawn arbitrary processes' },
+    { pattern: /\bsystem\s*\(/, reason: 'system() can spawn arbitrary processes' },
+    { pattern: /\bpassthru\s*\(/, reason: 'passthru() can spawn arbitrary processes' },
+    { pattern: /\bproc_open\s*\(/, reason: 'proc_open() can spawn arbitrary processes' },
+    { pattern: /\bpopen\s*\(/, reason: 'popen() can spawn arbitrary processes' },
+    { pattern: /\bcurl_/, reason: 'curl functions make outbound network calls' },
+    { pattern: /\bfile_get_contents\s*\(\s*['"]https?:/, reason: 'file_get_contents with http makes outbound network calls' },
+    { pattern: /\bgetenv\s*\(/, reason: 'getenv() can leak host environment' },
+];
+
+function checkPhpTestSafety(script: string): TestSafetyResult {
+    const stripped = stripProofOutAccess(script, PHP_PROOF_ALLOWED);
+    for (const { pattern, reason } of PHP_DANGEROUS) {
+        if (pattern.test(stripped)) {
+            return { allowed: false, reason };
+        }
+    }
+    return { allowed: true, reason: '' };
+}
+
+const JAVA_PROOF_ALLOWED = [
+    /System\.getenv\s*\(\s*"SECURECODE_PROOF_OUT"\s*\)/g,
+    /Files\.writeString\s*\(\s*Path\.of\s*\(\s*System\.getenv\s*\(\s*"SECURECODE_PROOF_OUT"\s*\)\s*\)\s*,/g,
+    /Files\.writeString\s*\(\s*Path\.of\s*\(\s*\w+\s*\)\s*,\s*[^,]*,\s*CREATE\s*,\s*APPEND\s*\)/g,
+];
+
+const JAVA_DANGEROUS: Array<{ pattern: RegExp; reason: string }> = [
+    { pattern: /\bRuntime\s*\.\s*(?:getRuntime\s*\(\s*\)\s*\.\s*)?exec\s*\(/, reason: 'Runtime.exec() can spawn arbitrary processes' },
+    { pattern: /\bProcessBuilder\b/, reason: 'ProcessBuilder can spawn arbitrary processes' },
+    { pattern: /\bHttpClient\b/, reason: 'HttpClient makes outbound network calls' },
+    { pattern: /\bURL\s*\(.*?\)\s*\.openConnection\s*\(/, reason: 'URL.openConnection makes outbound network calls' },
+    { pattern: /\bSystem\.getenv\s*\(/, reason: 'System.getenv() can leak host environment' },
+];
+
+function checkJavaTestSafety(script: string): TestSafetyResult {
+    const stripped = stripProofOutAccess(script, JAVA_PROOF_ALLOWED);
+    for (const { pattern, reason } of JAVA_DANGEROUS) {
+        if (pattern.test(stripped)) {
+            return { allowed: false, reason };
+        }
+    }
+    return { allowed: true, reason: '' };
+}
+
+const CSHARP_PROOF_ALLOWED = [
+    /Environment\.GetEnvironmentVariable\s*\(\s*"SECURECODE_PROOF_OUT"\s*\)/g,
+    /File\.AppendAllText\s*\(\s*(?:\w+|Environment\.GetEnvironmentVariable\s*\(\s*"SECURECODE_PROOF_OUT"\s*\))\s*,/g,
+];
+
+const CSHARP_DANGEROUS: Array<{ pattern: RegExp; reason: string }> = [
+    { pattern: /\bProcess\.Start\s*\(/, reason: 'Process.Start can spawn arbitrary processes' },
+    { pattern: /\bnew\s+Process\b/, reason: 'new Process can spawn arbitrary processes' },
+    { pattern: /\bHttpClient\b/, reason: 'HttpClient makes outbound network calls' },
+    { pattern: /\bEnvironment\.GetEnvironmentVariable\s*\(/, reason: 'Environment.GetEnvironmentVariable can leak host environment' },
+];
+
+function checkCsharpTestSafety(script: string): TestSafetyResult {
+    const stripped = stripProofOutAccess(script, CSHARP_PROOF_ALLOWED);
+    for (const { pattern, reason } of CSHARP_DANGEROUS) {
+        if (pattern.test(stripped)) {
+            return { allowed: false, reason };
+        }
+    }
     return { allowed: true, reason: '' };
 }

@@ -88,6 +88,19 @@ export function getCapability(language: string): LanguageCapability {
  * actually used during the investigation. The confidence clamper attaches
  * this to each finding so the UI can show how the confidence was derived.
  */
+export function hasStructureSupport(languageOrFilePath: string): boolean {
+    if (languageOrFilePath.includes('.')) {
+        const ext = languageOrFilePath.slice(languageOrFilePath.lastIndexOf('.')).toLowerCase();
+        const langMap: Record<string, string> = {
+            '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.jsx': 'javascript',
+            '.ts': 'typescript', '.tsx': 'tsx', '.py': 'python',
+        };
+        const lang = langMap[ext];
+        return lang !== undefined && DEEP_LANGUAGES.has(lang);
+    }
+    return DEEP_LANGUAGES.has(normalizeLanguage(languageOrFilePath));
+}
+
 export function evidenceLevelTag(
     usedTaint: boolean,
     usedGuard: boolean,

@@ -26,7 +26,7 @@ const MAX_SETUP_SCRIPT_SIZE = 32 * 1024;
 const MAX_OUTPUT = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-const SAFE_RUNNERS = new Set(['node', 'tsx', 'bun', 'deno', 'python', 'python3']);
+const SAFE_RUNNERS = new Set(['node', 'tsx', 'bun', 'deno', 'python', 'python3', 'go', 'ruby', 'php', 'java-maven', 'java-gradle', 'dotnet']);
 
 const SAFETY_HINTS: Array<{ pattern: RegExp; hint: string }> = [
     { pattern: /fetch\(\)|exfiltrate/i, hint: 'use sc.invoke from ./expressRunner.cjs' },

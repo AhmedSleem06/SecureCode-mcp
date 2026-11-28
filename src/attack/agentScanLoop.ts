@@ -78,6 +78,7 @@ import {
     type TerminationReason,
 } from './agentScanProtocol';
 import { closeAgentScanRun, capReasonSummary } from './agentScanCredits';
+import { hasStructureSupport } from '../project-map/capabilityRegistry';
 
 export interface AgentScanOptions {
     budget?: Partial<AgentScanBudget>;
@@ -200,9 +201,15 @@ export async function runAgentScan(
     // (refund happens there, not here). With deferClose the caller owns
     // the close (it keeps the run open for verification).
     let resolvedScanMode: import('./agentScanProtocol').AgentScanMode | undefined;
+    let deepModeFallbackNote: string | undefined;
     const closeRun = async (result: AgentScanResult): Promise<AgentScanResult> => {
         attachCredits(result);
         if (resolvedScanMode) result.scanMode = resolvedScanMode;
+        if (deepModeFallbackNote) {
+            result.summary = result.summary
+                ? `${result.summary} ${deepModeFallbackNote}`
+                : deepModeFallbackNote;
+        }
         if (activeRunId && !options.deferClose) {
             const settlement = await closeAgentScanRun(client, activeRunId, result.status, result.terminationReason, options.signal);
             if (settlement) {
@@ -258,13 +265,21 @@ export async function runAgentScan(
             investigationState.setScope(target.filePath, { start: segment.startLine, end: segment.endLine });
         }
 
-        const isAssurance = harness.scanMode === 'assurance';
+        let isAssurance = harness.scanMode === 'assurance';
         let assuranceGrid: GridState | null = null;
         let assuranceScope: Set<string> | undefined;
         let assuranceRedteamDone = false;
         let assuranceRedteamRounds = 0;
         const assuranceWarnings: string[] = [];
         let doneRuleRejections = 0;
+
+        if (isAssurance && !hasStructureSupport(target.language || target.filePath)) {
+            isAssurance = false;
+            resolvedScanMode = 'standard';
+            deepModeFallbackNote = `Deep mode is not available for ${target.language || target.filePath} yet — ran a standard scan.`;
+            assuranceWarnings.push(deepModeFallbackNote);
+            console.log(`[Agent Scan Loop] Deep mode not available for ${target.language || target.filePath} — falling back to standard.`);
+        }
 
         const runTestsRefusalTracker = createRunTestsRefusalTracker();
         const executeOpts: ExecuteActionOptions = {
@@ -631,14 +646,15 @@ export async function runAgentScan(
         // as "clean" after a cut-short run.
         const buildCoverageGaps = () => {
             const incompleteSteps = evidenceMode ? [] : investigationState.getIncompleteSteps();
+            const noStructure = !hasStructureSupport(target.language || target.filePath);
             const autoGaps = incompleteSteps.map(step => ({
                 title: `Investigation step not completed: ${step}`,
                 detail: `The agent was terminated after repeated blocked reads without completing this required investigation step: ${step}. The investigation was incomplete and vulnerabilities may have been missed.`,
                 file: target.filePath,
                 requiredEvidence: [`Complete the ${step} step before concluding no vulnerabilities exist`],
                 suggestedNextAction: step === 'config-inspection' ? 'read_config'
-                    : step === 'policy-check' ? 'check_policy'
-                    : step === 'cross-file-flow' ? 'trace_flow_cross_file'
+                    : step === 'policy-check' ? (noStructure ? 'search_code' : 'check_policy')
+                    : step === 'cross-file-flow' ? (noStructure ? 'search_code' : 'trace_flow_cross_file')
                     : step === 'auth-symbol-search' ? 'search_code'
                     : 'continue investigation',
                 priority: 'high' as const,
@@ -874,7 +890,7 @@ export async function runAgentScan(
                         reason: `You have been blocked by duplicate/overlapping reads. Next required action: ${schedDecision.action.type}. ${schedDecision.reason}`,
                     };
                 } else {
-                    const recoveryAction = investigationState.getRecommendedRecoveryAction();
+                    const recoveryAction = investigationState.getRecommendedRecoveryAction(target.language);
                     actionConstraint = {
                         mode: 'recovery',
                         forbiddenActions: ['read_file'],
@@ -1384,6 +1400,7 @@ export async function runAgentScan(
                         filePath: target.filePath,
                         fileContent: target.fileContent,
                         segment: segment ? { startLine: segment.startLine, endLine: segment.endLine } : undefined,
+                        language: target.language,
                     },
                     landing,
                     transcript,

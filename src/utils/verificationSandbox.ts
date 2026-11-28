@@ -225,24 +225,16 @@ export function bundleScript(
 // â”€â”€ Public interface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface SandboxExecuteOptions {
-    /** Execution mode: 'script' (default) runs a script via runner; 'command' runs a validated executable+args. */
     mode?: 'script' | 'command';
-    /** Test script source code (required for mode='script'). */
     script?: string;
-    /** Runner: 'node' | 'tsx' | 'bun' | 'python' | 'python3' | 'deno' | ... (required for mode='script'). */
     runner?: string;
-    /** Validated executable (required for mode='command'). Passed as argv[0] â€” never via shell. */
     executable?: string;
-    /** Validated args array (required for mode='command'). Each arg passed as a separate argv element. */
     args?: string[];
-    /** Workspace root â€” mounted read-only into the sandbox. */
     workspaceRoot: string;
-    /** Optional setup script run before the test (same sandbox). */
     setupScript?: string | null;
-    /** Hard wall-clock timeout in ms. The sandbox kills the process at this boundary. */
     timeoutMs: number;
-    /** AbortSignal â€” if aborted, the sandbox must kill the process and return. */
     signal?: AbortSignal;
+    targetFilePath?: string;
 }
 
 export interface SandboxExecuteResult {
@@ -302,12 +294,28 @@ export function pickImageForCommand(executable: string): { image: string | null;
             : { image: null, reason: 'yarn is not available in the default sandbox image. Set SECURECODE_SANDBOX_YARN_IMAGE to a yarn-enabled image to enable yarn test execution.' };
     }
     if (executable === 'bun') {
-        // bun works out of the box on the default oven/bun:1 image;
-        // SECURECODE_SANDBOX_BUN_IMAGE is only an override for custom setups.
         return { image: process.env.SECURECODE_SANDBOX_BUN_IMAGE || 'oven/bun:1' };
     }
     if (executable === 'pytest') {
         return { image: process.env.SECURECODE_SANDBOX_PY_IMAGE || 'python:3.11-slim' };
+    }
+    if (executable === 'go') {
+        return { image: process.env.SECURECODE_SANDBOX_GO_IMAGE || 'golang:1.23-alpine' };
+    }
+    if (executable === 'ruby' || executable === 'bundle') {
+        return { image: process.env.SECURECODE_SANDBOX_RUBY_IMAGE || 'ruby:3.3-slim' };
+    }
+    if (executable === 'php') {
+        return { image: process.env.SECURECODE_SANDBOX_PHP_IMAGE || 'php:8.3-cli' };
+    }
+    if (executable === 'mvn') {
+        return { image: process.env.SECURECODE_SANDBOX_JAVA_MAVEN_IMAGE || 'maven:3.9-eclipse-temurin-21' };
+    }
+    if (executable === 'gradle') {
+        return { image: process.env.SECURECODE_SANDBOX_JAVA_GRADLE_IMAGE || 'gradle:8-jdk21' };
+    }
+    if (executable === 'dotnet') {
+        return { image: process.env.SECURECODE_SANDBOX_DOTNET_IMAGE || 'mcr.microsoft.com/dotnet/sdk:8.0' };
     }
     return { image: null, reason: `No sandbox image configured for executable: ${executable}` };
 }
@@ -425,6 +433,11 @@ export function fileExtFor(runner: string): string {
     if (runner === 'tsx' || runner === 'pnpm-tsx' || runner === 'yarn-tsx' || runner === 'bun' || runner === 'deno') {
         return '.ts';
     }
+    if (runner === 'go') return '.go';
+    if (runner === 'ruby') return '.rb';
+    if (runner === 'php') return '.php';
+    if (runner === 'java-maven' || runner === 'java-gradle') return '.java';
+    if (runner === 'dotnet') return '.cs';
     return '.js';
 }
 
@@ -437,6 +450,13 @@ function isPythonRunner(runner: string): boolean {
  * image is configured â€” the caller returns sandbox-unavailable so the user
  * gets a clear "install X / set ENV to enable" message rather than a crash.
  */
+const COMPILED_LANG_RUNNERS = new Set(['go', 'ruby', 'php', 'java-maven', 'java-gradle', 'dotnet']);
+const COMPILED_LANG_TIMEOUT_MS = 180_000;
+
+export function isCompiledLangRunner(runner: string): boolean {
+    return COMPILED_LANG_RUNNERS.has(runner);
+}
+
 export function pickImageForRunner(runner: string): { image: string | null; reason?: string } {
     if (isPythonRunner(runner)) {
         return { image: process.env.SECURECODE_SANDBOX_PY_IMAGE || 'python:3.11-slim' };
@@ -446,8 +466,6 @@ export function pickImageForRunner(runner: string): { image: string | null; reas
         case 'tsx':
         case 'pnpm-tsx':
         case 'yarn-tsx':
-            // node:22-alpine has `node` + `npx`; tsx runs via `npx tsx` (offline
-            // if already cached, otherwise fails safely â€” network is disabled).
             return { image: process.env.SECURECODE_SANDBOX_IMAGE || 'node:22-alpine' };
         case 'deno': {
             const img = process.env.SECURECODE_SANDBOX_DENO_IMAGE;
@@ -456,10 +474,19 @@ export function pickImageForRunner(runner: string): { image: string | null; reas
                 : { image: null, reason: 'deno runner requires a Deno image. Set SECURECODE_SANDBOX_DENO_IMAGE (e.g. denoland/deno) to enable deno script execution.' };
         }
         case 'bun':
-            // bun executes TypeScript natively and works out of the box on the
-            // default oven/bun:1 image; SECURECODE_SANDBOX_BUN_IMAGE is only
-            // an override for custom setups.
             return { image: process.env.SECURECODE_SANDBOX_BUN_IMAGE || 'oven/bun:1' };
+        case 'go':
+            return { image: process.env.SECURECODE_SANDBOX_GO_IMAGE || 'golang:1.23-alpine' };
+        case 'ruby':
+            return { image: process.env.SECURECODE_SANDBOX_RUBY_IMAGE || 'ruby:3.3-slim' };
+        case 'php':
+            return { image: process.env.SECURECODE_SANDBOX_PHP_IMAGE || 'php:8.3-cli' };
+        case 'java-maven':
+            return { image: process.env.SECURECODE_SANDBOX_JAVA_MAVEN_IMAGE || 'maven:3.9-eclipse-temurin-21' };
+        case 'java-gradle':
+            return { image: process.env.SECURECODE_SANDBOX_JAVA_GRADLE_IMAGE || 'gradle:8-jdk21' };
+        case 'dotnet':
+            return { image: process.env.SECURECODE_SANDBOX_DOTNET_IMAGE || 'mcr.microsoft.com/dotnet/sdk:8.0' };
         default:
             return { image: null, reason: `No sandbox image configured for runner: ${runner}` };
     }
@@ -490,6 +517,20 @@ export function runnerInvocation(runner: string, scriptPath: string, workdir?: s
         case 'python':
         case 'python3':
             return `python ${p}`;
+        case 'go': {
+            const goDir = scriptPath ? path.posix.dirname(scriptPath).replace(/^\.?\/?/, '') : '.';
+            return `go test -run TestSecureCodeProof -v -count=1 ./${goDir || '.'}`;
+        }
+        case 'ruby':
+            return `bundle exec ruby ${p}`;
+        case 'php':
+            return `php ${p}`;
+        case 'java-maven':
+            return `mvn -o -q test -Dtest=ScProofTest -Dmaven.repo.local=/tmp/m2 -Dmaven.repo.local.tail=/tmp/m2-ro`;
+        case 'java-gradle':
+            return `gradle test --offline --no-daemon --tests ScProofTest`;
+        case 'dotnet':
+            return `dotnet test ScProof --no-restore`;
         default:
             return `node ${p}`;
     }
@@ -537,7 +578,75 @@ function killTree(proc: ChildProcess): void {
     } catch { /* already dead */ }
 }
 
-// â”€â”€ Docker backend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+export function parseJavaPackagePath(script: string): string {
+    const m = script.match(/^\s*package\s+([\w.]+)\s*;/m);
+    if (!m) return '';
+    return m[1].replace(/\./g, '/');
+}
+
+export function buildCompiledLangPlacement(runner: string, script: string, targetFilePath?: string): { testRelPath: string; runCmd: string } {
+    if (runner === 'go') {
+        const targetDir = targetFilePath ? path.dirname(targetFilePath) : '.';
+        const normalizedDir = targetDir.replace(/\\/g, '/').replace(/^\.?\/?/, '');
+        const testRelPath = normalizedDir
+            ? `${normalizedDir}/sc_proof_test.go`
+            : 'sc_proof_test.go';
+        const runDir = normalizedDir || '.';
+        return {
+            testRelPath,
+            runCmd: `go test -run TestSecureCodeProof -v -count=1 ./${runDir}`,
+        };
+    }
+    if (runner === 'ruby') {
+        return {
+            testRelPath: 'sc_proof.rb',
+            runCmd: 'bundle exec ruby sc_proof.rb',
+        };
+    }
+    if (runner === 'php') {
+        return {
+            testRelPath: 'sc_proof.php',
+            runCmd: 'php sc_proof.php',
+        };
+    }
+    if (runner === 'java-maven' || runner === 'java-gradle') {
+        const pkgPath = parseJavaPackagePath(script);
+        const testRelDir = pkgPath
+            ? `src/test/java/${pkgPath}`
+            : 'src/test/java';
+        const runCmd = runner === 'java-maven'
+            ? 'mvn -o -q test -Dtest=ScProofTest -Dmaven.repo.local=/tmp/m2 -Dmaven.repo.local.tail=/tmp/m2-ro'
+            : 'gradle test --offline --no-daemon --tests ScProofTest';
+        return {
+            testRelPath: `${testRelDir}/ScProofTest.java`,
+            runCmd,
+        };
+    }
+    if (runner === 'dotnet') {
+        return {
+            testRelPath: 'ScProof/ScProofTest.cs',
+            runCmd: 'dotnet test ScProof --no-restore',
+        };
+    }
+    return { testRelPath: `sc_proof_test${fileExtFor(runner)}`, runCmd: '' };
+}
+
+const OFFLINE_DEPS_PATTERNS: Array<{ pattern: RegExp; lang: string; hint?: string }> = [
+    { pattern: /cannot find module providing package|module lookup disabled by GOPROXY=off/i, lang: 'go' },
+    { pattern: /Could not resolve dependencies|offline mode|Cannot access .* in offline mode/i, lang: 'java-maven' },
+    { pattern: /No cached version .* available for offline mode|Could not resolve all dependencies/i, lang: 'java-gradle' },
+    { pattern: /Unable to find package|NU1101|Unable to load the service index|Failed to retrieve information about .* from remote source/i, lang: 'dotnet' },
+    { pattern: /Could not find gem|bundle install/i, lang: 'ruby', hint: 'Ruby gems must be vendored: bundle config set --local path vendor/bundle && bundle install' },
+    { pattern: /vendor\/autoload\.php.*No such file|Failed opening required.*vendor\/autoload/i, lang: 'php', hint: 'run composer install' },
+];
+
+export function isOfflineDepsFailure(output: string): { match: boolean; detail: string; hint?: string } {
+    for (const { pattern, hint } of OFFLINE_DEPS_PATTERNS) {
+        const m = output.match(pattern);
+        if (m) return { match: true, detail: m[0], hint };
+    }
+    return { match: false, detail: '' };
+}
 
 class DockerSandbox implements SandboxBackend {
     readonly name = 'docker';
@@ -601,9 +710,13 @@ class DockerSandbox implements SandboxBackend {
     }
 
     private async executeScript(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
+        const runner = opts.runner || 'node';
+        if (COMPILED_LANG_RUNNERS.has(runner)) {
+            return this.executeCompiledLangScript(opts);
+        }
+
         const sandboxDir = ensureSandboxDir(opts.workspaceRoot);
         copyExpressRunner(sandboxDir);
-        const runner = opts.runner || 'node';
         const needsBundle = runner === 'tsx';
         const ext = fileExtFor(runner);
         const srcSuffix = uniqueSuffix();
@@ -691,6 +804,130 @@ class DockerSandbox implements SandboxBackend {
         } finally {
             for (const f of cleanupFiles) safeUnlink(f);
         }
+    }
+
+    private async executeCompiledLangScript(opts: SandboxExecuteOptions): Promise<SandboxExecuteResult> {
+        const runner = opts.runner || 'go';
+        const imageInfo = pickImageForRunner(runner);
+        if (!imageInfo.image) {
+            return {
+                verdict: 'sandbox-unavailable',
+                output: imageInfo.reason || `No sandbox image for runner: ${runner}`,
+                exitCode: -1,
+                backend: this.name,
+            };
+        }
+
+        const wsNorm = path.resolve(opts.workspaceRoot);
+        const osModule = require('os') as typeof import('os');
+        const homeDir = osModule.homedir();
+
+        const depMounts: string[] = [];
+        const extraEnv: string[] = [];
+        if (runner === 'go') {
+            const gomodcache = process.env.GOMODCACHE;
+            const gopath = process.env.GOPATH || path.join(homeDir, 'go');
+            const modCache = gomodcache || path.join(gopath, 'pkg', 'mod');
+            if (fs.existsSync(modCache)) {
+                depMounts.push('-v', `${modCache}:/tmp/gomod:ro`);
+                extraEnv.push('--env', 'GOMODCACHE=/tmp/gomod');
+            }
+            extraEnv.push('--env', 'GOPROXY=off');
+            extraEnv.push('--env', 'GOCACHE=/tmp/gocache');
+            if (fs.existsSync(path.join(wsNorm, 'vendor'))) {
+                extraEnv.push('--env', 'GOFLAGS=-mod=vendor');
+            }
+        } else if (runner === 'java-maven') {
+            const m2Repo = path.join(homeDir, '.m2', 'repository');
+            if (fs.existsSync(m2Repo)) {
+                depMounts.push('-v', `${m2Repo}:/tmp/m2-ro:ro`);
+            }
+        } else if (runner === 'java-gradle') {
+            const gradleCaches = path.join(homeDir, '.gradle', 'caches');
+            if (fs.existsSync(gradleCaches)) {
+                depMounts.push('-v', `${gradleCaches}:/tmp/gradle-ro:ro`);
+                extraEnv.push('--env', 'GRADLE_RO_DEP_CACHE=/tmp/gradle-ro');
+            }
+            extraEnv.push('--env', 'GRADLE_USER_HOME=/tmp/gradle-home');
+        } else if (runner === 'dotnet') {
+            const nugetPkgs = path.join(homeDir, '.nuget', 'packages');
+            if (fs.existsSync(nugetPkgs)) {
+                depMounts.push('-v', `${nugetPkgs}:/tmp/.nuget/packages:ro`);
+            }
+            extraEnv.push('--env', 'DOTNET_CLI_TELEMETRY_OPTOUT=1');
+            extraEnv.push('--env', 'DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1');
+        }
+
+        const timeoutMs = opts.timeoutMs || COMPILED_LANG_TIMEOUT_MS;
+        const placement = buildCompiledLangPlacement(runner, opts.script || '', opts.targetFilePath);
+
+        const proofOutFile = '/tmp/sc_proof_out.txt';
+        extraEnv.push('--env', `SECURECODE_PROOF_OUT=${proofOutFile}`);
+        const catProofOut = `; if [ -f ${proofOutFile} ]; then echo '---SECURECODE_PROOF_FILE---'; cat ${proofOutFile}; fi`;
+
+        let runCmdAdjusted = placement.runCmd;
+        if (runner === 'java-gradle') {
+            const initScript = `allprojects { tasks.withType(Test).configureEach { testLogging { showStandardStreams = true; events 'passed','failed' } } }`;
+            const writeInit = `printf '%s' '${initScript}' > /tmp/sc-init.gradle`;
+            runCmdAdjusted = `${writeInit} && ${placement.runCmd.replace('gradle test', 'gradle test --init-script /tmp/sc-init.gradle')}`;
+        }
+        if (runner === 'dotnet') {
+            runCmdAdjusted = placement.runCmd.replace('dotnet test ScProof --no-restore', 'dotnet test ScProof --no-restore --logger "console;verbosity=detailed"');
+        }
+
+        let placeAndRun: string;
+        if (runner === 'dotnet') {
+            const appCsprojSearch = `APP_CSPROJ=$(find /tmp/ws -maxdepth 3 -name '*.csproj' ! -path '*/ScProof/*' | head -1)`;
+            const genCsproj = `mkdir -p /tmp/ws/ScProof && cat > /tmp/ws/ScProof/ScProof.csproj << 'CSPROJEOF'
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit" Version="*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="*" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="*" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(APP_CSPROJ)' != ''">
+    <ProjectReference Include="$(APP_CSPROJ)" />
+  </ItemGroup>
+</Project>
+CSPROJEOF`;
+            const restoreCmd = 'dotnet restore ScProof --source /tmp/.nuget/packages --ignore-failed-sources';
+            placeAndRun = `cp -a /workspace /tmp/ws && cd /tmp/ws && ${appCsprojSearch} && ${genCsproj} && cat /tmp/sc_test_b64 | base64 -d > /tmp/ws/${placement.testRelPath} && ${restoreCmd} && ${runCmdAdjusted}${catProofOut}`;
+        } else if (runner === 'java-gradle') {
+            const testDir = path.posix.dirname(placement.testRelPath);
+            const mkdirCmd = testDir && testDir !== '.' ? `mkdir -p /tmp/ws/${testDir} && ` : '';
+            placeAndRun = `cp -a /workspace /tmp/ws && cd /tmp/ws && ${mkdirCmd}cat /tmp/sc_test_b64 | base64 -d > /tmp/ws/${placement.testRelPath} && ${runCmdAdjusted}${catProofOut}`;
+        } else {
+            const testDir = path.posix.dirname(placement.testRelPath);
+            const mkdirCmd = testDir && testDir !== '.' ? `mkdir -p /tmp/ws/${testDir} && ` : '';
+            placeAndRun = `cp -a /workspace /tmp/ws && cd /tmp/ws && ${mkdirCmd}cat /tmp/sc_test_b64 | base64 -d > /tmp/ws/${placement.testRelPath} && ${runCmdAdjusted}${catProofOut}`;
+        }
+
+        const b64Script = Buffer.from(opts.script || '').toString('base64');
+
+        const dockerArgs: string[] = [
+            'run', '--rm', '-i',
+            '--network=none',
+            '--cpus=1',
+            '--memory=512m',
+            '--memory-swap=512m',
+            '--pids-limit=128',
+            '--workdir', '/workspace',
+            '--env', 'CI=1',
+            '--env', 'HOME=/tmp',
+            ...extraEnv,
+            '-v', `${wsNorm}:/workspace:ro`,
+            ...depMounts,
+            imageInfo.image,
+            'sh', '-c',
+            `printf '%s' '${b64Script}' > /tmp/sc_test_b64 && ${placeAndRun}`,
+        ];
+
+        const adjustedOpts = { ...opts, timeoutMs };
+        return await runSandboxedProcess('docker', dockerArgs, adjustedOpts, this.name);
     }
 }
 

@@ -248,7 +248,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 relatedFiles,
                 previousErrors: previousErrors.length > 0 ? previousErrors : undefined,
                 projectRuntime: runtimeInfo.runtime,
-                suggestedRunner: runtimeInfo.runner,
+                suggestedRunner: runtimeInfo.suggestedRunner,
                 framework: runtimeInfo.framework,
                 frameworkVersion: runtimeInfo.frameworkVersion,
                 testabilityTier: runtimeInfo.testabilityTier,
@@ -309,6 +309,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                 setupScript: genResp.setupScript || null,
                 timeoutMs: testTimeoutMs,
                 signal: opts.signal,
+                targetFilePath: filePath || undefined,
             },
         );
 
@@ -490,7 +491,7 @@ export async function runVerifyLoop(opts: VerifyLoopOptions): Promise<VerifyLoop
                         genResp.testScript,
                         runner,
                         opts.workspaceRoot,
-                        { setupScript: genResp.setupScript || null, timeoutMs: tracker ? Math.min(30_000, tracker.remainingWallClockMs()) : 30_000, signal: opts.signal },
+                        { setupScript: genResp.setupScript || null, timeoutMs: tracker ? Math.min(30_000, tracker.remainingWallClockMs()) : 30_000, signal: opts.signal, targetFilePath: filePath || undefined },
                     );
                     lastRepOutput = repResult.output;
                     collector.rounds.push({

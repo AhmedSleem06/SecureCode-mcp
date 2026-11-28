@@ -29,6 +29,7 @@ import type { Candidate, CandidateStore } from './candidateStore';
 import { missingGateDimensions, FLOW_LINE_TOLERANCE } from './candidateStore';
 import { uncoveredWithin, type InvestigationState, type LineRange } from './investigationState';
 import type { ScheduleDecision } from './scanScheduler';
+import { hasStructureSupport } from '../project-map/capabilityRegistry';
 
 export type FinishGateMode = 'complete' | 'continue' | 'forced-incomplete';
 
@@ -323,7 +324,7 @@ export interface FinishGateInput {
     candidates: CandidateStore;
     investigation: InvestigationState;
     scheduler: ScheduleDecision;
-    target: { filePath: string; fileContent?: string; segment?: { startLine: number; endLine: number } };
+    target: { filePath: string; fileContent?: string; segment?: { startLine: number; endLine: number }; language?: string };
     landing?: boolean;
     gateMode?: 'checklist' | 'evidence';
     evidenceGate?: EvidenceGateInput;
@@ -635,12 +636,15 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
         const proposedFindings = proposal.findings ?? [];
         const steps = input.transcript ?? [];
         const hasTranscript = input.transcript !== undefined;
+        const targetLang = target.language ?? target.filePath;
+        const noStructure = !hasStructureSupport(targetLang);
 
         for (const candidate of candidates.getBlocking()) {
             const logicClass = isLogicClass(candidate.type);
             const flowRequired = !logicClass && FLOW_REQUIRED_TYPES.has(candidate.type.toLowerCase().replace(/[\s-]+/g, '_'));
+            const treatAsReadOnly = logicClass || (flowRequired && noStructure);
 
-            if (logicClass) {
+            if (treatAsReadOnly) {
                 const { entryDelivered, vulnDelivered } = candidateLinesDelivered(candidate, investigation, target.filePath, input.evidenceGate?.deliveredRanges);
                 const matchedFinding = findMatchingFinding(candidate, proposedFindings);
                 const claimSufficient = candidateClaimHasActorAndEffect(candidate)
@@ -669,9 +673,16 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                         candidates.addEvidence(candidate.id, `guard-control:${candidate.id}`, 'guard', 'control');
                     }
                 }
+
+                if (noStructure && flowRequired) {
+                    const missingBefore = missingGateDimensions(candidate);
+                    if (missingBefore.includes('control') && entryDelivered && vulnDelivered) {
+                        candidates.addEvidence(candidate.id, `no-structure-read-control:${candidate.id}`, 'source', 'control');
+                    }
+                }
             }
 
-            if (flowRequired && !candidate.flowTraced && steps.length > 0) {
+            if (flowRequired && !noStructure && !candidate.flowTraced && steps.length > 0) {
                 if (transcriptHasRuntimeEvidence(candidate, steps)) {
                     candidates.addEvidence(candidate.id, `runtime-test:${candidate.id}`, 'test', 'reachability');
                     candidate.flowTraced = true;
@@ -683,7 +694,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
             const missingDims = missingGateDimensions(candidate);
             const location = candidate.locations.map(l => `${l.filePath}:${l.line}`).join(', ') || target.filePath;
 
-            if (flowRequired && !candidate.flowTraced && missingDims.includes('reachability') && hasTranscript) {
+            if (flowRequired && !noStructure && !candidate.flowTraced && missingDims.includes('reachability') && hasTranscript) {
                 if (!candidate.evidenceRefs.some(r => r.startsWith('coverage-gap:no-flow:'))) {
                     candidates.addEvidence(candidate.id, `coverage-gap:no-flow:${candidate.id}`, 'negative');
                     coverageGaps.push({
@@ -703,7 +714,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
             let blocker: string;
             if (candidate.guardFound) {
                 blocker = `an effective guard was found (${candidate.guardReason}) — show why it does not apply or drop the finding`;
-            } else if (logicClass) {
+            } else if (treatAsReadOnly) {
                 const hints: string[] = [];
                 if (missingDims.includes('reachability')) {
                     hints.push(`read the entry-point and vulnerable lines (${location}) so the read coverage proves reachability`);
@@ -711,7 +722,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                 if (missingDims.includes('threat-model') || missingDims.includes('impact')) {
                     hints.push('state which actor exploits the flaw and what effect it has (e.g. "unauthenticated user sets role to admin") in the candidate claim');
                 }
-                if (missingDims.includes('control')) {
+                if (missingDims.includes('control') && !noStructure) {
                     hints.push(`run check_guard on the vulnerable location to satisfy the control dimension`);
                 }
                 blocker = hints.length > 0
@@ -733,7 +744,7 @@ export function evaluateFinishGate(input: FinishGateInput): FinishGateResult {
                 detail: `This vulnerability candidate at ${location} has status "${candidate.status}" with ${candidate.evidenceRefs.length} evidence reference(s). Missing proof dimensions: ${missingDims.join(', ') || 'none'}. ${blocker[0].toUpperCase()}${blocker.slice(1)}.`,
                 file: candidate.locations[0]?.filePath || target.filePath,
                 requiredEvidence: candidate.requiredEvidence.map(e => `${e.description} (tools: ${(e.requiredTools || []).join(', ')})`),
-                suggestedNextAction: logicClass ? 'read_file' : (candidate.requiredEvidence[0]?.requiredTools || ['trace_flow_cross_file'])[0],
+                suggestedNextAction: treatAsReadOnly ? 'read_file' : (candidate.requiredEvidence[0]?.requiredTools || ['trace_flow_cross_file'])[0],
                 priority: candidate.severity === 'high' || candidate.severity === 'critical' ? 'high' : 'medium',
             });
         }

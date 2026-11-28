@@ -199,7 +199,7 @@ describe('pickImageForRunner', () => {
     });
 
     it('returns null for unknown runner', () => {
-        const r = pickImageForRunner('ruby');
+        const r = pickImageForRunner('cobol');
         expect(r.image).toBeNull();
         expect(r.reason).toContain('No sandbox image');
     });
@@ -252,7 +252,7 @@ describe('runnerInvocation', () => {
     });
 
     it('falls back to node for unknown runner', () => {
-        expect(runnerInvocation('ruby', '/workspace/.securecode/test.rb'))
+        expect(runnerInvocation('cobol', '/workspace/.securecode/test.rb'))
             .toBe('node "/workspace/.securecode/test.rb"');
     });
 });
@@ -277,8 +277,8 @@ describe('fileExtFor', () => {
         expect(fileExtFor('python3')).toBe('.py');
     });
 
-    it('unknown runner â†’ .js fallback', () => {
-        expect(fileExtFor('ruby')).toBe('.js');
+    it('unknown runner → .js fallback', () => {
+        expect(fileExtFor('cobol')).toBe('.js');
     });
 
     it('never emits a .test. infix (standalone scripts must not be discovered by workspace test runners)', () => {

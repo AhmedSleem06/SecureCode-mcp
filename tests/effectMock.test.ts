@@ -15,6 +15,7 @@ describe('createEffectMock', () => {
 
     it('creates node_modules/effect/ directory with package.json and index.js', () => {
         workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-effect-mock-'));
+        fs.writeFileSync(path.join(workspaceRoot, 'package.json'), '{}', 'utf8');
         createEffectMock(workspaceRoot);
 
         const effectDir = path.join(workspaceRoot, 'node_modules', 'effect');
@@ -25,6 +26,7 @@ describe('createEffectMock', () => {
 
     it('writes a valid package.json with mock version', () => {
         workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-effect-mock-'));
+        fs.writeFileSync(path.join(workspaceRoot, 'package.json'), '{}', 'utf8');
         createEffectMock(workspaceRoot);
 
         const pkgPath = path.join(workspaceRoot, 'node_modules', 'effect', 'package.json');
@@ -36,6 +38,7 @@ describe('createEffectMock', () => {
 
     it('writes index.js that exports Effect, Layer, Context, and other modules', () => {
         workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-effect-mock-'));
+        fs.writeFileSync(path.join(workspaceRoot, 'package.json'), '{}', 'utf8');
         createEffectMock(workspaceRoot);
 
         const indexPath = path.join(workspaceRoot, 'node_modules', 'effect', 'index.js');
@@ -49,12 +52,14 @@ describe('createEffectMock', () => {
 
     it('is idempotent — can be called twice without error', () => {
         workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-effect-mock-'));
+        fs.writeFileSync(path.join(workspaceRoot, 'package.json'), '{}', 'utf8');
         createEffectMock(workspaceRoot);
         expect(() => createEffectMock(workspaceRoot)).not.toThrow();
     });
 
     it('the mock index.js contains runnable Effect primitives', () => {
         workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'test-effect-mock-'));
+        fs.writeFileSync(path.join(workspaceRoot, 'package.json'), '{}', 'utf8');
         createEffectMock(workspaceRoot);
 
         const indexPath = path.join(workspaceRoot, 'node_modules', 'effect', 'index.js');
