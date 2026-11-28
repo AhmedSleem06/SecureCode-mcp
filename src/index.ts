@@ -25,7 +25,7 @@ Usage:
 
 Scan options:
   --json                    Output results as JSON (for CI/automation)
-  --depth <fast|deep|agent>  Scan depth (default: agent). "fast" = no AI, "deep" = full pipeline
+  --mode <standard|deep>    Scan mode (default: standard). "deep" is beta: threat checklist + attack tests
   --workspace <path>        Workspace root (default: current directory)
 
 Environment:
@@ -235,14 +235,25 @@ function cmdLogout(): void {
 async function cmdScan(args: string[]): Promise<void> {
     let filePath = '';
     let jsonOutput = false;
-    let depth = 'agent';
+    let mode: 'standard' | 'deep' = 'standard';
     let workspace = process.cwd();
 
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '--json') {
             jsonOutput = true;
+        } else if (args[i] === '--mode' && i + 1 < args.length) {
+            const m = args[++i];
+            if (m !== 'standard' && m !== 'deep') {
+                console.error(`Error: --mode must be "standard" or "deep" (got "${m}").`);
+                process.exit(2);
+            }
+            mode = m;
         } else if (args[i] === '--depth' && i + 1 < args.length) {
-            depth = args[++i];
+            const d = args[++i];
+            if (d !== 'agent') {
+                console.error(`Error: --depth ${d} was removed in 0.13 (the agent scan is the only scanner). Use --mode standard or --mode deep.`);
+                process.exit(2);
+            }
         } else if (args[i] === '--workspace' && i + 1 < args.length) {
             workspace = path.resolve(args[++i]);
         } else if (!args[i].startsWith('-')) {
@@ -251,7 +262,7 @@ async function cmdScan(args: string[]): Promise<void> {
     }
 
     if (!filePath) {
-        console.error('Usage: securecode-mcp scan <filePath> [--json] [--depth <fast|deep|agent>]');
+        console.error('Usage: securecode-mcp scan <filePath> [--json] [--mode <standard|deep>]');
         process.exit(1);
     }
 
@@ -282,57 +293,40 @@ async function cmdScan(args: string[]): Promise<void> {
     if (!jsonOutput) {
         console.log(`Scanning: ${filePath}`);
         console.log(`Language: ${fileResult.language}`);
-        console.log(`Depth: ${depth}`);
+        console.log(`Mode: ${mode}`);
         console.log('');
     }
 
     try {
-        if (depth === 'agent') {
-            const { toolAgentScan } = require('./tools/agentScan');
-            const result = await toolAgentScan(ctx, {
-                filePath,
-                _noCache: true,
-                _progress: (_p: number, _t: number, msg: string) => {
-                    if (!jsonOutput) process.stderr.write(`  ${msg}\r`);
-                },
-            });
+        const { toolAgentScan } = require('./tools/agentScan');
+        const result = await toolAgentScan(ctx, {
+            filePath,
+            mode,
+            _noCache: true,
+            _progress: (_p: number, _t: number, msg: string) => {
+                if (!jsonOutput) process.stderr.write(`  ${msg}\r`);
+            },
+        });
 
-            if (jsonOutput) {
-                console.log(JSON.stringify(result, null, 2));
-            } else {
-                const findings = (result as any).agentFindings || [];
-                console.log(`Status: ${(result as any).status}`);
-                console.log(`Summary: ${(result as any).summary || 'Scan complete'}`);
-                console.log(`Findings: ${findings.length}`);
-                console.log(`Steps: ${(result as any).stepsUsed || 0}`);
-                console.log(`Cost: $${((result as any).costSpentUsd || 0).toFixed(4)}`);
-                console.log('');
-                findings.forEach((f: any, i: number) => {
-                    const proven = f.proven ? ` [${f.proven}]` : '';
-                    console.log(`  [${i + 1}] ${f.type} L${f.line} (${f.severity}, confidence ${f.confidence})${proven}`);
-                    console.log(`      ${f.evidence?.slice(0, 100)}...`);
-                    if (f.proven === 'PROVEN') console.log(`      PROVEN: ${f.provenReason?.slice(0, 100)}`);
-                    console.log('');
-                });
-            }
-            process.exit(findingsCount(result));
+        if (jsonOutput) {
+            console.log(JSON.stringify(result, null, 2));
         } else {
-            const { toolScan } = require('./tools/scan');
-            const result = await toolScan(ctx, {
-                filePath,
-                scanDepth: depth === 'fast' ? 'fast' : 'deep',
+            const findings = (result as any).agentFindings || [];
+            console.log(`Status: ${(result as any).status}`);
+            console.log(`Summary: ${(result as any).summary || 'Scan complete'}`);
+            console.log(`Findings: ${findings.length}`);
+            console.log(`Steps: ${(result as any).stepsUsed || 0}`);
+            console.log(`Cost: $${((result as any).costSpentUsd || 0).toFixed(4)}`);
+            console.log('');
+            findings.forEach((f: any, i: number) => {
+                const proven = f.proven ? ` [${f.proven}]` : '';
+                console.log(`  [${i + 1}] ${f.type} L${f.line} (${f.severity}, confidence ${f.confidence})${proven}`);
+                console.log(`      ${f.evidence?.slice(0, 100)}...`);
+                if (f.proven === 'PROVEN') console.log(`      PROVEN: ${f.provenReason?.slice(0, 100)}`);
+                console.log('');
             });
-            const scanFindings = (result as any).findings || [];
-            if (jsonOutput) {
-                console.log(JSON.stringify(result, null, 2));
-            } else {
-                console.log(`Findings: ${scanFindings.length}`);
-                scanFindings.forEach((f: any, i: number) => {
-                    console.log(`  [${i + 1}] ${f.type} L${f.line} (${f.severity}) — ${f.message?.slice(0, 80)}`);
-                });
-            }
-            process.exit(scanFindings.length > 0 ? 1 : 0);
         }
+        process.exit(findingsCount(result));
     } catch (e: any) {
         console.error(`Error: ${e.message}`);
         process.exit(2);
